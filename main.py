@@ -14,6 +14,7 @@ class CityLocation(BaseModel):
     city: str
     country: str
 
+# 語音輸入功能測試
 def Voice_To_Text(duration=5):  
     r = sr.Recognizer() 
     with sr.Microphone() as source: 
@@ -31,6 +32,7 @@ def Voice_To_Text(duration=5):
 
 def main() -> None:
     load_dotenv()
+    # 語音輸入功能測試於主程式
     print(Voice_To_Text())
     ollama_model = OpenAIModel(
         model_name='qwen3:14b', provider=OpenAIProvider(base_url=f'{os.getenv("OLLAMA_BASE_URL")}/v1')
