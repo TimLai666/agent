@@ -36,8 +36,11 @@ def add_basic_tools(agent: Agent) -> None:
     @agent.tool_plain
     def get_weekday(date_str: str) -> str:
         """Get the weekday of a given date in English."""
+        # 去除括號及其內容（如時區資訊），只保留日期部分
+        if '(' in date_str:
+            date_str = date_str.split('(')[0].strip()
         try:
-            date_obj = datetime.strptime(date_str, "%Y-%m-%d")
+            date_obj: datetime = datetime.strptime(date_str, "%Y-%m-%d")
             return date_obj.strftime("%A")  # e.g., "Monday"
         except ValueError:
             return "Invalid date format. Please use YYYY-MM-DD."
