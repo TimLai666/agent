@@ -1,5 +1,8 @@
+import random
+from pydantic_ai import RunContext
 
-def add_tools(agent) -> None:
+
+def add_basic_tools(agent) -> None:
     """Add tools to the agent."""
 
     @agent.tool_plain
