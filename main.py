@@ -39,7 +39,9 @@ def main() -> None:
         print(result.output)
         print('\n', result.usage(), end='\n\n')
         # > Usage(requests=1, request_tokens=57, response_tokens=8, total_tokens=65)
-        chat_history = result.all_messages()
+
+        # 只保留最近100則聊天記錄
+        chat_history = result.all_messages()[-100:]
 
 
 if __name__ == "__main__":
