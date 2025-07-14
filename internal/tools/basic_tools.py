@@ -1,6 +1,7 @@
 from pydantic_ai import Agent
 from datetime import datetime
 import random
+import time
 
 
 def add_basic_tools(agent: Agent) -> None:
@@ -22,3 +23,14 @@ def add_basic_tools(agent: Agent) -> None:
         if not items:
             return "No items provided."
         return random.choice(items)
+
+    @agent.tool_plain
+    def timeout(seconds: int) -> str:
+        """Wait for a specified number of seconds."""
+        if seconds < 0:
+            return "Cannot wait for negative time."
+        print(f"Start waiting for {seconds} seconds...")
+        time.sleep(seconds)
+        print("Wait completed.")
+        # todo: 可以接個好看ui或鈴聲之類
+        return f"Time's up after {seconds} seconds."
