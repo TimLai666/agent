@@ -18,7 +18,7 @@ def main() -> None:
     load_dotenv()
 
     ollama_model = OpenAIModel(
-        model_name='llama3.2', provider=OpenAIProvider(base_url=f'{os.getenv("OLLAMA_BASE_URL")}/v1')
+        model_name='qwen3:14b', provider=OpenAIProvider(base_url=f'{os.getenv("OLLAMA_BASE_URL")}/v1')
     )
     agent = Agent(ollama_model, output_type=CityLocation)
 
