@@ -32,7 +32,7 @@ def main() -> None:
 
     add_all_tools(agent)
 
-    chat_history: list[ModelRequest | ModelResponse] = []
+    chat_history: list[ModelRequest | ModelResponse] | None = None
     while user_input := input("請輸入文字: "):
         result: AgentRunResult[str] = agent.run_sync(
             user_prompt=user_input, message_history=chat_history)
