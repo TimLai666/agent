@@ -1,7 +1,10 @@
+from zoneinfo import ZoneInfo
 from pydantic_ai import Agent
-from datetime import datetime
+from datetime import datetime, timedelta
+from typing import Literal
 import random
 import time
+import tzlocal
 
 
 def add_basic_tools(agent: Agent) -> None:
@@ -9,8 +12,26 @@ def add_basic_tools(agent: Agent) -> None:
 
     @agent.tool_plain
     def get_now() -> str:
-        """Get the current time."""
-        return datetime.now().isoformat()
+        """Get the current time with timezone info (local time, with UTC offset)."""
+        now: datetime | None = None
+        try:
+            local_tz: ZoneInfo = tzlocal.get_localzone()
+            now = datetime.now(local_tz)
+            # 取得 UTC offset
+            offset: timedelta | None = now.utcoffset()
+            offset_str: str = ""
+            if offset is not None:
+                total_minutes: float = offset.total_seconds() / 60
+                hours = int(total_minutes // 60)
+                minutes = int(abs(total_minutes) % 60)
+                sign: Literal['+'] | Literal['-'] = '+' if hours >= 0 else '-'
+                offset_str = f"UTC{sign}{abs(hours):02d}:{minutes:02d}"
+            else:
+                offset_str = "UTC+00:00"
+            return f"{now.isoformat()} ({local_tz}, {offset_str})"
+        except ImportError:
+            now = datetime.now()
+            return f"{now.isoformat()} (timezone info unavailable)"
 
     @agent.tool_plain
     def get_weekday(date_str: str) -> str:
