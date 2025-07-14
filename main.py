@@ -13,8 +13,8 @@ def main() -> None:
     load_dotenv()
 
     ollama_model: OpenAIModel = OpenAIModel(
-        model_name='qwen3:14b',
-        provider=OpenAIProvider(base_url=f'{os.getenv("OLLAMA_BASE_URL")}/v1')
+        model_name="qwen3:14b",
+        provider=OpenAIProvider(base_url=f"{os.getenv("OLLAMA_BASE_URL")}/v1")
     )
     agent: Agent[None, str] = Agent(
         model=ollama_model,
@@ -33,11 +33,11 @@ def main() -> None:
     add_all_tools(agent)
 
     chat_history: list[ModelRequest | ModelResponse] = []
-    while user_input := input('請輸入文字: '):
+    while user_input := input("請輸入文字: "):
         result: AgentRunResult[str] = agent.run_sync(
             user_prompt=user_input, message_history=chat_history)
         print(result.output)
-        print('\n', result.usage(), end='\n\n')
+        print('\n', result.usage(), end="\n\n")
         # > Usage(requests=1, request_tokens=57, response_tokens=8, total_tokens=65)
 
         # 只保留最近30則聊天記錄
