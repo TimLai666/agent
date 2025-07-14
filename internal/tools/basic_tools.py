@@ -13,6 +13,15 @@ def add_basic_tools(agent: Agent) -> None:
         return datetime.now().isoformat()
 
     @agent.tool_plain
+    def get_weekday(date_str: str) -> str:
+        """Get the weekday of a given date in English."""
+        try:
+            date_obj = datetime.strptime(date_str, "%Y-%m-%d")
+            return date_obj.strftime("%A")  # e.g., "Monday"
+        except ValueError:
+            return "Invalid date format. Please use YYYY-MM-DD."
+
+    @agent.tool_plain
     def roll_dice() -> str:
         """Roll a six-sided die and return the result."""
         return str(random.randint(1, 6))

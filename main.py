@@ -22,7 +22,7 @@ def main() -> None:
     result: AgentRunResult[str] = agent.run_sync(user_input)
 
     print(result.output)
-    print(result.usage())
+    print('\n', result.usage())
     # > Usage(requests=1, request_tokens=57, response_tokens=8, total_tokens=65)
 
 
