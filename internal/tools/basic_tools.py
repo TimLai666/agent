@@ -15,3 +15,10 @@ def add_basic_tools(agent: Agent) -> None:
     def roll_dice() -> str:
         """Roll a six-sided die and return the result."""
         return str(random.randint(1, 6))
+
+    @agent.tool_plain
+    def random_pick(items: list[str]) -> str:
+        """Randomly pick an item from the provided list."""
+        if not items:
+            return "No items provided."
+        return random.choice(items)
