@@ -1,9 +1,9 @@
-from pydantic_ai import RunContext
+from pydantic_ai import Agent
 from datetime import datetime
 import random
 
 
-def add_basic_tools(agent) -> None:
+def add_basic_tools(agent: Agent) -> None:
     """Add tools to the agent."""
 
     @agent.tool_plain

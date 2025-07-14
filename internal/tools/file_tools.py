@@ -1,7 +1,8 @@
 import os
+from pydantic_ai import Agent
 
 
-def add_file_tools(agent) -> None:
+def add_file_tools(agent: Agent) -> None:
     """Add file-related tools to the agent."""
 
     @agent.tool_plain
