@@ -8,7 +8,7 @@ import os
 
 from internal.prompts import SYSTEM_PROMPT
 from internal.tools.tools import add_all_tools
-from internal.tools.voice_manager import VoiceManager
+from internal.services.voice_manager import VoiceManager
 
 
 def main() -> None:
