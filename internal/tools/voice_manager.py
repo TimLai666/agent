@@ -1,6 +1,8 @@
 import speech_recognition as sr
 
 # 語音輸入功能測試
+
+
 class VoiceManager:
     def __init__(self, pause_threshold=2):
         self.recognizer = sr.Recognizer()

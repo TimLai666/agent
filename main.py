@@ -11,15 +11,13 @@ from internal.tools.tools import add_all_tools
 from internal.tools.voice_manager import VoiceManager
 
 
-
-
-
 def main() -> None:
     load_dotenv()
 
     # 語音輸入功能測試於主程式
     voice_manager = VoiceManager()
     recognized_text = voice_manager.recognize_speech()
+
     ollama_model = OpenAIModel(
         model_name='qwen3:14b', provider=OpenAIProvider(base_url=f'{os.getenv("OLLAMA_BASE_URL")}/v1')
     )
@@ -27,9 +25,6 @@ def main() -> None:
         model=ollama_model,
         system_prompt=SYSTEM_PROMPT,
     )
-
-    
-   
 
     add_all_tools(agent)
 
