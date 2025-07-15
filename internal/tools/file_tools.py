@@ -13,6 +13,16 @@ def add_file_tools(agent: Agent) -> None:
         return file_tools_manager.get_current_directory()
 
     @agent.tool_plain
+    def get_home_directory() -> str:
+        """Get the home directory."""
+        return file_tools_manager.get_home_directory()
+
+    @agent.tool_plain
+    def get_desktop_directory() -> str:
+        """Get the desktop directory."""
+        return file_tools_manager.get_desktop_directory()
+
+    @agent.tool_plain
     def list_files_in_directory(dir: str) -> str:
         """List all files in the specified directory."""
         return file_tools_manager.list_files_in_directory(dir)
@@ -39,9 +49,16 @@ class FileTools:
     def __init__(self) -> None:
         self.base_path: str = os.getcwd()
         self.home_path: str = os.path.expanduser("~")
+        self.desktop_path: str = os.path.join(self.home_path, "Desktop")
 
     def get_current_directory(self) -> str:
         return self.base_path
+
+    def get_home_directory(self) -> str:
+        return self.home_path
+
+    def get_desktop_directory(self) -> str:
+        return self.desktop_path
 
     def list_files_in_directory(self, dir: str) -> str:
         try:
