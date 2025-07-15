@@ -5,8 +5,9 @@ from pydantic_ai.models.openai import OpenAIModel
 from pydantic import BaseModel
 from dotenv import load_dotenv
 import os
-import speech_recognition as sr
+
 from internal.tools.tools import add_all_tools
+from internal.tools.voice_manager import VoiceManager
 
 
 
@@ -14,26 +15,14 @@ class CityLocation(BaseModel):
     city: str
     country: str
 
-# 語音輸入功能測試
-def Voice_To_Text(duration=5):  
-    r = sr.Recognizer() 
-    with sr.Microphone() as source: 
-        print("請開始說話:") 
-        r.adjust_for_ambient_noise(source) 
-        audio = r.listen(source, phrase_time_limit=duration) 
-    try: 
-        Text = r.recognize_google(audio, language="zh-TW") 
-    except sr.UnknownValueError: 
-        Text = "無法翻譯" 
-    except sr.RequestError as e: 
-        Text = "無法翻譯{0}".format(e) 
-    return Text 
+
 
 
 def main() -> None:
     load_dotenv()
     # 語音輸入功能測試於主程式
-    print(Voice_To_Text())
+    voice_manager = VoiceManager()
+    recognized_text = voice_manager.recognize_speech()
     ollama_model = OpenAIModel(
         model_name='qwen3:14b', provider=OpenAIProvider(base_url=f'{os.getenv("OLLAMA_BASE_URL")}/v1')
     )
@@ -41,7 +30,7 @@ def main() -> None:
 
     add_all_tools(agent)
 
-    result = agent.run_sync('Where were the olympics held in 2012?')
+    result = agent.run_sync(recognized_text)
     print(result.output)
     # > city='London' country='United Kingdom'
     print(result.usage())
