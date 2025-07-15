@@ -35,6 +35,16 @@ def add_file_tools(agent: Agent) -> None:
         return file_tools_manager.read_file(file_path)
 
     @agent.tool_plain
+    def modify_existing_file(file_path: str, content: str) -> str:
+        """Modify an existing file with new content."""
+        return file_tools_manager.modify_existing_file(file_path, content)
+
+    @agent.tool_plain
+    def rename_file_or_directory(path: str, new_name: str) -> str:
+        """Rename a file or directory. new_name should not include the path."""
+        return file_tools_manager.rename_file_or_directory(path, new_name)
+
+    @agent.tool_plain
     def make_new_directory(dir: str) -> str:
         """Create a new empty directory."""
         return file_tools_manager.make_new_directory(dir)
@@ -77,6 +87,40 @@ class FileTools:
                 return file.read()
         except FileNotFoundError:
             return f"File '{file_path}' not found."
+        except Exception as e:
+            return str(e)
+
+    def modify_existing_file(self, file_path: str, content: str) -> str:
+        try:
+            if not confirm(
+                message=f"Agent wants to modify file '{file_path}', allow?",
+                default_choice='Y'
+            ):
+                raise PermissionError("File modification cancelled by user.")
+            if not os.path.exists(file_path):
+                raise FileNotFoundError(f"File '{file_path}' does not exist.")
+            with open(file_path, 'w', encoding='utf-8') as file:
+                file.write(content)
+            return f"File '{file_path}' modified successfully."
+        except FileNotFoundError:
+            return f"File '{file_path}' not found."
+        except Exception as e:
+            return str(e)
+
+    def rename_file_or_directory(self, path: str, new_name: str) -> str:
+        try:
+            if not confirm(
+                message=f"Agent wants to rename '{path}' to '{new_name}', allow?",
+                default_choice='Y'
+            ):
+                raise PermissionError("File renaming cancelled by user.")
+            if not os.path.exists(path):
+                raise FileNotFoundError(f"File '{path}' does not exist.")
+            new_file_path = os.path.join(os.path.dirname(path), new_name)
+            os.rename(path, new_file_path)
+            return f"File renamed to '{new_file_path}' successfully."
+        except FileNotFoundError:
+            return f"File '{path}' not found."
         except Exception as e:
             return str(e)
 
