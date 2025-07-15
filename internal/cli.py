@@ -22,12 +22,13 @@ class TeeStdout(io.StringIO):
         super().flush()
 
 
-def show_confirmation(message: str, default_choice: str = '') -> bool:
+def confirm(message: str, default_choice: str = '') -> bool:
     """
     Display a confirmation message to the user.
 
     Args:
         message (str): The confirmation message to display.
+        default_choice (str): The default choice if the user just presses Enter.
     """
     default_choice = default_choice.strip().upper()
     if default_choice not in ['Y', 'N', '']:

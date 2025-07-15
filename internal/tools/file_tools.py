@@ -1,6 +1,8 @@
 import os
 from pydantic_ai import Agent
 
+from internal.cli import confirm
+
 
 def add_file_tools(agent: Agent) -> None:
     """Add file-related tools to the agent."""
@@ -80,6 +82,11 @@ class FileTools:
 
     def make_new_directory(self, dir: str) -> str:
         try:
+            if not confirm(
+                message=f"Agent wants to create a new directory '{dir}', allow?",
+                default_choice='Y'
+            ):
+                raise PermissionError("Directory creation cancelled by user.")
             if os.path.exists(dir):
                 raise FileExistsError(f"Directory '{dir}' already exists.")
             os.makedirs(dir, exist_ok=True)
@@ -89,6 +96,11 @@ class FileTools:
 
     def create_new_file(self, file_path: str, content: str) -> str:
         try:
+            if not confirm(
+                message=f"Agent wants to create a new file at '{file_path}', allow?",
+                default_choice='Y'
+            ):
+                raise PermissionError("File creation cancelled by user.")
             if os.path.exists(file_path):
                 raise FileExistsError(f"File '{file_path}' already exists.")
             with open(file_path, 'w', encoding='utf-8') as file:

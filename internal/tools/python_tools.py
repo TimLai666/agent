@@ -4,7 +4,7 @@ import sys
 from pydantic_ai import Agent
 from typing import TextIO, Any
 
-from internal.cli import TeeStdout, show_confirmation
+from internal.cli import TeeStdout, confirm
 
 
 def add_python_tools(agent: Agent) -> None:
@@ -19,7 +19,7 @@ def add_python_tools(agent: Agent) -> None:
     def run_python_script(script: str, description: str) -> str:
         """Run a Python script and return its output"""
         try:
-            if not show_confirmation(
+            if not confirm(
                 message=f"Agent wants to run Python script({description}), allow?",
                 default_choice='Y'
             ):
