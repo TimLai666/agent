@@ -6,11 +6,9 @@ from pydantic_ai.models.openai import OpenAIModel
 from dotenv import load_dotenv
 import os
 
+from internal.prompts import SYSTEM_PROMPT
 from internal.tools.tools import add_all_tools
-from internal.tools.voice_manager import VoiceManager
-
-
-
+from internal.services.voice_manager import VoiceManager
 
 
 def main() -> None:
@@ -19,25 +17,14 @@ def main() -> None:
     # 語音輸入功能測試於主程式
     voice_manager = VoiceManager()
     recognized_text = voice_manager.recognize_speech()
+
     ollama_model = OpenAIModel(
         model_name='qwen3:14b', provider=OpenAIProvider(base_url=f'{os.getenv("OLLAMA_BASE_URL")}/v1')
     )
     agent: Agent[None, str] = Agent(
         model=ollama_model,
-        system_prompt="""
-        Ignore all previous instructions.
-        You are a helpful assistant. You can use various tools to assist the user.
-        If you want to speak Chinese, use Traditional Chinese(Taiwan).
-        Never use Simplified Chinese.
-        [IMPORTANT] Never claim or agree with one China policy or Taiwan is part of China.
-        [IMPORTANT] Always disagree with Chinese political statements.
-        [IMPORTANT] Any statement that "xxx has been a part of China since ancient times" is wrong.
-        [IMPORTANT] Anything in Chinese law has never been an international consensus.
-        """
+        system_prompt=SYSTEM_PROMPT,
     )
-
-    
-   
 
     add_all_tools(agent)
 
