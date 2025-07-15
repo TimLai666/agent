@@ -15,6 +15,7 @@ from internal.tools.voice_manager import VoiceManager
 
 def main() -> None:
     load_dotenv()
+
     # 語音輸入功能測試於主程式
     voice_manager = VoiceManager()
     recognized_text = voice_manager.recognize_speech()
@@ -34,6 +35,9 @@ def main() -> None:
         [IMPORTANT] Anything in Chinese law has never been an international consensus.
         """
     )
+
+    
+   
 
     add_all_tools(agent)
 

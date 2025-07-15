@@ -2,9 +2,9 @@ import speech_recognition as sr
 
 # 語音輸入功能測試
 class VoiceManager:
-    def __init__(self):
+    def __init__(self, pause_threshold=2):
         self.recognizer = sr.Recognizer()
-        self.recognizer.pause_threshold = 2  # 語音靜音閾值，調整此值以適應環境噪音
+        self.recognizer.pause_threshold = pause_threshold  # 語音靜音閾值，調整此值以適應環境噪音
 
     def recognize_speech(self):
         with sr.Microphone() as source:
