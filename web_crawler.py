@@ -44,11 +44,11 @@ def google_search(search_string: str = 'python') -> list[Any]:
                     pass
                 # time.sleep(random.uniform(0.1, 0.4))
             ActionChains(driver).move_to_element(search).click().perform()
-            time.sleep(random.uniform(0.8, 1.5))
+            # time.sleep(random.uniform(0.8, 1.5))
             for char in search_string:
                 search.send_keys(char)
                 # time.sleep(random.uniform(0.1, 0.3))
-            time.sleep(random.uniform(0.8, 1.5))
+            # time.sleep(random.uniform(0.8, 1.5))
             search.send_keys(Keys.ENTER)
             # time.sleep(random.uniform(2, 4))
 
