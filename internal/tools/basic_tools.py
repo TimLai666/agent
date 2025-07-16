@@ -8,7 +8,7 @@ import tzlocal
 
 
 def add_basic_tools(agent: Agent) -> None:
-    """Add tools to the agent."""
+    """Add basic tools to the agent."""
 
     @agent.tool_plain
     def get_now() -> str:

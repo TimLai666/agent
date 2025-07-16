@@ -16,12 +16,14 @@ class VoiceManager:
             self.recognizer.adjust_for_ambient_noise(source)
             audio: sr.AudioData | Generator[AudioData,
                                             Any, None] = self.recognizer.listen(source)
-        text: str = ""
+        text: str | None = None
         try:
             text = self.recognizer.recognize_google(
                 audio, language="zh-TW")
         except sr.UnknownValueError:
-            text = "無法翻譯"
+            text = None
+            print("無法識別語音，請再試一次。")
         except sr.RequestError as e:
-            text = f"無法翻譯: {e}"
+            text = None
+            print(f"語音識別服務出錯: {e}")
         return text

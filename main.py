@@ -16,8 +16,8 @@ def main() -> None:
 
     # 語音輸入功能測試於主程式
     voice_manager = VoiceManager()
-    recognized_text = voice_manager.recognize_speech()
-    print(recognized_text)
+    # recognized_text = voice_manager.recognize_speech()
+    # print(recognized_text)
 
     ollama_model = OpenAIModel(
         model_name='qwen3:14b', provider=OpenAIProvider(base_url=f'{os.getenv("OLLAMA_BASE_URL")}/v1')
