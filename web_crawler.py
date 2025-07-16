@@ -24,7 +24,7 @@ def google_search(search_string: str = 'python') -> list[Any]:
         driver.execute_script(
             "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
         driver.get('https://www.google.com/')
-        time.sleep(random.uniform(2, 4))
+        # time.sleep(random.uniform(2, 4))
         # print(driver.title)
         # html = driver.page_source
 
@@ -42,15 +42,15 @@ def google_search(search_string: str = 'python') -> list[Any]:
                         body, x, y).perform()
                 except Exception:
                     pass
-                time.sleep(random.uniform(0.1, 0.4))
+                # time.sleep(random.uniform(0.1, 0.4))
             ActionChains(driver).move_to_element(search).click().perform()
             time.sleep(random.uniform(0.8, 1.5))
             for char in search_string:
                 search.send_keys(char)
-                time.sleep(random.uniform(0.1, 0.3))
+                # time.sleep(random.uniform(0.1, 0.3))
             time.sleep(random.uniform(0.8, 1.5))
             search.send_keys(Keys.ENTER)
-            time.sleep(random.uniform(2, 4))
+            # time.sleep(random.uniform(2, 4))
 
             for page in range(2):
                 items = driver.find_elements(By.CLASS_NAME, "LC20lb")
@@ -71,21 +71,16 @@ def google_search(search_string: str = 'python') -> list[Any]:
                             body, x, y).perform()
                     except Exception:
                         pass
-                    time.sleep(random.uniform(0.1, 0.4))
+                    # time.sleep(random.uniform(0.1, 0.4))
                 try:
                     next_btn = driver.find_element(By.ID, 'pnnext')
                     ActionChains(driver).move_to_element(
                         next_btn).click().perform()
-                    time.sleep(random.uniform(2, 4))
+                    # time.sleep(random.uniform(2, 4))
                 except NoSuchElementException:
                     break
         except Exception:
             pass
-        finally:
-            try:
-                driver.quit()
-            except Exception:
-                pass
     except Exception:
         return []
     return results
@@ -93,3 +88,4 @@ def google_search(search_string: str = 'python') -> list[Any]:
 
 # 可直接 import google_search 使用
 print(google_search('python'))  # Example usage, can be removed later
+print(google_search('selenium'))
