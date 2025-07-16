@@ -14,11 +14,11 @@ def add_interactive_tools(agent: Agent) -> None:
         Open a web page in the default web browser for the user.
         You won't see the output.
         """
-        ok: bool = False
+        opened_successful: bool = False
         try:
-            ok = webbrowser.open(url)
+            opened_successful = webbrowser.open(url)
             time.sleep(1)  # Give the browser time to open
-            if not ok:
+            if not opened_successful:
                 raise RuntimeError("Failed to open the web page.")
         except Exception as e:
             return f"Error opening web page: {str(e)}"
@@ -30,14 +30,14 @@ def add_interactive_tools(agent: Agent) -> None:
         Open a web page with the provided HTML content in the default web browser.
         You won't see the output.
         """
-        ok: bool = False
+        opened_successful: bool = False
         try:
             with tempfile.NamedTemporaryFile('w', delete=False, suffix='.html', encoding='utf-8') as f:
                 f.write(html_str)
-                ok = webbrowser.open(f.name)
+                opened_successful = webbrowser.open(f.name)
             time.sleep(1)  # Give the browser time to open
             os.remove(f.name)  # Clean up the temporary file after opening it
-            if not ok:
+            if not opened_successful:
                 raise RuntimeError("Failed to open the web page.")
         except Exception as e:
             return f"Error opening web page: {str(e)}"
@@ -52,9 +52,10 @@ def add_interactive_tools(agent: Agent) -> None:
         if not os.path.isfile(file_path):
             return f"File not found: {file_path}"
         try:
-            ok: bool = webbrowser.open(f'file://{os.path.abspath(file_path)}')
+            opened_successful: bool = webbrowser.open(
+                f'file://{os.path.abspath(file_path)}')
             time.sleep(1)  # Give the browser time to open
-            if not ok:
+            if not opened_successful:
                 raise RuntimeError("Failed to open the web page.")
         except Exception as e:
             return f"Error opening web page: {str(e)}"
