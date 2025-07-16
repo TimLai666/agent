@@ -1,4 +1,5 @@
 import random
+import os
 import undetected_chromedriver as uc
 from typing import Any
 from selenium.webdriver.support import expected_conditions as EC
@@ -29,6 +30,7 @@ def add_website_tools(agent: Agent) -> None:
     def browse_website(url: str) -> str:
         """
         Open a specified website and return the cleaned main text content.
+        Use this tool to go into a web page and read the content.
         """
         from bs4 import BeautifulSoup
 
@@ -59,6 +61,22 @@ def add_website_tools(agent: Agent) -> None:
 
 class BaseWebCrawler:
     def __init__(self, lang="zh-TW", headless=False):
+        # 自動清理 undetected_chromedriver 目標檔案，避免 FileExistsError
+        try:
+            user_dir = os.path.expanduser("~")
+            base_dir = os.path.join(
+                user_dir, "appdata", "roaming", "undetected_chromedriver")
+            exe1 = os.path.join(base_dir, "undetected_chromedriver.exe")
+            exe2 = os.path.join(base_dir, "undetected",
+                                "chromedriver-win32", "chromedriver.exe")
+            for f in [exe1, exe2]:
+                if os.path.exists(f):
+                    try:
+                        os.remove(f)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
         options = uc.ChromeOptions()
         options.add_argument(f"--lang={lang}")
         options.add_argument("--disable-blink-features=AutomationControlled")
@@ -124,34 +142,3 @@ class GoogleCrawler(BaseWebCrawler):
             except NoSuchElementException:
                 break
         return results
-
-
-def browse_website(url: str) -> str:
-    """
-    Open a specified website and return the cleaned main text content.
-    """
-    from bs4 import BeautifulSoup
-
-    html = ""
-    with BaseWebCrawler() as crawler:
-        try:
-            crawler.driver.get(url)
-            body = crawler.driver.find_element(By.TAG_NAME, 'body')
-            crawler.random_mouse_move(body, times=random.randint(3, 8))
-            WebDriverWait(crawler.driver, 10).until(
-                lambda d: d.execute_script(
-                    'return document.readyState') == 'complete'
-            )
-            html = crawler.driver.page_source
-        except Exception:
-            pass
-    # 用 BeautifulSoup 清理成 AI 容易理解的格式
-    soup = BeautifulSoup(html, "html.parser")
-    # 只取主要文字內容
-    for script in soup(["script", "style", "noscript"]):
-        script.decompose()
-    text = soup.get_text(separator='\n', strip=True)
-    # 移除多餘空行
-    lines = [line.strip() for line in text.splitlines() if line.strip()]
-    cleaned_text = '\n'.join(lines)
-    return cleaned_text
