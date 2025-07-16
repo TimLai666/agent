@@ -15,7 +15,10 @@ def add_website_tools(agent: Agent) -> None:
 
     @agent.tool_plain
     def google_search(search_string: str) -> list[Any]:
-        """Search Google and return a list of results."""
+        """
+        Search Google and return a list of results.
+        Use this tool for searching the web.
+        """
         crawler = GoogleCrawler()
         try:
             return crawler.search(search_string)
@@ -26,6 +29,7 @@ def add_website_tools(agent: Agent) -> None:
     def browse_website(url: str) -> str:
         """
         Open a specified website and return the HTML content of the website.
+        Use this tool to go into a website and read the content.
         """
 
         html = ""
