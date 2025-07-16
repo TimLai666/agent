@@ -27,6 +27,15 @@ class BaseWebCrawler:
         self.driver.execute_script(
             "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
 
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        try:
+            self.close()
+        except Exception:
+            pass
+
     def random_mouse_move(self, body, times=5):
         win_rect = self.driver.get_window_rect()
         win_width = win_rect['width']
@@ -84,22 +93,17 @@ def browser_website(url: str) -> str:
     開啟指定網站並隨機移動滑鼠，回傳該網站 HTML 內容。
     """
 
-    crawler = BaseWebCrawler()
     html = ""
-    try:
-        crawler.driver.get(url)
-        body = crawler.driver.find_element(By.TAG_NAME, 'body')
-        crawler.random_mouse_move(body, times=random.randint(3, 8))
-        WebDriverWait(crawler.driver, 10).until(
-            lambda d: d.execute_script(
-                'return document.readyState') == 'complete'
-        )
-        html = crawler.driver.page_source
-    except Exception:
-        pass
-    finally:
+    with BaseWebCrawler() as crawler:
         try:
-            crawler.close()
+            crawler.driver.get(url)
+            body = crawler.driver.find_element(By.TAG_NAME, 'body')
+            crawler.random_mouse_move(body, times=random.randint(3, 8))
+            WebDriverWait(crawler.driver, 10).until(
+                lambda d: d.execute_script(
+                    'return document.readyState') == 'complete'
+            )
+            html = crawler.driver.page_source
         except Exception:
             pass
     return html
@@ -107,5 +111,6 @@ def browser_website(url: str) -> str:
 
 # 可直接 import google_search 使用
 print(google_search('python'))  # Example usage, can be removed later
-print(google_search('selenium'))
+
 print(browser_website('https://www.wikipedia.org/'))  # 範例，可移除
+print(google_search('selenium'))
