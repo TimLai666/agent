@@ -1,14 +1,47 @@
-
-import sys
-import undetected_chromedriver as uc
-from selenium.webdriver.common.by import By
-from selenium.common.exceptions import NoSuchElementException
-from selenium.webdriver.common.keys import Keys
-from selenium.webdriver.common.action_chains import ActionChains
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from typing import Any
 import random
+import undetected_chromedriver as uc
+from typing import Any
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.common.action_chains import ActionChains
+from selenium.webdriver.common.keys import Keys
+from selenium.common.exceptions import NoSuchElementException
+from selenium.webdriver.common.by import By
+from pydantic_ai import Agent
+
+
+def add_website_tools(agent: Agent) -> None:
+    """Add website-related tools to the agent."""
+
+    @agent.tool_plain
+    def google_search(search_string: str) -> list[Any]:
+        """Search Google and return a list of results."""
+        crawler = GoogleCrawler()
+        try:
+            return crawler.search(search_string)
+        finally:
+            crawler.close()
+
+    @agent.tool_plain
+    def browse_website(url: str) -> str:
+        """
+        Open a specified website and return the HTML content of the website.
+        """
+
+        html = ""
+        with BaseWebCrawler() as crawler:
+            try:
+                crawler.driver.get(url)
+                body = crawler.driver.find_element(By.TAG_NAME, 'body')
+                crawler.random_mouse_move(body, times=random.randint(3, 8))
+                WebDriverWait(crawler.driver, 10).until(
+                    lambda d: d.execute_script(
+                        'return document.readyState') == 'complete'
+                )
+                html = crawler.driver.page_source
+            except Exception:
+                pass
+        return html
 
 
 class BaseWebCrawler:
@@ -78,39 +111,3 @@ class GoogleCrawler(BaseWebCrawler):
             except NoSuchElementException:
                 break
         return results
-
-
-def google_search(search_string: str = 'python') -> list[Any]:
-    crawler = GoogleCrawler()
-    try:
-        return crawler.search(search_string)
-    finally:
-        crawler.close()
-
-
-def browser_website(url: str) -> str:
-    """
-    開啟指定網站並隨機移動滑鼠，回傳該網站 HTML 內容。
-    """
-
-    html = ""
-    with BaseWebCrawler() as crawler:
-        try:
-            crawler.driver.get(url)
-            body = crawler.driver.find_element(By.TAG_NAME, 'body')
-            crawler.random_mouse_move(body, times=random.randint(3, 8))
-            WebDriverWait(crawler.driver, 10).until(
-                lambda d: d.execute_script(
-                    'return document.readyState') == 'complete'
-            )
-            html = crawler.driver.page_source
-        except Exception:
-            pass
-    return html
-
-
-# 可直接 import google_search 使用
-print(google_search('python'))  # Example usage, can be removed later
-
-print(browser_website('https://www.wikipedia.org/'))  # 範例，可移除
-print(google_search('selenium'))
