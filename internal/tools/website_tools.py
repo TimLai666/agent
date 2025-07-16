@@ -28,9 +28,9 @@ def add_website_tools(agent: Agent) -> None:
     @agent.tool_plain
     def browse_website(url: str) -> str:
         """
-        Open a specified website and return the HTML content of the website.
-        Use this tool to go into a website and read the content.
+        Open a specified website and return the cleaned main text content.
         """
+        from bs4 import BeautifulSoup
 
         html = ""
         with BaseWebCrawler() as crawler:
@@ -45,7 +45,16 @@ def add_website_tools(agent: Agent) -> None:
                 html = crawler.driver.page_source
             except Exception:
                 pass
-        return html
+        # 用 BeautifulSoup 清理成 AI 容易理解的格式
+        soup = BeautifulSoup(html, "html.parser")
+        # 只取主要文字內容
+        for script in soup(["script", "style", "noscript"]):
+            script.decompose()
+        text = soup.get_text(separator='\n', strip=True)
+        # 移除多餘空行
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        cleaned_text = '\n'.join(lines)
+        return cleaned_text
 
 
 class BaseWebCrawler:
@@ -115,3 +124,34 @@ class GoogleCrawler(BaseWebCrawler):
             except NoSuchElementException:
                 break
         return results
+
+
+def browse_website(url: str) -> str:
+    """
+    Open a specified website and return the cleaned main text content.
+    """
+    from bs4 import BeautifulSoup
+
+    html = ""
+    with BaseWebCrawler() as crawler:
+        try:
+            crawler.driver.get(url)
+            body = crawler.driver.find_element(By.TAG_NAME, 'body')
+            crawler.random_mouse_move(body, times=random.randint(3, 8))
+            WebDriverWait(crawler.driver, 10).until(
+                lambda d: d.execute_script(
+                    'return document.readyState') == 'complete'
+            )
+            html = crawler.driver.page_source
+        except Exception:
+            pass
+    # 用 BeautifulSoup 清理成 AI 容易理解的格式
+    soup = BeautifulSoup(html, "html.parser")
+    # 只取主要文字內容
+    for script in soup(["script", "style", "noscript"]):
+        script.decompose()
+    text = soup.get_text(separator='\n', strip=True)
+    # 移除多餘空行
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    cleaned_text = '\n'.join(lines)
+    return cleaned_text
