@@ -1,6 +1,7 @@
 import random
 import os
 import undetected_chromedriver as uc
+import asyncio
 from typing import Any
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
@@ -10,19 +11,24 @@ from selenium.common.exceptions import NoSuchElementException
 from selenium.webdriver.common.by import By
 from pydantic_ai import Agent
 
+from internal.co_agents.browser_use_agent import browser_use_agent, BrowserUseCoAgentOutputFormat
+
 
 def add_website_tools(agent: Agent) -> None:
     """Add website-related tools to the agent."""
 
     @agent.tool_plain
-    def google_search(search_string: str) -> list[Any]:
+    def google_search(search_string: str) -> str:
         """
         Search Google and return a list of results.
         Use this tool for searching the web.
+        If you need more information, use `browse_website` to read the content of a web page.
         """
         crawler = GoogleCrawler()
         try:
-            return crawler.search(search_string)
+            return f"Successfully searched Google. Use `browse_website(url)` to read the content of the search results. Results: {crawler.search(search_string)}"
+        except Exception as e:
+            return f"Error searching Google: {str(e)}"
         finally:
             crawler.close()
 
@@ -58,6 +64,19 @@ def add_website_tools(agent: Agent) -> None:
         cleaned_text = '\n'.join(lines)
         return cleaned_text
 
+    @agent.tool_plain
+    def advanced_browser_control(task: str, additional_information_about_the_task: str) -> BrowserUseCoAgentOutputFormat:
+        """
+        Run the browser use agent with the specified task, such as clicking a button, filling a form, etc.
+        This tool is used to perform complex web browsing tasks.
+        It will return the result of the task and related links if available.
+
+        You should describe the task as clearly as possible, so the agent can understand what to do.
+        """
+        result = asyncio.run(browser_use_agent(
+            task=task, message_context=additional_information_about_the_task))
+        return result
+
 
 class BaseWebCrawler:
     def __init__(self, lang="zh-TW", headless=False):
@@ -69,12 +88,18 @@ class BaseWebCrawler:
             exe1 = os.path.join(base_dir, "undetected_chromedriver.exe")
             exe2 = os.path.join(base_dir, "undetected",
                                 "chromedriver-win32", "chromedriver.exe")
-            for f in [exe1, exe2]:
-                if os.path.exists(f):
-                    try:
-                        os.remove(f)
-                    except Exception:
-                        pass
+            # 先移除 exe2，避免 rename 時 FileExistsError
+            if os.path.exists(exe2):
+                try:
+                    os.remove(exe2)
+                except Exception:
+                    pass
+            # 再移除 exe1
+            if os.path.exists(exe1):
+                try:
+                    os.remove(exe1)
+                except Exception:
+                    pass
         except Exception:
             pass
         options = uc.ChromeOptions()
