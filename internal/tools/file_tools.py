@@ -2,6 +2,7 @@ import os
 from pydantic_ai import Agent
 
 from internal.cli import confirm
+from internal.logger import logger
 
 
 def add_file_tools(agent: Agent) -> None:
@@ -64,30 +65,37 @@ class FileTools:
         self.desktop_path: str = os.path.join(self.home_path, "Desktop")
 
     def get_current_directory(self) -> str:
+        logger.info(f"Getting current directory")
         return self.base_path
 
     def get_home_directory(self) -> str:
+        logger.info(f"Getting home directory")
         return self.home_path
 
     def get_desktop_directory(self) -> str:
+        logger.info(f"Getting desktop directory")
         return self.desktop_path
 
     def list_files_in_directory(self, dir: str) -> str:
+        logger.info(f"Listing files in directory: {dir}")
         try:
             files: list[str] = os.listdir(dir)
             return ', '.join(files)
         except FileNotFoundError:
             return f"Directory '{dir}' not found."
         except Exception as e:
+            logger.error(f"Error listing files in directory {dir}: {str(e)}")
             return str(e)
 
     def read_file(self, file_path: str) -> str:
+        logger.info(f"Reading file: {file_path}")
         try:
             with open(file_path, 'r', encoding='utf-8') as file:
                 return file.read()
         except FileNotFoundError:
             return f"File '{file_path}' not found."
         except Exception as e:
+            logger.error(f"Error reading file {file_path}: {str(e)}")
             return str(e)
 
     def modify_existing_file(self, file_path: str, content: str) -> str:
@@ -97,6 +105,7 @@ class FileTools:
                 default_choice='Y'
             ):
                 raise PermissionError("File modification cancelled by user.")
+            logger.info(f"Modifying file: {file_path}")
             if not os.path.exists(file_path):
                 raise FileNotFoundError(f"File '{file_path}' does not exist.")
             with open(file_path, 'w', encoding='utf-8') as file:
@@ -105,6 +114,7 @@ class FileTools:
         except FileNotFoundError:
             return f"File '{file_path}' not found."
         except Exception as e:
+            logger.error(f"Error modifying file {file_path}: {str(e)}")
             return str(e)
 
     def rename_file_or_directory(self, path: str, new_name: str) -> str:
@@ -114,6 +124,7 @@ class FileTools:
                 default_choice='Y'
             ):
                 raise PermissionError("File renaming cancelled by user.")
+            logger.info(f"Renaming '{path}' to '{new_name}'")
             if not os.path.exists(path):
                 raise FileNotFoundError(f"File '{path}' does not exist.")
             new_file_path = os.path.join(os.path.dirname(path), new_name)
@@ -122,6 +133,7 @@ class FileTools:
         except FileNotFoundError:
             return f"File '{path}' not found."
         except Exception as e:
+            logger.error(f"Error renaming file {path}: {str(e)}")
             return str(e)
 
     def make_new_directory(self, dir: str) -> str:
@@ -131,11 +143,13 @@ class FileTools:
                 default_choice='Y'
             ):
                 raise PermissionError("Directory creation cancelled by user.")
+            logger.info(f"Creating new directory: {dir}")
             if os.path.exists(dir):
                 raise FileExistsError(f"Directory '{dir}' already exists.")
             os.makedirs(dir, exist_ok=True)
             return f"Directory '{dir}' created successfully."
         except Exception as e:
+            logger.error(f"Error creating directory {dir}: {str(e)}")
             return str(e)
 
     def create_new_file(self, file_path: str, content: str) -> str:
@@ -145,10 +159,12 @@ class FileTools:
                 default_choice='Y'
             ):
                 raise PermissionError("File creation cancelled by user.")
+            logger.info(f"Creating new file: {file_path}")
             if os.path.exists(file_path):
                 raise FileExistsError(f"File '{file_path}' already exists.")
             with open(file_path, 'w', encoding='utf-8') as file:
                 file.write(content)
             return f"File '{file_path}' created successfully."
         except Exception as e:
+            logger.error(f"Error creating file {file_path}: {str(e)}")
             return str(e)

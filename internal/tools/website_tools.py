@@ -27,6 +27,7 @@ def add_website_tools(agent: Agent) -> None:
         Use this tool for searching the web.
         If you need more information, use `browse_website` to read the content of a web page.
         """
+        logger.info(f"Searching Google for: {search_string}")
         crawler: GoogleCrawler = GoogleCrawler()
         try:
             return f"Successfully searched Google. Use `browse_website(url)` to read the content of the search results. Results: {crawler.search(search_string)}"
@@ -41,7 +42,7 @@ def add_website_tools(agent: Agent) -> None:
         Open a specified website and return the cleaned main text content.
         Use this tool to go into a web page and read the content.
         """
-
+        logger.info(f"Browsing website: {url}")
         html: str = ""
         with BaseWebCrawler() as crawler:
             try:
@@ -100,6 +101,7 @@ def add_website_tools(agent: Agent) -> None:
 
         You should describe the task as clearly as possible, so the agent can understand what to do.
         """
+        logger.info(f"Running advanced browser control task: {task}")
         result: BrowserUseCoAgentOutputFormat = asyncio.run(browser_use_agent(
             task=task, message_context=additional_information_about_the_task))
         return result
