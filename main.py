@@ -3,6 +3,7 @@ from pydantic_ai.agent import AgentRunResult
 from pydantic_ai.messages import ModelRequest, ModelResponse
 from pydantic_ai.providers.openai import OpenAIProvider
 from pydantic_ai.models.openai import OpenAIModel
+from pydantic_ai.common_tools.duckduckgo import duckduckgo_search_tool
 from dotenv import load_dotenv
 import os
 
@@ -25,6 +26,7 @@ def main() -> None:
     agent: Agent[None, str] = Agent(
         model=ollama_model,
         system_prompt=SYSTEM_PROMPT,
+        tools=[duckduckgo_search_tool()],
     )
 
     add_all_tools(agent)

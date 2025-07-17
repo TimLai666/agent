@@ -8,6 +8,7 @@ dependencies = [
     "pyaudio>=0.2.14",
     "pydantic>=2.11.7",
     "pydantic-ai>=0.4.2",
+    "pydantic-ai-slim[duckduckgo]>=0.4.2",
     "python-dotenv>=1.1.1",
     "selenium>=4.34.2",
     "setuptools>=80.9.0",
