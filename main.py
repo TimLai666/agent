@@ -26,7 +26,7 @@ def main() -> None:
     agent: Agent[None, str] = Agent(
         model=ollama_model,
         system_prompt=SYSTEM_PROMPT,
-        tools=[duckduckgo_search_tool()],
+        tools=[duckduckgo_search_tool(max_results=10)],
     )
 
     add_all_tools(agent)
