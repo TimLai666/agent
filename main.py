@@ -10,11 +10,13 @@ import os
 from internal.prompts import SYSTEM_PROMPT
 from internal.tools.tools import add_all_tools
 from internal.services.voice_manager import VoiceManager
+from internal.logger import logger
 
 
 def main() -> None:
+    logger.info("Starting agent...")
     load_dotenv()
-
+    logger.debug("Environment variables loaded.")
     # 語音輸入功能測試於主程式
     voice_manager = VoiceManager()
     # recognized_text = voice_manager.recognize_speech()

@@ -14,6 +14,7 @@ from pydantic_ai import Agent
 from bs4 import BeautifulSoup
 
 from internal.co_agents.browser_use_agent import browser_use_agent, BrowserUseCoAgentOutputFormat
+from internal.logger import logger
 
 
 def add_website_tools(agent: Agent) -> None:
@@ -57,14 +58,37 @@ def add_website_tools(agent: Agent) -> None:
                 pass
         # 用 BeautifulSoup 清理成 AI 容易理解的格式
         soup = BeautifulSoup(html, "html.parser")
-        # 只取主要文字內容
+        # 只取主要文字內容，保留表格結構
         for script in soup(["script", "style", "noscript"]):
             script.decompose()
+
+        # 先處理所有表格，轉為 markdown 格式
+        def table_to_markdown(table):
+            rows = table.find_all("tr")
+            md = []
+            for i, row in enumerate(rows):
+                cols = row.find_all(["th", "td"])
+                col_texts = [col.get_text(strip=True) for col in cols]
+                line = "| " + " | ".join(col_texts) + " |"
+                md.append(line)
+                # 標題下方加分隔線
+                if i == 0:
+                    md.append(
+                        "| " + " | ".join(["---"] * len(col_texts)) + " |")
+            return "\n".join(md)
+
+        # 將所有表格替換為 markdown 文字
+        for table in soup.find_all("table"):
+            md_table = table_to_markdown(table)
+            table.replace_with(soup.new_string(md_table))
+
         text: str = soup.get_text(separator='\n', strip=True)
         # 移除多餘空行
         lines: list[str] = [line.strip()
                             for line in text.splitlines() if line.strip()]
         cleaned_text: str = '\n'.join(lines)
+        # Log first 100 characters for debugging
+        logger.debug(f"Cleaned text: {cleaned_text}")
         return cleaned_text
 
     @agent.tool_plain
