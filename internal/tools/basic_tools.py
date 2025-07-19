@@ -6,6 +6,8 @@ import random
 import time
 import tzlocal
 
+from internal.logger import logger
+
 
 def add_basic_tools(agent: Agent) -> None:
     """Add basic tools to the agent."""
@@ -13,6 +15,7 @@ def add_basic_tools(agent: Agent) -> None:
     @agent.tool_plain
     def get_now() -> str:
         """Get the current time with timezone info (local time, with UTC offset)."""
+        logger.info("Getting current time with timezone info.")
         now: datetime | None = None
         try:
             local_tz: ZoneInfo = tzlocal.get_localzone()
@@ -36,6 +39,7 @@ def add_basic_tools(agent: Agent) -> None:
     @agent.tool_plain
     def get_weekday(date_str: str) -> str:
         """Get the weekday of a given date in English."""
+        logger.info(f"Getting weekday for date: {date_str}")
         # 去除括號及其內容（如時區資訊），只保留日期部分
         if '(' in date_str:
             date_str = date_str.split('(')[0].strip()
@@ -53,6 +57,7 @@ def add_basic_tools(agent: Agent) -> None:
     @agent.tool_plain
     def random_pick(items: list[str]) -> str:
         """Randomly pick an item from the provided list."""
+        logger.info(f"Randomly picking from items: {items}")
         if not items:
             return "No items provided."
         return random.choice(items)
@@ -62,8 +67,8 @@ def add_basic_tools(agent: Agent) -> None:
         """Wait for a specified number of seconds."""
         if seconds < 0:
             return "Cannot wait for negative time."
-        print(f"Start waiting for {seconds} seconds...")
+        logger.info(f"Start waiting for {seconds} seconds...")
         time.sleep(seconds)
-        print("Wait completed.")
+        logger.info("Wait completed.")
         # todo: 可以接個好看ui或鈴聲之類
         return f"Time's up after {seconds} seconds."
