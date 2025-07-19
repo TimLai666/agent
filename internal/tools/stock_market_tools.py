@@ -23,7 +23,7 @@ def add_stock_market_tools(agent: Agent) -> None:
         """
 
         # 確保加上 ".TW" 後綴
-        if is_taiwan_stock and not ticker_symbol.endswith(".TW"):
+        if is_taiwan_stock and not ticker_symbol.upper().endswith(".TW"):
             ticker_symbol = ticker_symbol + ".TW"
         logger.info(f"Fetching stock price for ticker: {ticker_symbol}")
         try:
