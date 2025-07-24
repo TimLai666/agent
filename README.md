@@ -25,6 +25,12 @@
 uv sync
 ```
 
+#### 安裝 Playwright
+
+```sh
+uv run playwright install
+```
+
 ### 啟動專案
 
 ```sh
