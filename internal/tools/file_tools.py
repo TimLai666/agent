@@ -119,7 +119,9 @@ class FileTools:
         try:
             matching_files = [f for f in files if fragment_regx in f]
             if not matching_files:
-                return [f"No files found containing '{fragment_regx}'."]
+            matching_files = [f for f in files if re.search(fragment_regx, f)]
+            if not matching_files:
+                return [f"No files found matching regex '{fragment_regx}'."]
             return matching_files
         except Exception as e:
             logger.error(
