@@ -136,7 +136,7 @@ class FileTools:
             if not content:
                 return [f"File '{file_path}' is empty or not found."]
             matches = [line for line in content.splitlines()
-                       if fragment_regx in line]
+                       if re.search(fragment_regx, line)]
             if not matches:
                 return [f"No matches found in file '{file_path}' for fragment: {fragment_regx}"]
             return matches
