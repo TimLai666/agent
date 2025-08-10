@@ -1,4 +1,5 @@
 import os
+import re
 from pydantic_ai import Agent
 
 from internal.cli import confirm
@@ -117,9 +118,13 @@ class FileTools:
         logger.info(
             f"Finding matches in {files} with fragment: {fragment_regx}")
         try:
-            matching_files = [f for f in files if fragment_regx in f]
-            if not matching_files:
-            matching_files = [f for f in files if re.search(fragment_regx, f)]
+
+            matching_files: list[str] = []
+            for file in files:
+                with open(file, 'r', encoding='utf-8') as f:
+                    file_content = f.read()
+                if re.search(fragment_regx, file_content):
+                    matching_files.append(file)
             if not matching_files:
                 return [f"No files found matching regex '{fragment_regx}'."]
             return matching_files
@@ -132,7 +137,8 @@ class FileTools:
         logger.info(
             f"Finding all lines in file with fragment: {fragment_regx}")
         try:
-            content = self.read_file(file_path)
+            with open(file_path, 'r', encoding='utf-8') as file:
+                content = file.read()
             if not content:
                 return [f"File '{file_path}' is empty or not found."]
             matches = [line for line in content.splitlines()
