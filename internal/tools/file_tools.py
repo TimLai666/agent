@@ -31,6 +31,32 @@ def add_file_tools(agent: Agent) -> None:
         return file_tools_manager.list_files_in_directory(dir)
 
     @agent.tool_plain
+    def find_files_with_fragment(fragment_regx: str, files: list[str]) -> list[str]:
+        """Find files containing a specific fragment in their names.
+
+        Parameters:
+            fragment_regx (str): The fragment to search for (in regular expression).
+            files (list[str]): The list of files to search within.
+
+        Returns:
+            list[str]: A list of matching file names.
+        """
+        return file_tools_manager.find_files_with_fragment(fragment_regx, files)
+
+    @agent.tool_plain
+    def find_all_lines_in_file_with_fragment(fragment_regx: str, file_path: str) -> list[str]:
+        """Find all lines in a file that contain a specific fragment.
+
+        Parameters:
+            fragment_regx (str): The fragment to search for (in regular expression).
+            file_path (str): The path to the file to search within.
+
+        Returns:
+            list[str]: A list of matching lines.
+        """
+        return file_tools_manager.find_all_lines_in_file_with_fragment(fragment_regx, file_path)
+
+    @agent.tool_plain
     def read_file(file_path: str) -> str:
         """Read the contents of a file."""
         return file_tools_manager.read_file(file_path)
@@ -86,6 +112,36 @@ class FileTools:
         except Exception as e:
             logger.error(f"Error listing files in directory {dir}: {str(e)}")
             return str(e)
+
+    def find_files_with_fragment(self, fragment_regx: str, files: list[str]) -> list[str]:
+        logger.info(
+            f"Finding matches in {files} with fragment: {fragment_regx}")
+        try:
+            matching_files = [f for f in files if fragment_regx in f]
+            if not matching_files:
+                return [f"No files found containing '{fragment_regx}'."]
+            return matching_files
+        except Exception as e:
+            logger.error(
+                f"Error finding files with fragment {fragment_regx}: {str(e)}")
+            return [str(e)]
+
+    def find_all_lines_in_file_with_fragment(self, fragment_regx: str, file_path: str) -> list[str]:
+        logger.info(
+            f"Finding all lines in file with fragment: {fragment_regx}")
+        try:
+            content = self.read_file(file_path)
+            if not content:
+                return [f"File '{file_path}' is empty or not found."]
+            matches = [line for line in content.splitlines()
+                       if fragment_regx in line]
+            if not matches:
+                return [f"No matches found in file '{file_path}' for fragment: {fragment_regx}"]
+            return matches
+        except Exception as e:
+            logger.error(
+                f"Error finding fragment in file {file_path}: {str(e)}")
+            return [str(e)]
 
     def read_file(self, file_path: str) -> str:
         logger.info(f"Reading file: {file_path}")
