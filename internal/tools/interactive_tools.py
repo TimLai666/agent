@@ -4,6 +4,8 @@ from pydantic_ai import Agent
 import os
 import time
 
+from internal.logger import logger
+
 
 def add_interactive_tools(agent: Agent) -> None:
     """Add interactive tools to the agent."""
@@ -14,6 +16,7 @@ def add_interactive_tools(agent: Agent) -> None:
         Open a web page in the default web browser for the user.
         You won't see the output.
         """
+        logger.info(f"Opening web page: {url}")
         opened_successful: bool = False
         try:
             opened_successful = webbrowser.open(url)
@@ -30,6 +33,7 @@ def add_interactive_tools(agent: Agent) -> None:
         Open a web page with the provided HTML content in the default web browser.
         You won't see the output.
         """
+        logger.info("Opening web page from HTML string.")
         opened_successful: bool = False
         try:
             with tempfile.NamedTemporaryFile('w', delete=False, suffix='.html', encoding='utf-8') as f:
@@ -49,6 +53,7 @@ def add_interactive_tools(agent: Agent) -> None:
         Open a web page from a local HTML file in the default web browser.
         You won't see the output.
         """
+        logger.info(f"Opening web page from file: {file_path}")
         if not os.path.isfile(file_path):
             return f"File not found: {file_path}"
         try:
