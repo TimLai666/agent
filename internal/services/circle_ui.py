@@ -98,14 +98,16 @@ class ArcWidget(QWidget):
         # 取得圓圈顏色
         circle_color = self.circle.get_color(self.anim.currentValue())
         
-    
-
+        # 計算球球位置 - 位於視窗高度80%的地方
+        ball_center_x = self.width() / 2
+        ball_center_y = self.height() * 0.8  # 從頂部算起80%的位置
+        
         # 繪製底層實心圓
         painter.setBrush(QColor(circle_color))  # 使用變化的顏色
         painter.setPen(QPen(QColor(circle_color), 2))  # 邊框也使用相同顏色
         painter.drawEllipse(
-            self.width()/2 - self.circle.diameter/2,
-            self.height()/2 - self.circle.diameter/2,
+            ball_center_x - self.circle.diameter/2,
+            ball_center_y - self.circle.diameter/2,
             self.circle.diameter,
             self.circle.diameter
         )
@@ -113,8 +115,8 @@ class ArcWidget(QWidget):
         # 繪製旋轉的圓弧
         for arc in self.arcs:
             painter.setPen(QPen(arc.color, 6, Qt.SolidLine))
-            painter.drawArc(self.width()/2 - arc.diameter/2,
-                    self.height()/2 - arc.diameter/2, arc.diameter, 
+            painter.drawArc(ball_center_x - arc.diameter/2,
+                    ball_center_y - arc.diameter/2, arc.diameter, 
                     arc.diameter, self.anim.currentValue()*16*arc.direction+arc.startAngle*100, arc.span*16) 
             
         if self.anim.currentValue() == 360:
@@ -223,35 +225,34 @@ class MainWindow(QMainWindow):
         # 有效半徑應該是實心圓半徑加上最大圓弧半徑
         effective_radius = circle_radius + max_arc_radius  # 50 + 50 = 100
         
-        # 計算理想的視窗尺寸
-        min_top_margin = 10  # 視窗上緣的最小邊距
-        min_side_margin = 20  # 視窗左右邊的最小邊距
-        bubble_gap = 10  # 氣泡框與球球之間的間隙
-        
-        # 計算球球區域的高度（球球位於視窗下緣上方0.2的部分）
+        # 計算球球區域的高度（球球位於視窗80%的位置）
         ball_area_height = effective_radius * 2  # 球球需要的高度
-        ball_bottom_margin = ball_area_height * 0.2  # 球球底部距離視窗下緣的距離
+        ball_center_ratio = 0.8  # 球球中心位於視窗高度的80%
         
         # 計算理想的視窗寬度和高度
+        min_side_margin = 20  # 定義最小側邊距
+        min_top_margin = 20   # 定義最小頂部邊距
+        bubble_gap = 10       # 對話框與球球之間的間距
         ideal_width = max(bubble_width + min_side_margin * 2, effective_radius * 2 + min_side_margin * 2)
-        ideal_height = min_top_margin + bubble_height + bubble_gap + ball_area_height + ball_bottom_margin
+        ideal_height = min_top_margin + bubble_height + bubble_gap + ball_area_height + (ball_area_height * (1 - ball_center_ratio))
         
         # 取得當前視窗尺寸和位置
         current_width = self.width()
         current_height = self.height()
-        current_center_x = self.x() + current_width // 2
-        current_center_y = self.y() + current_height // 2
         
-        # 計算新的視窗位置（保持中心不變）
-        new_x = current_center_x - ideal_width // 2
-        new_y = current_center_y - ideal_height // 2
+        # 計算當前球球的中心位置（在螢幕座標系中）
+        current_ball_center_y = self.y() + current_height * ball_center_ratio
+        
+        # 計算新的視窗位置（保持球球中心不變）
+        new_y = current_ball_center_y - ideal_height * ball_center_ratio  # 從球球中心推算新視窗Y座標
+        new_x = self.x() + (current_width - ideal_width) // 2  # X方向置中調整
         
         # 調整視窗大小和位置
         self.setGeometry(new_x, new_y, ideal_width, ideal_height)
         
-        # 重新計算位置 - 球球位於視窗下緣上方0.2的部分
+        # 重新計算對話框位置
         window_center_x = self.width() // 2
-        ball_center_y = self.height() - ball_bottom_margin - effective_radius  # 球球中心位置
+        ball_center_y = self.height() * ball_center_ratio  # 球球中心位置
         ball_top_y = ball_center_y - effective_radius
         available_space = ball_top_y - min_top_margin
         

@@ -1,0 +1,20 @@
+2025-07-25 15:16:30.626 - RealTimeSTT: realtimestt - INFO - Starting RealTimeSTT
+2025-07-25 15:16:30.719 - RealTimeSTT: realtimestt - INFO - Initializing audio recording (creating pyAudio input stream, sample rate: 16000 buffer size: 512
+2025-07-25 15:16:30.748 - RealTimeSTT: realtimestt - INFO - Initializing WebRTC voice with Sensitivity 3
+2025-07-25 15:16:30.795 - RealTimeSTT: realtimestt - DEBUG - WebRTC VAD voice activity detection engine initialized successfully
+2025-07-25 15:16:34.394 - RealTimeSTT: realtimestt - DEBUG - Silero VAD voice activity detection engine initialized successfully
+2025-07-25 15:16:34.397 - RealTimeSTT: realtimestt - DEBUG - Starting realtime worker
+2025-07-25 15:16:34.397 - RealTimeSTT: realtimestt - DEBUG - Waiting for main transcription model to start
+2025-07-25 15:16:37.824 - RealTimeSTT: realtimestt - DEBUG - Main transcription model ready
+2025-07-25 15:16:37.825 - RealTimeSTT: realtimestt - DEBUG - RealtimeSTT initialization completed successfully
+2025-07-25 15:17:06.205 - RealTimeSTT: realtimestt - DEBUG - Receive from stdout pipe
+2025-07-25 15:17:06.206 - RealTimeSTT: realtimestt - INFO - None
+2025-07-25 15:17:23.320 - RealTimeSTT: realtimestt - INFO - Starting RealTimeSTT
+2025-07-25 15:17:23.329 - RealTimeSTT: realtimestt - INFO - Initializing audio recording (creating pyAudio input stream, sample rate: 16000 buffer size: 512
+2025-07-25 15:17:23.334 - RealTimeSTT: realtimestt - INFO - Initializing WebRTC voice with Sensitivity 3
+2025-07-25 15:17:23.334 - RealTimeSTT: realtimestt - DEBUG - WebRTC VAD voice activity detection engine initialized successfully
+2025-07-25 15:17:23.657 - RealTimeSTT: realtimestt - DEBUG - Silero VAD voice activity detection engine initialized successfully
+2025-07-25 15:17:23.658 - RealTimeSTT: realtimestt - DEBUG - Starting realtime worker
+2025-07-25 15:17:23.659 - RealTimeSTT: realtimestt - DEBUG - Waiting for main transcription model to start
+2025-07-25 15:17:39.331 - RealTimeSTT: realtimestt - DEBUG - Main transcription model ready
+2025-07-25 15:17:39.332 - RealTimeSTT: realtimestt - DEBUG - RealtimeSTT initialization completed successfully
