@@ -21,82 +21,84 @@ from internal.co_agents.browser_use_agent import (
 from internal.logger import logger
 
 
-def add_website_tools(agent: Agent) -> None:
+def add_website_tools(
+    agent: Agent, model: str, base_url: str | None = None, api_key: str | None = None
+) -> None:
     """Add website-related tools to the agent."""
 
-    @agent.tool_plain
-    def google_search(search_string: str) -> str:
-        """
-        Search Google and return a list of results.
-        Use this tool for searching the web.
-        If you need more information, use `browse_website` to read the content of a web page.
-        """
-        logger.info(f"Searching Google for: {search_string}")
-        crawler: GoogleCrawler = GoogleCrawler()
-        try:
-            return f"Successfully searched Google. Use `browse_website(url)` to read the content of the search results. Results: {crawler.search(search_string)}"
-        except Exception as e:
-            return f"Error searching Google: {str(e)}"
-        finally:
-            crawler.close()
+    # @agent.tool_plain
+    # def google_search(search_string: str) -> str:
+    #     """
+    #     Search Google and return a list of results.
+    #     Use this tool for searching the web.
+    #     If you need more information, use `browse_website` to read the content of a web page.
+    #     """
+    #     logger.info(f"Searching Google for: {search_string}")
+    #     crawler: GoogleCrawler = GoogleCrawler()
+    #     try:
+    #         return f"Successfully searched Google. Use `browse_website(url)` to read the content of the search results. Results: {crawler.search(search_string)}"
+    #     except Exception as e:
+    #         return f"Error searching Google: {str(e)}"
+    #     finally:
+    #         crawler.close()
 
-    @agent.tool_plain
-    def browse_website(url: str) -> str:
-        """
-        Open a specified website and return the cleaned main text content.
-        Use this tool to go into a web page and read the content.
-        """
-        logger.info(f"Browsing website: {url}")
-        html: str = ""
-        with BaseWebCrawler() as crawler:
-            try:
-                crawler.driver.get(url)
-                body: WebElement = crawler.driver.find_element(By.TAG_NAME, "body")
-                crawler.random_mouse_move(body, times=random.randint(3, 8))
-                WebDriverWait(crawler.driver, 10).until(
-                    lambda d: d.execute_script("return document.readyState")
-                    == "complete"
-                )
-                html = crawler.driver.page_source
-            except Exception as e:
-                logger.error(f"Error accessing website {url}: {str(e)}")
-                return f"Error browsing website: {str(e)}"
-        # 用 BeautifulSoup 清理成 AI 容易理解的格式
-        soup = BeautifulSoup(html, "html.parser")
-        # 只取主要文字內容，保留表格結構
-        for script in soup(["script", "style", "noscript"]):
-            script.decompose()
+    # @agent.tool_plain
+    # def browse_website(url: str) -> str:
+    #     """
+    #     Open a specified website and return the cleaned main text content.
+    #     Use this tool to go into a web page and read the content.
+    #     """
+    #     logger.info(f"Browsing website: {url}")
+    #     html: str = ""
+    #     with BaseWebCrawler() as crawler:
+    #         try:
+    #             crawler.driver.get(url)
+    #             body: WebElement = crawler.driver.find_element(By.TAG_NAME, "body")
+    #             crawler.random_mouse_move(body, times=random.randint(3, 8))
+    #             WebDriverWait(crawler.driver, 10).until(
+    #                 lambda d: d.execute_script("return document.readyState")
+    #                 == "complete"
+    #             )
+    #             html = crawler.driver.page_source
+    #         except Exception as e:
+    #             logger.error(f"Error accessing website {url}: {str(e)}")
+    #             return f"Error browsing website: {str(e)}"
+    #     # 用 BeautifulSoup 清理成 AI 容易理解的格式
+    #     soup = BeautifulSoup(html, "html.parser")
+    #     # 只取主要文字內容，保留表格結構
+    #     for script in soup(["script", "style", "noscript"]):
+    #         script.decompose()
 
-        # 先處理所有表格，轉為 markdown 格式
-        def table_to_markdown(table):
-            rows = table.find_all("tr")
-            md = []
-            for i, row in enumerate(rows):
-                cols = row.find_all(["th", "td"])
-                col_texts = [col.get_text(strip=True) for col in cols]
-                line = "| " + " | ".join(col_texts) + " |"
-                md.append(line)
-                # 標題下方加分隔線
-                if i == 0:
-                    md.append("| " + " | ".join(["---"] * len(col_texts)) + " |")
-            return "\n".join(md)
+    #     # 先處理所有表格，轉為 markdown 格式
+    #     def table_to_markdown(table):
+    #         rows = table.find_all("tr")
+    #         md = []
+    #         for i, row in enumerate(rows):
+    #             cols = row.find_all(["th", "td"])
+    #             col_texts = [col.get_text(strip=True) for col in cols]
+    #             line = "| " + " | ".join(col_texts) + " |"
+    #             md.append(line)
+    #             # 標題下方加分隔線
+    #             if i == 0:
+    #                 md.append("| " + " | ".join(["---"] * len(col_texts)) + " |")
+    #         return "\n".join(md)
 
-        # 將所有表格替換為 markdown 文字
-        for table in soup.find_all("table"):
-            md_table = table_to_markdown(table)
-            table.replace_with(soup.new_string(md_table))
+    #     # 將所有表格替換為 markdown 文字
+    #     for table in soup.find_all("table"):
+    #         md_table = table_to_markdown(table)
+    #         table.replace_with(soup.new_string(md_table))
 
-        text: str = soup.get_text(separator="\n", strip=True)
-        # 移除多餘空行
-        lines: list[str] = [line.strip() for line in text.splitlines() if line.strip()]
-        cleaned_text: str = "\n".join(lines)
+    #     text: str = soup.get_text(separator="\n", strip=True)
+    #     # 移除多餘空行
+    #     lines: list[str] = [line.strip() for line in text.splitlines() if line.strip()]
+    #     cleaned_text: str = "\n".join(lines)
 
-        if not cleaned_text:
-            return "Successfully accessed the website, but no readable text content was found."
+    #     if not cleaned_text:
+    #         return "Successfully accessed the website, but no readable text content was found."
 
-        # Log first 100 characters for debugging
-        logger.debug(f"Cleaned text: {cleaned_text[:100]}...")
-        return cleaned_text
+    #     # Log first 100 characters for debugging
+    #     logger.debug(f"Cleaned text: {cleaned_text[:100]}...")
+    #     return cleaned_text
 
     @agent.tool_plain
     def advanced_browser_control(
@@ -112,7 +114,11 @@ def add_website_tools(agent: Agent) -> None:
         logger.info(f"Running advanced browser control task: {task}")
         result: BrowserUseCoAgentOutputFormat = asyncio.run(
             browser_use_agent(
-                task=task, message_context=additional_information_about_the_task
+                task=task,
+                message_context=additional_information_about_the_task,
+                model=model,
+                base_url=base_url,
+                api_key=api_key,
             )
         )
         return result

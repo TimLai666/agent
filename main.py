@@ -11,7 +11,8 @@ warnings.filterwarnings("ignore", category=ResourceWarning)
 from dotenv import load_dotenv
 from httpx import AsyncClient
 from pydantic_ai import Agent
-from pydantic_ai.common_tools.duckduckgo import duckduckgo_search_tool
+
+# from pydantic_ai.common_tools.duckduckgo import duckduckgo_search_tool
 from pydantic_ai.messages import ModelRequest, ModelResponse
 from pydantic_ai.models.openai import OpenAIModel
 from pydantic_ai.providers.openai import OpenAIProvider
@@ -19,7 +20,7 @@ from pydantic_ai.providers.openai import OpenAIProvider
 from internal.logger import logger
 from internal.prompts import SYSTEM_PROMPT
 from internal.services.voice_manager import VoiceManager
-from internal.tools.tools import add_all_tools
+from internal.set_tools import add_all_tools
 
 OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -52,10 +53,10 @@ async def main() -> None:
         agent: Agent[None, str] = Agent(
             model=model,
             system_prompt=SYSTEM_PROMPT,
-            tools=[duckduckgo_search_tool(max_results=10)],
+            # tools=[duckduckgo_search_tool(max_results=10)],
         )
 
-        add_all_tools(agent)
+        add_all_tools(agent, MODEL_NAME, OPENAI_BASE_URL, OPENAI_API_KEY)
 
         chat_history: list[ModelRequest | ModelResponse] | None = None
 
@@ -76,11 +77,13 @@ async def main() -> None:
                 async with agent.run_stream(
                     user_prompt=user_input, message_history=chat_history
                 ) as result:
-                    print("回答: ", end="", flush=True)
+                    # print("回答: ", end="", flush=True)
 
-                    # 串流輸出文字
+                    # 串流輸出文字 (打字機效果)
                     async for message in result.stream_text(delta=True):
-                        print(message, end="", flush=True)
+                        for char in message:
+                            print(char, end="", flush=True)
+                            await asyncio.sleep(0.05)
                     print("\n")
 
                     # 重要：更新聊天紀錄，確保對話連貫

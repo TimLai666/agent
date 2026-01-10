@@ -1,10 +1,6 @@
-from typing import Any
-
 import numpy as np
 import speech_recognition as sr
 import whisper
-
-# 語音輸入功能測試 (使用 OpenAI Whisper 本地模型)
 
 
 class VoiceManager:
@@ -28,7 +24,7 @@ class VoiceManager:
             )
 
             # 使用 Whisper 進行辨識
-            result = self.model.transcribe(audio_np, language="zh", fp16=False)
+            result = self.model.transcribe(audio_np, fp16=False)
             text = result["text"].strip()
             return text
         except Exception as e:
