@@ -1,4 +1,5 @@
 import asyncio
+from collections import deque
 import os
 import warnings
 from contextlib import AsyncExitStack
@@ -6,6 +7,8 @@ from contextlib import AsyncExitStack
 from dotenv import load_dotenv
 from httpx import AsyncClient
 from pydantic_ai.messages import ModelRequest, ModelResponse
+
+from internal.runtime.stream_printer import stream_print
 
 from internal.agents import MainAgent
 from internal.co_agents import PhilosopherCoAgent
@@ -60,40 +63,19 @@ async def run_cli() -> None:
                     if user_input.lower() in ["exit", "quit"]:
                         break
 
-                    async with main_agent.agent.run_stream(
-                        user_prompt=user_input, message_history=chat_history
-                    ) as result:
-                        printed = False
-                        async for message in result.stream_text(delta=True):
-                            if not message:
-                                continue
-                            printed = True
-                            for char in message:
-                                print(char, end="", flush=True)
-                                await asyncio.sleep(TYPEWRITER_DELAY)
+                    # 使用統一的 stream_printer 來印出主 agent 串流結果
+                    await stream_print(main_agent.run_stream(user_input, message_history=chat_history))
 
-                        if not printed:
-                            output = await result.get_output()
-                            if output:
-                                printed = True
-                                for char in output:
-                                    print(char, end="", flush=True)
-                                    await asyncio.sleep(TYPEWRITER_DELAY)
-                                print()
-                                chat_history = result.all_messages()[-HISTORY_LIMIT:]
-                            else:
-                                fallback = await main_agent.agent.run(
-                                    user_prompt=user_input,
-                                    message_history=chat_history,
-                                )
-                                for char in fallback.output:
-                                    print(char, end="", flush=True)
-                                    await asyncio.sleep(TYPEWRITER_DELAY)
-                                print()
-                                chat_history = fallback.all_messages()[-HISTORY_LIMIT:]
-                        else:
-                            print()
-                            chat_history = result.all_messages()[-HISTORY_LIMIT:]
+                    # 嘗試從 MainAgent 儲存的最後訊息更新 chat_history
+                    try:
+                        if getattr(main_agent, "_last_messages", None):
+                            chat_history = (
+                                main_agent._last_messages[-HISTORY_LIMIT:]
+                                if main_agent._last_messages is not None
+                                else None
+                            )
+                    except Exception:
+                        chat_history = None
 
                 except KeyboardInterrupt:
                     break

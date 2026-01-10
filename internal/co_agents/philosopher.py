@@ -42,7 +42,35 @@ class PhilosopherCoAgent(CoAgent):
         self._history: list[ModelRequest | ModelResponse] | None = None
         self._history_limit = history_limit
 
-    async def run(self, prompt: str) -> str:
-        result = await self.agent.run(prompt, message_history=self._history)
+    async def run(
+        self, 
+        prompt: str, 
+        message_history: list[ModelRequest | ModelResponse] | None = None
+    ) -> str:
+        if message_history is None:
+            message_history = self._history
+        result = await self.agent.run(prompt, message_history=message_history)
         self._history = result.all_messages()[-self._history_limit :]
         return result.output
+
+    async def run_stream(
+        self,
+        prompt: str,
+        message_history: list[ModelRequest | ModelResponse] | None = None,
+    ):
+        """Stream philosopher output while maintaining internal history."""
+        if message_history is None:
+            message_history = self._history
+        async with self.agent.run_stream(user_prompt=prompt, message_history=message_history) as result:
+            collected = ""
+            async for chunk in result.stream_text(delta=True):
+                if not chunk:
+                    continue
+                collected += chunk
+                yield chunk
+
+            # update history after completion
+            try:
+                self._history = result.all_messages()[-self._history_limit :]
+            except Exception:
+                pass

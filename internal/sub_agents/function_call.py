@@ -51,6 +51,13 @@ class FunctionCallAgent:
         result = await self.agent.run(prompt)
         return result.output
 
+    async def run_stream(self, prompt: str):
+        async with self.agent.run_stream(user_prompt=prompt) as result:
+            async for chunk in result.stream_text(delta=True):
+                if not chunk:
+                    continue
+                yield chunk
+
     @staticmethod
     def _build_browser_mcp_servers(
         env: dict[str, str], config: AgentConfig
@@ -117,4 +124,10 @@ class FunctionCallSubAgent(SubAgent):
         async def run_function_call_agent(task: str) -> str:
             agent_name = type(self.function_call_agent).__name__
             print(f"[LOG] subagent({type(self).__name__}) -> {agent_name}: {task}")
+            # use streaming if available
+            if hasattr(self.function_call_agent, "run_stream"):
+                collected = ""
+                async for chunk in self.function_call_agent.run_stream(task):
+                    collected += chunk
+                return collected
             return await self.function_call_agent.run(task)
