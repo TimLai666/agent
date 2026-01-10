@@ -15,7 +15,6 @@ from internal.co_agents import PhilosopherCoAgent
 from internal.logger import logger
 from internal.services.agent_factory import load_base_config
 from internal.services.voice_manager import VoiceManager
-from internal.sub_agents import FunctionCallAgent, FunctionCallSubAgent
 
 HISTORY_LIMIT = 30
 TYPEWRITER_DELAY = 0.04
@@ -33,19 +32,14 @@ async def run_cli() -> None:
     base_config = load_base_config(env)
 
     async with AsyncClient(verify=False) as http_client:
-        function_call_agent = FunctionCallAgent.create(base_config, env, http_client)
         philosopher = PhilosopherCoAgent.create(base_config, env, http_client)
-        sub_agent = FunctionCallSubAgent.create(
-            base_config, env, http_client, function_call_agent
-        )
-        main_agent = MainAgent.create(
-            base_config, env, http_client, philosopher, sub_agent
-        )
+        # Register tools directly on main agent; no separate sub-agent layer
+        main_agent = MainAgent.create(base_config, env, http_client, philosopher)
 
         chat_history: list[ModelRequest | ModelResponse] | None = None
 
         async with AsyncExitStack() as stack:
-            await stack.enter_async_context(function_call_agent.agent.run_mcp_servers())
+            # MCP servers are run by the main agent (contains browser tools)
             await stack.enter_async_context(main_agent.agent.run_mcp_servers())
 
             print("\nAgent ready.")

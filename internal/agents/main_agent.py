@@ -11,7 +11,9 @@ from internal.services.agent_factory import (
     create_openai_model,
     load_agent_config_chain,
 )
-from internal.sub_agents.base import SubAgent
+from internal.set_tools import add_all_tools
+import sys
+from pydantic_ai.mcp import MCPServerStdio
 
 PROMPT_KEY = "MAIN_AGENT_PROMPT"
 ENV_PREFIX = "MAIN"
@@ -28,34 +30,67 @@ class MainAgent:
         env: dict[str, str],
         http_client: AsyncClient,
         philosopher: PhilosopherCoAgent,
-        sub_agent: SubAgent,
     ) -> "MainAgent":
         config = load_agent_config_chain([cls.ENV_PREFIX], base_config, env)
         model = create_openai_model(config, http_client)
+        # build MCP servers for browser tools
+        mcp_env = env.copy()
+        if config.api_key:
+            mcp_env["OPENAI_API_KEY"] = config.api_key
+        if config.base_url:
+            mcp_env["OPENAI_BASE_URL"] = config.base_url
+        if config.model_name:
+            mcp_env["BROWSER_USE_LLM_MODEL"] = config.model_name
+
+        headed_env = mcp_env.copy()
+        headed_env["BROWSER_USE_HEADLESS"] = "false"
+        browser_use_headed = MCPServerStdio(
+            command=sys.executable,
+            args=["-m", "browser_use.mcp.server"],
+            env=headed_env,
+            tool_prefix="browser_headed",
+        )
+
+        headless_env = mcp_env.copy()
+        headless_env["BROWSER_USE_HEADLESS"] = "true"
+        browser_use_headless = MCPServerStdio(
+            command=sys.executable,
+            args=["-m", "browser_use.mcp.server"],
+            env=headless_env,
+            tool_prefix="browser_headless",
+        )
+
+        mcp_servers = [browser_use_headed, browser_use_headless]
+
         agent: Agent[None, str] = Agent(
             model=model,
             system_prompt=SYSTEM_PROMPT,
             instructions=get_prompt(cls.PROMPT_KEY),
             tools=[],
             model_settings={"temperature": config.temperature},
+            mcp_servers=mcp_servers,
         )
-        return cls(agent, philosopher, sub_agent)
+        # register global tools directly on the main agent
+        try:
+            add_all_tools(agent, config.model_name, config.base_url, config.api_key)
+            logger.info("Registered tools on MainAgent")
+        except Exception:
+            logger.exception("Failed to add tools to main agent; continuing without external tools")
+        return cls(agent, philosopher)
 
     def __init__(
         self,
         agent: Agent[None, str],
         philosopher: PhilosopherCoAgent,
-        sub_agent: SubAgent,
     ) -> None:
         self.agent = agent
         self.philosopher = philosopher
-        self.sub_agent = sub_agent
         self._last_messages: list[ModelRequest | ModelResponse] | None = None
         # register tool functions so agent can call them; defining as methods
         try:
             # calling tool_plain with the bound method registers it
             self.agent.tool_plain(self.ask_philosopher)
-            self.agent.tool_plain(self.delegate_to_subagent)
+            # tools from internal.set_tools were added during create()
         except Exception:
             # registration failures shouldn't break initialization
             logger.debug("Tool registration skipped or failed during init")
@@ -72,11 +107,12 @@ class MainAgent:
         # 範例幫助模型學習何種問題需要討論（簡單事實性問題不需要）
         decider = (
             "你是主 agent 的決策助手。請判斷下列使用者輸入是否需要向哲學家 co-agent 進行多輪內省討論。"
-            " 僅回傳一個有效 JSON 對象，不要包含其他文字。JSON 格式：{'consult': true/false, 'reason': '短理由'}。"
+            " 嚴格回傳一個有效 JSON 對象，不要包含其他文字。JSON 格式：{'consult': true/false, 'reason': '短理由'}。"
+            " **重要**：在這個判定步驟中，請不要呼叫任何工具或嘗試執行外部函式；僅依靠你的語言理解回傳 JSON。"
             " 範例：\n"
             "輸入: '現在幾點'\n輸出: {" + '"consult": false, "reason": "簡單事實性查詢"}' + "\n"
             "輸入: '評估不同投資組合的風險與報酬'\n輸出: {" + '"consult": true, "reason": "需要權衡與推理"}' + "\n\n"
-            "使用者輸入：\n" + prompt + "\n\n請只回傳 JSON："
+            "使用者輸入：\n" + prompt + "\n\n請只回傳 JSON，且不要呼叫任何工具："
         )
 
         try:
@@ -113,18 +149,6 @@ class MainAgent:
             return collected
         return await self.philosopher.run(question)
 
-    async def delegate_to_subagent(self, task: str) -> str:
-        """Tool: delegate execution to sub-agent."""
-        subagent_name = type(self.sub_agent).__name__
-        logger.info("Main agent -> subagent (%s): %s", subagent_name, task)
-        print(f"[LOG] main -> subagent({subagent_name}): {task}")
-        if hasattr(self.sub_agent, "run_stream"):
-            collected = ""
-            async for chunk in self.sub_agent.run_stream(task):
-                collected += chunk
-            return collected
-        return await self.sub_agent.run(task)
-
     async def run(
         self,
         prompt: str,
@@ -138,7 +162,9 @@ class MainAgent:
                 self._last_messages = result.all_messages()
             except Exception:
                 self._last_messages = None
-            return result.output
+            output = result.output
+
+            return output
 
         # 多輪討論流程：主 agent 與哲學家 co-agent 一來一回討論，直到哲學家表示可作為結論或達到最大輪數
         max_rounds = 3

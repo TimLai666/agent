@@ -38,6 +38,15 @@ def add_basic_tools(agent: Agent) -> None:
             return f"{now.isoformat()} (timezone info unavailable)"
 
     @agent.tool_plain
+    def get_time() -> str:
+        """Compatibility alias: same as `get_now()`.
+
+        Some prompts or models may call `get_time()`; register it as an alias to
+        avoid 'tool not found' errors.
+        """
+        return get_now()
+
+    @agent.tool_plain
     def get_weekday(date_str: str) -> str:
         """Get the weekday of a given date in English."""
         logger.info(f"Getting weekday for date: {date_str}")
