@@ -53,7 +53,7 @@ async def main() -> None:
         agent: Agent[None, str] = Agent(
             model=model,
             system_prompt=SYSTEM_PROMPT,
-            # tools=[duckduckgo_search_tool(max_results=10)],
+            tools=[],
         )
 
         add_all_tools(agent, MODEL_NAME, OPENAI_BASE_URL, OPENAI_API_KEY)
