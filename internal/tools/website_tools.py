@@ -1,4 +1,3 @@
-import asyncio
 import os
 import random
 from typing import Any
@@ -14,10 +13,6 @@ from selenium.webdriver.remote.webelement import WebElement
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 
-from internal.co_agents.browser_use_agent import (
-    BrowserUseCoAgentOutputFormat,
-    browser_use_agent,
-)
 from internal.logger import logger
 
 
@@ -100,28 +95,7 @@ def add_website_tools(
     #     logger.debug(f"Cleaned text: {cleaned_text[:100]}...")
     #     return cleaned_text
 
-    @agent.tool_plain
-    def advanced_browser_control(
-        task: str, additional_information_about_the_task: str
-    ) -> BrowserUseCoAgentOutputFormat:
-        """
-        Run the browser use agent with the specified task, such as clicking a button, filling a form, etc.
-        This tool is used to perform complex web browsing tasks.
-        It will return the result of the task and related links if available.
-
-        You should describe the task as clearly as possible, so the agent can understand what to do.
-        """
-        logger.info(f"Running advanced browser control task: {task}")
-        result: BrowserUseCoAgentOutputFormat = asyncio.run(
-            browser_use_agent(
-                task=task,
-                message_context=additional_information_about_the_task,
-                model=model,
-                base_url=base_url,
-                api_key=api_key,
-            )
-        )
-        return result
+    # MCP tools from browser-use are now registered directly via pydantic_ai.
 
 
 class BaseWebCrawler:

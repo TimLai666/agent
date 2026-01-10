@@ -1,8 +1,9 @@
-import webbrowser
-import tempfile
-from pydantic_ai import Agent
 import os
+import tempfile
 import time
+import webbrowser
+
+from pydantic_ai import Agent
 
 from internal.logger import logger
 
@@ -36,7 +37,9 @@ def add_interactive_tools(agent: Agent) -> None:
         logger.info("Opening web page from HTML string.")
         opened_successful: bool = False
         try:
-            with tempfile.NamedTemporaryFile('w', delete=False, suffix='.html', encoding='utf-8') as f:
+            with tempfile.NamedTemporaryFile(
+                "w", delete=False, suffix=".html", encoding="utf-8"
+            ) as f:
                 f.write(html_str)
                 opened_successful = webbrowser.open(f.name)
             time.sleep(1)  # Give the browser time to open
@@ -58,7 +61,8 @@ def add_interactive_tools(agent: Agent) -> None:
             return f"File not found: {file_path}"
         try:
             opened_successful: bool = webbrowser.open(
-                f'file://{os.path.abspath(file_path)}')
+                f"file://{os.path.abspath(file_path)}"
+            )
             time.sleep(1)  # Give the browser time to open
             if not opened_successful:
                 raise RuntimeError("Failed to open the web page.")

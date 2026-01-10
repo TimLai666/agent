@@ -28,7 +28,7 @@ def add_stock_market_tools(agent: Agent) -> None:
         logger.info(f"Fetching stock price for ticker: {ticker_symbol}")
         try:
             stock = yf.Ticker(ticker_symbol)
-            price = stock.history(period="1d")['Close'].iloc[-1]
+            price = stock.history(period="1d")["Close"].iloc[-1]
             return f"The current price of {ticker_symbol} is {price:.2f}."
         except Exception as e:
             return f"Error fetching stock price: {str(e)}"
@@ -40,15 +40,16 @@ def add_stock_market_tools(agent: Agent) -> None:
         Search for the ticker symbol if you don't know it.
 
         Parameters:
-            - ticker_symbol: 
+            - ticker_symbol:
             The stock ticker symbol (e.g., "AAPL" for Apple Inc.). For Taiwan stocks, use the format "XXXX.TW".
-            - period: 
+            - period:
             The period for which to fetch historical data (e.g., "1d", "1mo", "1y"). Use "5d" for 1 week.
         Returns:
             - A string representation of the historical stock data or an error message if the ticker is invalid.
         """
         logger.info(
-            f"Fetching historical data for ticker: {ticker_symbol}, period: {period}")
+            f"Fetching historical data for ticker: {ticker_symbol}, period: {period}"
+        )
         try:
             stock = yf.Ticker(ticker_symbol)
             history = stock.history(period=period)

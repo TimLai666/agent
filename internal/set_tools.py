@@ -19,5 +19,5 @@ def add_all_tools(
     add_python_tools(agent)
     add_terminal_tools(agent)
     add_interactive_tools(agent)
-    add_website_tools(agent, model=model, base_url=base_url, api_key=api_key)
+    # add_website_tools(agent, model=model, base_url=base_url, api_key=api_key)
     add_stock_market_tools(agent)

@@ -1,5 +1,6 @@
 import os
 import re
+
 from pydantic_ai import Agent
 
 from internal.cli import confirm
@@ -45,7 +46,9 @@ def add_file_tools(agent: Agent) -> None:
         return file_tools_manager.find_files_with_fragment(fragment_regx, files)
 
     @agent.tool_plain
-    def find_all_lines_in_file_with_fragment(fragment_regx: str, file_path: str) -> list[str]:
+    def find_all_lines_in_file_with_fragment(
+        fragment_regx: str, file_path: str
+    ) -> list[str]:
         """Find all lines in a file that contain a specific fragment.
 
         Parameters:
@@ -55,7 +58,9 @@ def add_file_tools(agent: Agent) -> None:
         Returns:
             list[str]: A list of matching lines.
         """
-        return file_tools_manager.find_all_lines_in_file_with_fragment(fragment_regx, file_path)
+        return file_tools_manager.find_all_lines_in_file_with_fragment(
+            fragment_regx, file_path
+        )
 
     @agent.tool_plain
     def read_file(file_path: str) -> str:
@@ -107,21 +112,21 @@ class FileTools:
         logger.info(f"Listing files in directory: {dir}")
         try:
             files: list[str] = os.listdir(dir)
-            return ', '.join(files)
+            return ", ".join(files)
         except FileNotFoundError:
             return f"Directory '{dir}' not found."
         except Exception as e:
             logger.error(f"Error listing files in directory {dir}: {str(e)}")
             return str(e)
 
-    def find_files_with_fragment(self, fragment_regx: str, files: list[str]) -> list[str]:
-        logger.info(
-            f"Finding matches in {files} with fragment: {fragment_regx}")
+    def find_files_with_fragment(
+        self, fragment_regx: str, files: list[str]
+    ) -> list[str]:
+        logger.info(f"Finding matches in {files} with fragment: {fragment_regx}")
         try:
-
             matching_files: list[str] = []
             for file in files:
-                with open(file, 'r', encoding='utf-8') as f:
+                with open(file, "r", encoding="utf-8") as f:
                     file_content = f.read()
                 if re.search(fragment_regx, file_content):
                     matching_files.append(file)
@@ -129,32 +134,34 @@ class FileTools:
                 return [f"No files found matching regex '{fragment_regx}'."]
             return matching_files
         except Exception as e:
-            logger.error(
-                f"Error finding files with fragment {fragment_regx}: {str(e)}")
+            logger.error(f"Error finding files with fragment {fragment_regx}: {str(e)}")
             return [str(e)]
 
-    def find_all_lines_in_file_with_fragment(self, fragment_regx: str, file_path: str) -> list[str]:
-        logger.info(
-            f"Finding all lines in file with fragment: {fragment_regx}")
+    def find_all_lines_in_file_with_fragment(
+        self, fragment_regx: str, file_path: str
+    ) -> list[str]:
+        logger.info(f"Finding all lines in file with fragment: {fragment_regx}")
         try:
-            with open(file_path, 'r', encoding='utf-8') as file:
+            with open(file_path, "r", encoding="utf-8") as file:
                 content = file.read()
             if not content:
                 return [f"File '{file_path}' is empty or not found."]
-            matches = [line for line in content.splitlines()
-                       if re.search(fragment_regx, line)]
+            matches = [
+                line for line in content.splitlines() if re.search(fragment_regx, line)
+            ]
             if not matches:
-                return [f"No matches found in file '{file_path}' for fragment: {fragment_regx}"]
+                return [
+                    f"No matches found in file '{file_path}' for fragment: {fragment_regx}"
+                ]
             return matches
         except Exception as e:
-            logger.error(
-                f"Error finding fragment in file {file_path}: {str(e)}")
+            logger.error(f"Error finding fragment in file {file_path}: {str(e)}")
             return [str(e)]
 
     def read_file(self, file_path: str) -> str:
         logger.info(f"Reading file: {file_path}")
         try:
-            with open(file_path, 'r', encoding='utf-8') as file:
+            with open(file_path, "r", encoding="utf-8") as file:
                 return file.read()
         except FileNotFoundError:
             return f"File '{file_path}' not found."
@@ -166,13 +173,13 @@ class FileTools:
         try:
             if not confirm(
                 message=f"Agent wants to modify file '{file_path}', allow?",
-                default_choice='Y'
+                default_choice="Y",
             ):
                 raise PermissionError("File modification cancelled by user.")
             logger.info(f"Modifying file: {file_path}")
             if not os.path.exists(file_path):
                 raise FileNotFoundError(f"File '{file_path}' does not exist.")
-            with open(file_path, 'w', encoding='utf-8') as file:
+            with open(file_path, "w", encoding="utf-8") as file:
                 file.write(content)
             return f"File '{file_path}' modified successfully."
         except FileNotFoundError:
@@ -185,7 +192,7 @@ class FileTools:
         try:
             if not confirm(
                 message=f"Agent wants to rename '{path}' to '{new_name}', allow?",
-                default_choice='Y'
+                default_choice="Y",
             ):
                 raise PermissionError("File renaming cancelled by user.")
             logger.info(f"Renaming '{path}' to '{new_name}'")
@@ -204,7 +211,7 @@ class FileTools:
         try:
             if not confirm(
                 message=f"Agent wants to create a new directory '{dir}', allow?",
-                default_choice='Y'
+                default_choice="Y",
             ):
                 raise PermissionError("Directory creation cancelled by user.")
             logger.info(f"Creating new directory: {dir}")
@@ -220,13 +227,13 @@ class FileTools:
         try:
             if not confirm(
                 message=f"Agent wants to create a new file at '{file_path}', allow?",
-                default_choice='Y'
+                default_choice="Y",
             ):
                 raise PermissionError("File creation cancelled by user.")
             logger.info(f"Creating new file: {file_path}")
             if os.path.exists(file_path):
                 raise FileExistsError(f"File '{file_path}' already exists.")
-            with open(file_path, 'w', encoding='utf-8') as file:
+            with open(file_path, "w", encoding="utf-8") as file:
                 file.write(content)
             return f"File '{file_path}' created successfully."
         except Exception as e:
