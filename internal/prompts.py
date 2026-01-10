@@ -23,18 +23,7 @@ def get_prompt(key: str, default: str = "") -> str:
 
 
 def _build_system_prompt() -> str:
-    direct = _PROMPTS.get("SYSTEM_PROMPT", "")
-    if direct:
-        return direct
-
-    parts_raw = _PROMPTS.get("SYSTEM_PROMPT_PARTS", "")
-    if not parts_raw:
-        return ""
-
-    parts: list[str] = [line.strip() for line in parts_raw.splitlines() if line.strip()]
-    sections = [get_prompt(part, "") for part in parts]
-    sections = [section for section in sections if section]
-    return "\n\n".join(sections).strip()
+    return _PROMPTS.get("SYSTEM_PROMPT", "").strip()
 
 
 SYSTEM_PROMPT: str = _build_system_prompt()

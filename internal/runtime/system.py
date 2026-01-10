@@ -1,3 +1,4 @@
+import asyncio
 import os
 import warnings
 from contextlib import AsyncExitStack
@@ -6,14 +7,15 @@ from dotenv import load_dotenv
 from httpx import AsyncClient
 from pydantic_ai.messages import ModelRequest, ModelResponse
 
-from internal.agents import FunctionCallAgent, MainAgent
-from internal.co_agents import PhilosopherCoAgent, SupportCoAgent
+from internal.agents import MainAgent
+from internal.co_agents import PhilosopherCoAgent
 from internal.logger import logger
 from internal.services.agent_factory import load_base_config
 from internal.services.voice_manager import VoiceManager
-from internal.sub_agents import FunctionCallSubAgent
+from internal.sub_agents import FunctionCallAgent, FunctionCallSubAgent
 
 HISTORY_LIMIT = 30
+TYPEWRITER_DELAY = 0.04
 
 
 async def run_cli() -> None:
@@ -30,12 +32,11 @@ async def run_cli() -> None:
     async with AsyncClient(verify=False) as http_client:
         function_call_agent = FunctionCallAgent.create(base_config, env, http_client)
         philosopher = PhilosopherCoAgent.create(base_config, env, http_client)
-        co_agent = SupportCoAgent.create(base_config, env, http_client, philosopher)
         sub_agent = FunctionCallSubAgent.create(
             base_config, env, http_client, function_call_agent
         )
         main_agent = MainAgent.create(
-            base_config, env, http_client, co_agent, philosopher, sub_agent
+            base_config, env, http_client, philosopher, sub_agent
         )
 
         chat_history: list[ModelRequest | ModelResponse] | None = None
@@ -62,10 +63,37 @@ async def run_cli() -> None:
                     async with main_agent.agent.run_stream(
                         user_prompt=user_input, message_history=chat_history
                     ) as result:
+                        printed = False
                         async for message in result.stream_text(delta=True):
-                            print(message, end="", flush=True)
-                        print()
-                        chat_history = result.all_messages()[-HISTORY_LIMIT:]
+                            if not message:
+                                continue
+                            printed = True
+                            for char in message:
+                                print(char, end="", flush=True)
+                                await asyncio.sleep(TYPEWRITER_DELAY)
+
+                        if not printed:
+                            output = await result.get_output()
+                            if output:
+                                printed = True
+                                for char in output:
+                                    print(char, end="", flush=True)
+                                    await asyncio.sleep(TYPEWRITER_DELAY)
+                                print()
+                                chat_history = result.all_messages()[-HISTORY_LIMIT:]
+                            else:
+                                fallback = await main_agent.agent.run(
+                                    user_prompt=user_input,
+                                    message_history=chat_history,
+                                )
+                                for char in fallback.output:
+                                    print(char, end="", flush=True)
+                                    await asyncio.sleep(TYPEWRITER_DELAY)
+                                print()
+                                chat_history = fallback.all_messages()[-HISTORY_LIMIT:]
+                        else:
+                            print()
+                            chat_history = result.all_messages()[-HISTORY_LIMIT:]
 
                 except KeyboardInterrupt:
                     break

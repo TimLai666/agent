@@ -22,7 +22,7 @@ class PhilosopherCoAgent(CoAgent):
     def create(
         cls, base_config: AgentConfig, env: dict[str, str], http_client: AsyncClient
     ) -> "PhilosopherCoAgent":
-        config = load_agent_config_chain(["CO", cls.ENV_PREFIX], base_config, env)
+        config = load_agent_config_chain(["MAIN", cls.ENV_PREFIX], base_config, env)
         model = create_openai_model(config, http_client)
         agent: Agent[None, str] = Agent(
             model=model,

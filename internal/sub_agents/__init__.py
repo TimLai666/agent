@@ -1,4 +1,4 @@
 from .base import SubAgent
-from .function_call import FunctionCallSubAgent
+from .function_call import FunctionCallAgent, FunctionCallSubAgent
 
-__all__ = ["FunctionCallSubAgent", "SubAgent"]
+__all__ = ["FunctionCallAgent", "FunctionCallSubAgent", "SubAgent"]
