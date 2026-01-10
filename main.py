@@ -61,23 +61,35 @@ async def main() -> None:
             ),
         )
 
-        mcp_env = os.environ.copy()
+        mcp_env_base = os.environ.copy()
         if openai_api_key:
-            mcp_env["OPENAI_API_KEY"] = openai_api_key
+            mcp_env_base["OPENAI_API_KEY"] = openai_api_key
         if model_name:
-            mcp_env["BROWSER_USE_LLM_MODEL"] = model_name
+            mcp_env_base["BROWSER_USE_LLM_MODEL"] = model_name
 
-        browser_use_mcp = MCPServerStdio(
+        headed_env = mcp_env_base.copy()
+        headed_env["BROWSER_USE_HEADLESS"] = "false"
+        browser_use_headed = MCPServerStdio(
             command=sys.executable,
             args=["-m", "browser_use.mcp.server"],
-            env=mcp_env,
+            env=headed_env,
+            tool_prefix="browser_headed",
+        )
+
+        headless_env = mcp_env_base.copy()
+        headless_env["BROWSER_USE_HEADLESS"] = "true"
+        browser_use_headless = MCPServerStdio(
+            command=sys.executable,
+            args=["-m", "browser_use.mcp.server"],
+            env=headless_env,
+            tool_prefix="browser_headless",
         )
         agent: Agent[None, str] = Agent(
             model=model,
             system_prompt=SYSTEM_PROMPT,
             tools=[],
             model_settings={"temperature": model_temperature},
-            mcp_servers=[browser_use_mcp],
+            mcp_servers=[browser_use_headed, browser_use_headless],
         )
 
         add_all_tools(agent, model_name, openai_base_url, openai_api_key)
