@@ -28,7 +28,7 @@ class VoiceManager:
             )
 
             # 使用 Whisper 進行辨識
-            result = self.model.transcribe(audio_np, language="zh")
+            result = self.model.transcribe(audio_np, language="zh", fp16=False)
             text = result["text"].strip()
             return text
         except Exception as e:

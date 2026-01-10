@@ -1,19 +1,23 @@
-import random
-import os
-import undetected_chromedriver as uc
 import asyncio
+import os
+import random
 from typing import Any
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.remote.webelement import WebElement
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.common.action_chains import ActionChains
-from selenium.webdriver.common.keys import Keys
-from selenium.common.exceptions import NoSuchElementException
-from selenium.webdriver.common.by import By
-from pydantic_ai import Agent
-from bs4 import BeautifulSoup
 
-from internal.co_agents.browser_use_agent import browser_use_agent, BrowserUseCoAgentOutputFormat
+import undetected_chromedriver as uc
+from bs4 import BeautifulSoup
+from pydantic_ai import Agent
+from selenium.common.exceptions import NoSuchElementException
+from selenium.webdriver.common.action_chains import ActionChains
+from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.remote.webelement import WebElement
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.support.ui import WebDriverWait
+
+from internal.co_agents.browser_use_agent import (
+    BrowserUseCoAgentOutputFormat,
+    browser_use_agent,
+)
 from internal.logger import logger
 
 
@@ -47,16 +51,16 @@ def add_website_tools(agent: Agent) -> None:
         with BaseWebCrawler() as crawler:
             try:
                 crawler.driver.get(url)
-                body: WebElement = crawler.driver.find_element(
-                    By.TAG_NAME, 'body')
+                body: WebElement = crawler.driver.find_element(By.TAG_NAME, "body")
                 crawler.random_mouse_move(body, times=random.randint(3, 8))
                 WebDriverWait(crawler.driver, 10).until(
-                    lambda d: d.execute_script(
-                        'return document.readyState') == 'complete'
+                    lambda d: d.execute_script("return document.readyState")
+                    == "complete"
                 )
                 html = crawler.driver.page_source
-            except Exception:
-                pass
+            except Exception as e:
+                logger.error(f"Error accessing website {url}: {str(e)}")
+                return f"Error browsing website: {str(e)}"
         # 用 BeautifulSoup 清理成 AI 容易理解的格式
         soup = BeautifulSoup(html, "html.parser")
         # 只取主要文字內容，保留表格結構
@@ -74,8 +78,7 @@ def add_website_tools(agent: Agent) -> None:
                 md.append(line)
                 # 標題下方加分隔線
                 if i == 0:
-                    md.append(
-                        "| " + " | ".join(["---"] * len(col_texts)) + " |")
+                    md.append("| " + " | ".join(["---"] * len(col_texts)) + " |")
             return "\n".join(md)
 
         # 將所有表格替換為 markdown 文字
@@ -83,17 +86,22 @@ def add_website_tools(agent: Agent) -> None:
             md_table = table_to_markdown(table)
             table.replace_with(soup.new_string(md_table))
 
-        text: str = soup.get_text(separator='\n', strip=True)
+        text: str = soup.get_text(separator="\n", strip=True)
         # 移除多餘空行
-        lines: list[str] = [line.strip()
-                            for line in text.splitlines() if line.strip()]
-        cleaned_text: str = '\n'.join(lines)
+        lines: list[str] = [line.strip() for line in text.splitlines() if line.strip()]
+        cleaned_text: str = "\n".join(lines)
+
+        if not cleaned_text:
+            return "Successfully accessed the website, but no readable text content was found."
+
         # Log first 100 characters for debugging
-        logger.debug(f"Cleaned text: {cleaned_text}")
+        logger.debug(f"Cleaned text: {cleaned_text[:100]}...")
         return cleaned_text
 
     @agent.tool_plain
-    def advanced_browser_control(task: str, additional_information_about_the_task: str) -> BrowserUseCoAgentOutputFormat:
+    def advanced_browser_control(
+        task: str, additional_information_about_the_task: str
+    ) -> BrowserUseCoAgentOutputFormat:
         """
         Run the browser use agent with the specified task, such as clicking a button, filling a form, etc.
         This tool is used to perform complex web browsing tasks.
@@ -102,8 +110,11 @@ def add_website_tools(agent: Agent) -> None:
         You should describe the task as clearly as possible, so the agent can understand what to do.
         """
         logger.info(f"Running advanced browser control task: {task}")
-        result: BrowserUseCoAgentOutputFormat = asyncio.run(browser_use_agent(
-            task=task, message_context=additional_information_about_the_task))
+        result: BrowserUseCoAgentOutputFormat = asyncio.run(
+            browser_use_agent(
+                task=task, message_context=additional_information_about_the_task
+            )
+        )
         return result
 
 
@@ -113,10 +124,12 @@ class BaseWebCrawler:
         try:
             user_dir: str = os.path.expanduser("~")
             base_dir: str = os.path.join(
-                user_dir, "appdata", "roaming", "undetected_chromedriver")
+                user_dir, "appdata", "roaming", "undetected_chromedriver"
+            )
             exe1: str = os.path.join(base_dir, "undetected_chromedriver.exe")
-            exe2: str = os.path.join(base_dir, "undetected",
-                                     "chromedriver-win32", "chromedriver.exe")
+            exe2: str = os.path.join(
+                base_dir, "undetected", "chromedriver-win32", "chromedriver.exe"
+            )
             # 先移除 exe2，避免 rename 時 FileExistsError
             if os.path.exists(exe2):
                 try:
@@ -135,7 +148,8 @@ class BaseWebCrawler:
         options.add_argument(f"--lang={lang}")
         options.add_argument("--disable-blink-features=AutomationControlled")
         options.add_argument(
-            "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36")
+            "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36"
+        )
         options.add_argument("--disable-infobars")
         options.add_argument("--start-maximized")
         if headless:
@@ -143,7 +157,8 @@ class BaseWebCrawler:
         self.driver = uc.Chrome(options=options)
         self.driver.implicitly_wait(10)
         self.driver.execute_script(
-            "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+            "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
+        )
 
     def __enter__(self):
         return self
@@ -156,14 +171,15 @@ class BaseWebCrawler:
 
     def random_mouse_move(self, body, times=5) -> None:
         win_rect: dict = self.driver.get_window_rect()
-        win_width: Any = win_rect['width']
-        win_height: Any = win_rect['height']
+        win_width: Any = win_rect["width"]
+        win_height: Any = win_rect["height"]
         for _ in range(times):
-            x = random.randint(0, max(0, win_width-10))
-            y = random.randint(0, max(0, win_height-10))
+            x = random.randint(0, max(0, win_width - 10))
+            y = random.randint(0, max(0, win_height - 10))
             try:
                 ActionChains(self.driver).move_to_element_with_offset(
-                    body, x, y).perform()
+                    body, x, y
+                ).perform()
             except Exception:
                 pass
 
@@ -174,29 +190,26 @@ class BaseWebCrawler:
 class GoogleCrawler(BaseWebCrawler):
     def search(self, query, pages=2) -> list[Any]:
         results: list = []
-        self.driver.get('https://www.google.com/')
-        search: WebElement = self.driver.find_element(By.NAME, 'q')
-        body: WebElement = self.driver.find_element(By.TAG_NAME, 'body')
+        self.driver.get("https://www.google.com/")
+        search: WebElement = self.driver.find_element(By.NAME, "q")
+        body: WebElement = self.driver.find_element(By.TAG_NAME, "body")
         self.random_mouse_move(body, times=random.randint(3, 8))
         ActionChains(self.driver).move_to_element(search).click().perform()
         for char in query:
             search.send_keys(char)
         search.send_keys(Keys.ENTER)
         for _ in range(pages):
-            items: list[WebElement] = self.driver.find_elements(
-                By.CLASS_NAME, "LC20lb")
-            addrs: list[WebElement] = self.driver.find_elements(
-                By.CLASS_NAME, "yuRUbf")
+            items: list[WebElement] = self.driver.find_elements(By.CLASS_NAME, "LC20lb")
+            addrs: list[WebElement] = self.driver.find_elements(By.CLASS_NAME, "yuRUbf")
             for item, addr in zip(items, addrs):
-                url: str | None = addr.find_element(
-                    By.TAG_NAME, 'a').get_attribute('href')
-                results.append({'title': item.text, 'url': url})
+                url: str | None = addr.find_element(By.TAG_NAME, "a").get_attribute(
+                    "href"
+                )
+                results.append({"title": item.text, "url": url})
             self.random_mouse_move(body, times=random.randint(2, 6))
             try:
-                next_btn: WebElement = self.driver.find_element(
-                    By.ID, 'pnnext')
-                ActionChains(self.driver).move_to_element(
-                    next_btn).click().perform()
+                next_btn: WebElement = self.driver.find_element(By.ID, "pnnext")
+                ActionChains(self.driver).move_to_element(next_btn).click().perform()
             except NoSuchElementException:
                 break
         return results
