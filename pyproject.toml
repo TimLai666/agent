@@ -5,6 +5,9 @@ requires-python = "==3.13.*"
 dependencies = [
     "beautifulsoup4>=4.13.4",
     "browser-use>=0.5.4",
+    "numpy>=2.2.3",
+    "openai>=1.63.2",
+    "openai-whisper>=20240930",
     "pyaudio>=0.2.14",
     "pydantic>=2.11.7",
     "pydantic-ai>=0.4.2",
@@ -15,5 +18,6 @@ dependencies = [
     "speechrecognition>=3.14.3",
     "tzlocal>=5.3.1",
     "undetected-chromedriver>=3.5.5",
+    "whisper>=1.1.10",
     "yfinance>=0.2.65",
 ]

@@ -1,29 +1,36 @@
-import speech_recognition as sr
-from typing import Any, Generator
-from speech_recognition import AudioData
+from typing import Any
 
-# 語音輸入功能測試
+import numpy as np
+import speech_recognition as sr
+import whisper
+
+# 語音輸入功能測試 (使用 OpenAI Whisper 本地模型)
 
 
 class VoiceManager:
-    def __init__(self, pause_threshold: int = 2) -> None:
+    def __init__(self, pause_threshold: int = 2, model_size: str = "base") -> None:
         self.recognizer: sr.Recognizer = sr.Recognizer()
-        self.recognizer.pause_threshold = pause_threshold  # 語音靜音閾值，靜音超過此時間則認為語音結束
+        self.recognizer.pause_threshold = pause_threshold  # 語音靜音閾值
+        print(f"正在載入 Whisper 模型 ({model_size})...")
+        self.model = whisper.load_model(model_size)
 
-    def recognize_speech(self) -> Any | str:
+    def recognize_speech(self) -> str | None:
         with sr.Microphone() as source:
             print("請開始說話:")
             self.recognizer.adjust_for_ambient_noise(source)
-            audio: sr.AudioData | Generator[AudioData,
-                                            Any, None] = self.recognizer.listen(source)
-        text: str | None = None
+            audio = self.recognizer.listen(source)
+
         try:
-            text = self.recognizer.recognize_google(
-                audio, language="zh-TW")
-        except sr.UnknownValueError:
-            text = None
-            print("無法識別語音，請再試一次。")
-        except sr.RequestError as e:
-            text = None
-            print(f"語音識別服務出錯: {e}")
-        return text
+            # 將語音數據轉換為 Whisper 可讀取的格式 (16kHz, float32 numpy array)
+            raw_data = audio.get_raw_data(convert_rate=16000, convert_width=2)
+            audio_np = (
+                np.frombuffer(raw_data, dtype=np.int16).astype(np.float32) / 32768.0
+            )
+
+            # 使用 Whisper 進行辨識
+            result = self.model.transcribe(audio_np, language="zh")
+            text = result["text"].strip()
+            return text
+        except Exception as e:
+            print(f"Whisper 識別出錯: {e}")
+            return None
