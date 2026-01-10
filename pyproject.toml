@@ -1,7 +1,7 @@
 [project]
 name = "agent"
 version = "0.1.0"
-requires-python = ">=3.13"
+requires-python = "==3.13.*"
 dependencies = [
     "beautifulsoup4>=4.13.4",
     "browser-use>=0.5.4",
