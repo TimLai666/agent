@@ -24,6 +24,17 @@ PROMPT_KEY = "MAIN_AGENT_PROMPT"
 ENV_PREFIX = "MAIN"
 
 
+def _plan_is_empty(plan_obj: dict) -> bool:
+    plan = plan_obj.get("execution_plan")
+    if plan is None:
+        plan = plan_obj.get("plan")
+    if plan is None:
+        plan = plan_obj.get("steps")
+    if plan is None:
+        plan = plan_obj
+    return isinstance(plan, list) and len(plan) == 0
+
+
 class MainAgent:
     PROMPT_KEY = PROMPT_KEY
     ENV_PREFIX = ENV_PREFIX
@@ -258,12 +269,31 @@ class MainAgent:
             current_args = args
             current_error = ""
             while True:
+                if self.sub_agents and isinstance(current_tool, str):
+                    sub_agent = self.sub_agents.get_agent(current_tool)
+                    if sub_agent:
+                        prompt = self._build_sub_agent_prompt(note, current_args)
+                        results.append(f"  -> delegated to sub-agent '{current_tool}'")
+                        try:
+                            if hasattr(sub_agent, "run_stream"):
+                                collected = ""
+                                async for chunk in sub_agent.run_stream(prompt):
+                                    collected += chunk
+                                results.append(f"  -> result: {collected}")
+                            else:
+                                res = await sub_agent.run(prompt)
+                                results.append(f"  -> result: {res}")
+                        except Exception as e:
+                            logger.exception("Error executing sub-agent %s", current_tool)
+                            results.append(f"  -> execution error: {e}")
+                        break
+
                 if not current_tool:
                     current_error = "Missing 'tool' field."
                 elif current_tool not in allowed_names:
                     current_error = f"Tool '{current_tool}' is not registered."
                 else:
-                    callable_obj = getattr(self.agent, current_tool, None)
+                    callable_obj = getattr(self.agent, str(current_tool), None) if isinstance(current_tool, str) else None
                     if callable_obj is None:
                         current_error = f"Tool '{current_tool}' declared but not found on agent runtime."
                     else:
@@ -436,6 +466,72 @@ class MainAgent:
                 lines.append(f"- {spec.name}")
         return "\n".join(lines) + "\n\n"
 
+    def _format_tools_context(self) -> str:
+        tools_meta = getattr(self.agent, "_registered_tools", None)
+        if tools_meta:
+            tools_lines = ["Available tools:"]
+            for t in tools_meta:
+                sig = t.get("signature", "()")
+                doc = t.get("doc", "").splitlines()[0] if t.get("doc") else ""
+                tools_lines.append(f"- {t.get('name')}{sig}: {doc}")
+            return "\n".join(tools_lines) + "\n\n"
+        return "Available tools: (none)\n\n"
+
+    def _build_sub_agent_prompt(self, note: str | None, args: dict[str, Any] | None) -> str:
+        if args:
+            for key in ("prompt", "question", "task", "input"):
+                value = args.get(key)
+                if value:
+                    return str(value)
+        if note:
+            return note
+        return "請協助處理此步驟。"
+
+    async def _request_execution_plan(
+        self,
+        prompt: str,
+        message_history: list[ModelRequest | ModelResponse] | None = None,
+        attempt: int = 1,
+    ) -> dict | None:
+        tools_text = self._format_tools_context()
+        sub_agents_text = self._format_sub_agents_context()
+        retry_hint = ""
+        if attempt > 1:
+            retry_hint = "Your previous output was not valid JSON. Output JSON only.\n\n"
+
+        plan_prompt = (
+            "You MUST propose tool calls before answering. Output ONLY a JSON object with key 'plan' (a list of steps). "
+            "If no tool is needed, return {\"plan\": []}. Prefer tools over prose; do not write analysis.\n"
+            "If delegation is needed, use tool ask_sub_agent with args {\"name\": \"...\", \"prompt\": \"...\"}.\n\n"
+            + retry_hint
+            + tools_text
+            + sub_agents_text
+            + f"User request:\n{prompt}\n\n"
+            "Return JSON only."
+        )
+
+        try:
+            result = await self.agent.run(plan_prompt, message_history=message_history)
+            out = (result.output or "").strip()
+            return await self._extract_execution_plan(out)
+        except Exception:
+            logger.exception("Failed to request execution plan")
+            return None
+
+    async def _ensure_eager_execution(
+        self,
+        prompt: str,
+        message_history: list[ModelRequest | ModelResponse] | None = None,
+    ) -> list[str]:
+        plan_obj = await self._request_execution_plan(prompt, message_history=message_history, attempt=1)
+        if plan_obj is None or _plan_is_empty(plan_obj):
+            plan_obj = await self._request_execution_plan(prompt, message_history=message_history, attempt=2)
+            if plan_obj is None or _plan_is_empty(plan_obj):
+                return []
+        if not plan_obj:
+            return []
+        return await self.execute_plan(plan_obj)
+
     async def _should_end_discussion(
         self,
         discussion: list[tuple[str, str]],
@@ -521,6 +617,10 @@ class MainAgent:
     ) -> str:
         # 根據 prompt 判斷是否要與哲學家多輪討論（由主 agent 模型決定）
         if not await self._should_consult_philosopher(prompt, message_history=message_history):
+            exec_results = await self._ensure_eager_execution(prompt, message_history=message_history)
+            if exec_results:
+                exec_text = "\n".join(exec_results)
+                prompt = f"{prompt}\n\nTool execution results:\n{exec_text}"
             # 直接由主 agent 回答（較快速路徑）
             result = await self.agent.run(prompt, message_history=message_history)
             try:
@@ -541,6 +641,7 @@ class MainAgent:
             depth_label = "medium"
             max_rounds = 2
         discussion: list[tuple[str, str]] = []
+        executed_plan = False
         current_prompt = prompt
 
         for r in range(max_rounds):
@@ -576,7 +677,7 @@ class MainAgent:
                     f"{round_tag} - {depth_instr} Before analyzing, explicitly define the discussion scope: list what to focus on (Focus) and what is out of scope for this discussion (Out of scope).\n\n"
                     + tools_text
                     + sub_agents_text
-                    + "SUB-AGENTS: If any sub-agent is relevant, explicitly recommend which one(s) to consult by name.\n\n"
+                    + "SUB-AGENTS: Sub-agents are not tools. If any sub-agent is relevant, explicitly recommend which one(s) to consult by name. If you need to delegate during execution_plan, use tool ask_sub_agent with args {\"name\": \"...\", \"prompt\": \"...\"}.\n\n"
                     + f"Then analyze the following question and list uncertainties, assumptions, and reasoning steps:\n\n{current_prompt}\n\n"
                     "CONCISENESS RULES: Keep responses short and focused. First give a one-line Focus summary, then list up to 3 key uncertainties (bulleted), then a very short analysis (no more than 4 sentences)."
                     "FACTS & TOOLS: If you require factual data or live information, produce a minimal 'execution_plan' JSON only (no long analysis) with the key 'plan' listing the necessary tool calls."
@@ -622,6 +723,7 @@ class MainAgent:
                     exec_results = await self.execute_plan(plan_obj)
                     exec_text = "\n".join(exec_results)
                     discussion.append(("Execution", exec_text))
+                    executed_plan = True
                     # Inform philosopher of the execution results and ask for follow-up analysis
                     try:
                         follow_prompt = (
@@ -649,8 +751,9 @@ class MainAgent:
             # 將主 agent 的候選回答回饋給哲學家，請其評論並指出是否可作為結論
             try:
                 critique_prompt = (
-                    "Review the Main Agent's candidate answer below. Point out errors, omissions, and suggestions for improvement,"
-                    " and indicate whether this can be considered the final conclusion. If yes, provide a clear 'Conclusion: ...'; otherwise, provide corrections and next steps:\n\n"
+                    "Review the Main Agent's candidate answer below. Focus ONLY on the task substance (facts, reasoning gaps, missing data),"
+                    " and do NOT critique response structure, formatting, or writing style. Indicate whether this can be considered the final conclusion."
+                    " If yes, provide a clear 'Conclusion: ...'; otherwise, provide corrections and next steps (prefer tool calls or sub-agent use if needed):\n\n"
                     + main_answer
                     + "\n\nOriginal question:\n"
                     + prompt
@@ -678,6 +781,11 @@ class MainAgent:
             current_prompt = f"{prompt}\n\n哲學家回饋：\n{phil_crit}\n\n請根據回饋修正並提出新的候選回答。"
 
         # 最終：請主 agent 根據整個討論產出最終答案，並一併輸出討論紀錄
+        if not executed_plan:
+            exec_results = await self._ensure_eager_execution(prompt, message_history=message_history)
+            if exec_results:
+                exec_text = "\n".join(exec_results)
+                discussion.append(("Execution", exec_text))
         final_prompt = f"原始問題：\n{prompt}\n\n完整討論紀錄：\n"
         for speaker, text in discussion:
             final_prompt += f"{speaker}: {text}\n\n"
@@ -700,6 +808,13 @@ class MainAgent:
         # decision
         consult = await self._should_consult_philosopher(prompt, message_history=message_history)
         if not consult:
+            exec_results = await self._ensure_eager_execution(prompt, message_history=message_history)
+            if exec_results:
+                exec_text = "\n".join(exec_results)
+                yield "--- Tool execution ---\n"
+                for line in exec_results:
+                    yield line + "\n"
+                prompt = f"{prompt}\n\nTool execution results:\n{exec_text}"
             async with self.agent.run_stream(user_prompt=prompt, message_history=message_history) as result:
                 async for chunk in result.stream_text(delta=True):
                     if not chunk:
@@ -720,6 +835,7 @@ class MainAgent:
             depth_label = "medium"
             max_rounds = 2
         discussion: list[tuple[str, str]] = []
+        executed_plan = False
         current_prompt = prompt
 
         # start discussion wrapper for stream
@@ -757,7 +873,7 @@ class MainAgent:
                 f"{round_tag} - {depth_instr} Before analyzing, explicitly define the discussion scope: list what to focus on (Focus) and what is out of scope for this discussion (Out of scope).\n\n"
                 + tools_text
                 + sub_agents_text
-                + "SUB-AGENTS: If any sub-agent is relevant, explicitly recommend which one(s) to consult by name.\n\n"
+                + "SUB-AGENTS: Sub-agents are not tools. If any sub-agent is relevant, explicitly recommend which one(s) to consult by name. If you need to delegate during execution_plan, use tool ask_sub_agent with args {\"name\": \"...\", \"prompt\": \"...\"}.\n\n"
                 + f"Then analyze the following question and list uncertainties, assumptions, and reasoning steps:\n\n{current_prompt}\n\n"
                 "CONCISENESS RULES: Keep responses short and focused. First give a one-line Focus summary, then list up to 3 key uncertainties (bulleted), then a very short analysis (no more than 4 sentences)."
                 "FACTS & TOOLS: If you require factual data or live information, produce a minimal 'execution_plan' JSON only (no long analysis) with the key 'plan' listing the necessary tool calls."
@@ -791,6 +907,7 @@ class MainAgent:
                     for line in exec_results:
                         yield line + "\n"
                     discussion.append(("Execution", "\n".join(exec_results)))
+                    executed_plan = True
                     # inform philosopher of execution results and stream their follow-up
                     exec_text = "\n".join(exec_results)
                     follow_prompt = (
@@ -834,8 +951,9 @@ class MainAgent:
 
             # philosopher critique (stream)
             critique_prompt = (
-                "Review the Main Agent's candidate answer below. Point out errors, omissions, and suggestions for improvement,"
-                " and indicate whether this can be considered the final conclusion. If yes, provide a clear 'Conclusion: ...'; otherwise, provide corrections and next steps:\n\n"
+                "Review the Main Agent's candidate answer below. Focus ONLY on the task substance (facts, reasoning gaps, missing data),"
+                " and do NOT critique response structure, formatting, or writing style. Indicate whether this can be considered the final conclusion."
+                " If yes, provide a clear 'Conclusion: ...'; otherwise, provide corrections and next steps (prefer tool calls or sub-agent use if needed):\n\n"
                 + collected_main
                 + "\n\nOriginal question:\n"
                 + prompt
@@ -869,6 +987,14 @@ class MainAgent:
             current_prompt = f"{prompt}\n\n哲學家回饋：\n{collected_crit}\n\n請根據回饋修正並提出新的候選回答。"
 
         # close discussion wrapper before final answer
+        if not executed_plan:
+            exec_results = await self._ensure_eager_execution(prompt, message_history=message_history)
+            if exec_results:
+                exec_text = "\n".join(exec_results)
+                yield "--- Tool execution ---\n"
+                for line in exec_results:
+                    yield line + "\n"
+                discussion.append(("Execution", exec_text))
         yield "</discussion>\n"
 
         # 最終答案（stream）
