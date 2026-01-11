@@ -11,6 +11,7 @@ from internal.prompts import (
     build_runtime_instructions,
     get_prompt,
     load_keyword_triggers,
+    load_subagent_background_config,
 )
 from internal.services.agent_factory import (
     AgentConfig,
@@ -928,26 +929,29 @@ class MainAgent:
         text = re.sub(r"```[\s\S]*?```", "", text)
         return re.sub(r"`[^`]+`", "", text)
 
-    def _apply_keyword_triggers(self, prompt: str) -> tuple[str, list[str]]:
+    def _apply_keyword_triggers(self, prompt: str) -> tuple[str, dict[str, Any]]:
         triggers = load_keyword_triggers()
         if not triggers or not prompt:
-            return prompt, []
+            return prompt, {"names": [], "background": False}
         cleaned = self._strip_code_blocks(prompt)
         matched: list[str] = []
         prefix_blocks: list[str] = []
         suffix_blocks: list[str] = []
+        background_enabled = False
         for trigger in triggers:
-            pattern = trigger.get("pattern", "")
+            pattern = str(trigger.get("pattern", ""))
             try:
                 regex = re.compile(pattern)
             except re.error:
                 continue
             if not regex.search(cleaned):
                 continue
-            name = trigger.get("name", "keyword")
-            inject = trigger.get("inject", "")
+            name = str(trigger.get("name", "keyword"))
+            inject = str(trigger.get("inject", ""))
             if not inject:
                 continue
+            if trigger.get("background") is True:
+                background_enabled = True
             block = f"[keyword:{name}]\n{inject}"
             if trigger.get("position") == "suffix":
                 suffix_blocks.append(block)
@@ -958,7 +962,7 @@ class MainAgent:
             prompt = "\n\n".join(prefix_blocks) + "\n\n" + prompt
         if suffix_blocks:
             prompt = prompt + "\n\n" + "\n\n".join(suffix_blocks)
-        return prompt, matched
+        return prompt, {"names": matched, "background": background_enabled}
 
     def _plan_requests_subagent(self, plan_list: list[dict[str, Any] | Any]) -> bool:
         if not self.sub_agents or self.sub_agents.is_empty():
@@ -1004,43 +1008,6 @@ class MainAgent:
             filtered.append(step)
         return filtered
 
-    async def _run_parallel_subagents(
-        self,
-        names: list[str],
-        prompt: str,
-    ) -> tuple[list[str], list[dict[str, Any]]]:
-        if not names or not self.sub_agents or self.sub_agents.is_empty():
-            return [], []
-        tasks = []
-        order: list[str] = []
-        for name in names:
-            resolved = self.sub_agents.resolve_name(name)
-            if not resolved:
-                continue
-            order.append(resolved)
-            tasks.append(self.ask_sub_agent(resolved, prompt))
-        if not tasks:
-            return [], []
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        output_lines: list[str] = []
-        steps_meta: list[dict[str, Any]] = []
-        for name, result in zip(order, results):
-            header = f"Parallel sub-agent: {name}"
-            output_lines.append(header)
-            step_meta: dict[str, Any] = {
-                "tool": "ask_sub_agent",
-                "args": {"name": name, "prompt": prompt},
-            }
-            if isinstance(result, Exception):
-                error_text = f"Execution error: {result}"
-                output_lines.append(f"  -> execution error: {error_text}")
-                step_meta["error"] = error_text
-            else:
-                output_lines.append(f"  -> result: {result}")
-                step_meta["result"] = result
-            steps_meta.append(step_meta)
-        return output_lines, steps_meta
-
     async def _decide_sub_agents(
         self,
         prompt: str,
@@ -1061,11 +1028,13 @@ class MainAgent:
             for item in summaries
         )
 
+        config = load_subagent_background_config()
+        max_auto_agents = int(config.get("max_auto_agents", 2))
         decision_prompt = (
             "你是主 agent 的子代理選擇器。根據使用者需求，從清單挑選最合適的子代理。\n"
             "若沒有明確需要，回傳空陣列。\n"
             "只回傳 JSON：{\"agents\": [\"name1\", \"name2\"]}。\n"
-            "最多選 2 個，必須是清單中的名稱，不要輸出其他文字。\n\n"
+            f"最多選 {max_auto_agents} 個，必須是清單中的名稱，不要輸出其他文字。\n\n"
             "可用子代理：\n"
             f"{candidates}\n\n"
             "使用者需求：\n"
@@ -1086,9 +1055,84 @@ class MainAgent:
                 resolved = self.sub_agents.resolve_name(name)
                 if resolved and resolved not in normalized:
                     normalized.append(resolved)
-            return normalized[:2]
+            return normalized[:max_auto_agents]
         except Exception:
             return []
+
+    def _resolve_background_mode(self, trigger_state: dict[str, Any]) -> bool:
+        config = load_subagent_background_config()
+        if config.get("background_always") is True:
+            return True
+        if config.get("background_on_trigger") is False:
+            return False
+        return bool(trigger_state.get("background"))
+
+    def _get_subagent_concurrency(self) -> int:
+        config = load_subagent_background_config()
+        value = config.get("max_concurrency", 3)
+        if isinstance(value, int):
+            return max(1, value)
+        return 3
+
+    async def _run_subagent_with_semaphore(
+        self,
+        name: str,
+        prompt: str,
+        semaphore: asyncio.Semaphore,
+    ) -> str:
+        async with semaphore:
+            return await self.ask_sub_agent(name, prompt)
+
+    def _start_subagent_tasks(
+        self,
+        names: list[str],
+        prompt: str,
+    ) -> tuple[list[str], list[asyncio.Task]]:
+        if not names or not self.sub_agents or self.sub_agents.is_empty():
+            return [], []
+        max_concurrency = self._get_subagent_concurrency()
+        semaphore = asyncio.Semaphore(max_concurrency)
+        order: list[str] = []
+        tasks: list[asyncio.Task] = []
+        for name in names:
+            resolved = self.sub_agents.resolve_name(name)
+            if not resolved:
+                continue
+            order.append(resolved)
+            tasks.append(
+                asyncio.create_task(
+                    self._run_subagent_with_semaphore(resolved, prompt, semaphore)
+                )
+            )
+        return order, tasks
+
+    async def _collect_subagent_results(
+        self,
+        order: list[str],
+        tasks: list[asyncio.Task],
+        prompt: str,
+    ) -> tuple[list[str], list[dict[str, Any]]]:
+        if not order or not tasks:
+            return [], []
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        output_lines: list[str] = []
+        steps_meta: list[dict[str, Any]] = []
+        for name, result in zip(order, results):
+            header = f"Parallel sub-agent: {name}"
+            output_lines.append(header)
+            step_meta: dict[str, Any] = {
+                "tool": "ask_sub_agent",
+                "args": {"name": name, "prompt": prompt},
+            }
+            if isinstance(result, Exception):
+                error_text = f"Execution error: {result}"
+                output_lines.append(f"  -> execution error: {error_text}")
+                step_meta["error"] = error_text
+            else:
+                output_lines.append(f"  -> result: {result}")
+                step_meta["result"] = result
+            steps_meta.append(step_meta)
+        return output_lines, steps_meta
 
     async def _should_end_discussion(
         self,
@@ -1177,7 +1221,7 @@ class MainAgent:
         self._previous_user_prompt = self._last_user_prompt
         self._last_user_prompt = prompt
         prompt, explicit_subagents = self._prepare_prompt(prompt)
-        prompt, _ = self._apply_keyword_triggers(prompt)
+        prompt, trigger_state = self._apply_keyword_triggers(prompt)
         plan_list = await self._build_plan_list(prompt, message_history=message_history)
         if explicit_subagents:
             plan_list = self._filter_plan_subagent_steps(plan_list, explicit_subagents)
@@ -1188,14 +1232,28 @@ class MainAgent:
             else await self._decide_sub_agents(prompt, message_history=message_history)
         )
         parallel_subagents = explicit_subagents or auto_subagents
-        parallel_results, parallel_meta = await self._run_parallel_subagents(parallel_subagents, prompt)
+        background_mode = self._resolve_background_mode(trigger_state)
         exec_results: list[str] = []
-        if parallel_results:
+        parallel_results: list[str] = []
+        parallel_meta: list[dict[str, Any]] = []
+        order, tasks = self._start_subagent_tasks(parallel_subagents, prompt)
+        if order and tasks and background_mode and plan_list:
+            exec_results.extend(await self.execute_plan({"plan": plan_list}))
+            plan_meta = list(self._last_execution_steps or [])
+            parallel_results, parallel_meta = await self._collect_subagent_results(order, tasks, prompt)
             exec_results.extend(parallel_results)
-        if plan_list:
-            exec_results.extend(await self.execute_plan({"plan": plan_list}, pre_steps_meta=parallel_meta))
+            self._last_execution_steps = plan_meta + parallel_meta
         else:
-            self._last_execution_steps = parallel_meta
+            if order and tasks:
+                parallel_results, parallel_meta = await self._collect_subagent_results(order, tasks, prompt)
+                if parallel_results:
+                    exec_results.extend(parallel_results)
+            if plan_list:
+                exec_results.extend(
+                    await self.execute_plan({"plan": plan_list}, pre_steps_meta=parallel_meta)
+                )
+            else:
+                self._last_execution_steps = parallel_meta
         current_time = self._extract_current_time()
         if current_time:
             prompt = f"Current time: {current_time}\n\n{prompt}"
@@ -1215,7 +1273,7 @@ class MainAgent:
         self._previous_user_prompt = self._last_user_prompt
         self._last_user_prompt = prompt
         prompt, explicit_subagents = self._prepare_prompt(prompt)
-        prompt, _ = self._apply_keyword_triggers(prompt)
+        prompt, trigger_state = self._apply_keyword_triggers(prompt)
         plan_list = await self._build_plan_list(prompt, message_history=message_history)
         if explicit_subagents:
             plan_list = self._filter_plan_subagent_steps(plan_list, explicit_subagents)
@@ -1226,19 +1284,21 @@ class MainAgent:
             else await self._decide_sub_agents(prompt, message_history=message_history)
         )
         parallel_subagents = explicit_subagents or auto_subagents
+        background_mode = self._resolve_background_mode(trigger_state)
         exec_results: list[str] = []
         step_outputs: list[str] = []
         steps_meta: list[dict[str, Any]] = []
         current_time = None
         parallel_results: list[str] = []
         parallel_meta: list[dict[str, Any]] = []
-        if parallel_subagents:
-            parallel_results, parallel_meta = await self._run_parallel_subagents(
-                parallel_subagents, prompt
-            )
+        order, tasks = self._start_subagent_tasks(parallel_subagents, prompt)
+        pending_parallel = bool(order and tasks)
+        if pending_parallel and (not background_mode or not plan_list):
+            parallel_results, parallel_meta = await self._collect_subagent_results(order, tasks, prompt)
             steps_meta.extend(parallel_meta)
             exec_results.extend(parallel_results)
-        if parallel_results or plan_list:
+            pending_parallel = False
+        if parallel_results or plan_list or pending_parallel:
             yield "<tool-execution>\n"
             open_block = True
             registered = getattr(self.agent, "_function_tools", {}) or {}
@@ -1422,6 +1482,16 @@ class MainAgent:
                     current_args = recovery.get("args", {})
 
                 steps_meta.append(step_meta)
+
+            if pending_parallel:
+                if not open_block:
+                    yield "<tool-execution>\n"
+                    open_block = True
+                parallel_results, parallel_meta = await self._collect_subagent_results(order, tasks, prompt)
+                steps_meta.extend(parallel_meta)
+                exec_results.extend(parallel_results)
+                for line in parallel_results:
+                    yield line + "\n"
 
             if open_block:
                 yield "</tool-execution>\n"

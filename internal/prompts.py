@@ -34,6 +34,7 @@ SYSTEM_PROMPT: str = _build_system_prompt()
 
 _LOCAL_INSTRUCTION_FILES = ("AGENTS.md", "CLAUDE.md", "CONTEXT.md")
 _KEYWORD_TRIGGER_FILE = PROMPTS_DIR / "KEYWORD_TRIGGERS.json"
+_SUBAGENT_BACKGROUND_FILE = PROMPTS_DIR / "SUBAGENT_BACKGROUND.json"
 
 
 def _find_upwards(start_dir: Path, filename: str) -> Path | None:
@@ -103,7 +104,7 @@ def build_runtime_instructions(base_instructions: str, start_dir: Path | None = 
 
 
 @lru_cache(maxsize=1)
-def load_keyword_triggers() -> list[dict[str, str]]:
+def load_keyword_triggers() -> list[dict[str, str | bool]]:
     if not _KEYWORD_TRIGGER_FILE.exists():
         return []
     try:
@@ -112,7 +113,7 @@ def load_keyword_triggers() -> list[dict[str, str]]:
     except Exception:
         return []
 
-    triggers: list[dict[str, str]] = []
+    triggers: list[dict[str, str | bool]] = []
     for item in data.get("triggers", []):
         if not isinstance(item, dict):
             continue
@@ -120,6 +121,7 @@ def load_keyword_triggers() -> list[dict[str, str]]:
         pattern = str(item.get("pattern", "")).strip()
         inject = str(item.get("inject", "")).strip()
         position = str(item.get("position", "prefix")).strip().lower()
+        background = bool(item.get("background", False))
         if not name or not pattern or not inject:
             continue
         if position not in {"prefix", "suffix"}:
@@ -130,6 +132,36 @@ def load_keyword_triggers() -> list[dict[str, str]]:
                 "pattern": pattern,
                 "inject": inject,
                 "position": position,
+                "background": background,
             }
         )
     return triggers
+
+
+@lru_cache(maxsize=1)
+def load_subagent_background_config() -> dict[str, int | bool]:
+    defaults: dict[str, int | bool] = {
+        "max_concurrency": 3,
+        "max_auto_agents": 2,
+        "background_on_trigger": True,
+        "background_always": False,
+    }
+    if not _SUBAGENT_BACKGROUND_FILE.exists():
+        return defaults
+    try:
+        raw = _SUBAGENT_BACKGROUND_FILE.read_text(encoding="utf-8")
+        data = json.loads(raw)
+    except Exception:
+        return defaults
+
+    result = defaults.copy()
+    if isinstance(data, dict):
+        if isinstance(data.get("max_concurrency"), int):
+            result["max_concurrency"] = max(1, int(data["max_concurrency"]))
+        if isinstance(data.get("max_auto_agents"), int):
+            result["max_auto_agents"] = max(1, int(data["max_auto_agents"]))
+        if isinstance(data.get("background_on_trigger"), bool):
+            result["background_on_trigger"] = data["background_on_trigger"]
+        if isinstance(data.get("background_always"), bool):
+            result["background_always"] = data["background_always"]
+    return result
