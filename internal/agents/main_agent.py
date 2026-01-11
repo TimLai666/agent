@@ -1047,16 +1047,26 @@ class MainAgent:
         relevant_skills = self.skills.find_relevant_skills(prompt, max_skills=3)
 
         if not relevant_skills:
+            logger.debug("[MainAgent] No relevant skills found for prompt")
             return prompt
 
         # Build skills context
         skills_context = self.skills.build_skills_context(relevant_skills)
 
         if skills_context:
+            skill_names = [skill.name for skill in relevant_skills]
             logger.info(
-                "Activated skills: %s",
-                ", ".join([skill.name for skill in relevant_skills])
+                "🎯 [MainAgent] Activated %d skill(s): %s",
+                len(skill_names),
+                ", ".join(skill_names)
             )
+            # Log individual skill details at debug level
+            for skill in relevant_skills:
+                logger.debug(
+                    "  └─ Skill '%s': %s",
+                    skill.name,
+                    skill.short_description()
+                )
             # Prepend skills context to the prompt
             prompt = f"{skills_context}\n\n---\n\n{prompt}"
 

@@ -45,6 +45,126 @@ def _format_sub_agents_list(main_agent: MainAgent) -> str:
     return "\n".join(lines)
 
 
+def _format_skills_list(main_agent: MainAgent) -> str:
+    """Format list of available skills."""
+    if not main_agent.skills or main_agent.skills.is_empty():
+        return "No skills loaded."
+
+    specs = main_agent.skills.list_summaries()
+    lines = [f"Available skills ({len(specs)} total):"]
+    for spec in specs:
+        name = spec.get("name", "")
+        desc = spec.get("description", "")
+        if desc:
+            # Truncate long descriptions
+            if len(desc) > 80:
+                desc = desc[:77] + "..."
+            lines.append(f"- {name}: {desc}")
+        else:
+            lines.append(f"- {name}")
+    return "\n".join(lines)
+
+
+def _format_skill_info(main_agent: MainAgent, skill_name: str) -> str:
+    """Format detailed information about a specific skill."""
+    if not main_agent.skills or main_agent.skills.is_empty():
+        return "No skills loaded."
+
+    skill = main_agent.skills.get_skill(skill_name)
+    if not skill:
+        return f"Skill '{skill_name}' not found. Use /skills to see available skills."
+
+    lines = [
+        f"Skill: {skill.name}",
+        f"Description: {skill.description}",
+        "",
+    ]
+
+    # Show resources if available
+    if skill.resources.has_resources():
+        lines.append("Bundled resources:")
+        resources = skill.resources.list_all()
+        if resources.get("scripts"):
+            lines.append(f"  Scripts: {', '.join(resources['scripts'])}")
+        if resources.get("references"):
+            lines.append(f"  References: {', '.join(resources['references'])}")
+        if resources.get("assets"):
+            lines.append(f"  Assets: {', '.join(resources['assets'])}")
+        lines.append("")
+
+    # Show content preview
+    content_preview = skill.content[:500] if len(skill.content) > 500 else skill.content
+    lines.append("Content preview:")
+    lines.append("-" * 40)
+    lines.append(content_preview)
+    if len(skill.content) > 500:
+        lines.append(f"... ({len(skill.content) - 500} more characters)")
+    lines.append("-" * 40)
+
+    return "\n".join(lines)
+
+
+def _test_skill_matching(main_agent: MainAgent, prompt: str) -> str:
+    """Test which skills would be matched for a given prompt."""
+    if not main_agent.skills or main_agent.skills.is_empty():
+        return "No skills loaded."
+
+    skills = main_agent.skills.find_relevant_skills(prompt, max_skills=5)
+
+    if not skills:
+        return f"No skills matched for prompt: '{prompt}'"
+
+    lines = [
+        f"Testing prompt: '{prompt}'",
+        f"Matched {len(skills)} skill(s):",
+        "",
+    ]
+
+    for i, skill in enumerate(skills, 1):
+        lines.append(f"{i}. {skill.name}")
+        lines.append(f"   {skill.short_description()}")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+def _handle_skills_command(args: list[str], main_agent: MainAgent) -> None:
+    """Handle /skills command and its subcommands."""
+    if not args or args[0] == "list":
+        # /skills or /skills list
+        print(_format_skills_list(main_agent))
+    elif args[0] == "info":
+        # /skills info <name>
+        if len(args) < 2:
+            print("Usage: /skills info <skill-name>")
+            return
+        skill_name = args[1]
+        print(_format_skill_info(main_agent, skill_name))
+    elif args[0] == "test":
+        # /skills test <prompt>
+        if len(args) < 2:
+            print("Usage: /skills test <prompt>")
+            return
+        test_prompt = " ".join(args[1:])
+        print(_test_skill_matching(main_agent, test_prompt))
+    elif args[0] == "reload":
+        # /skills reload
+        try:
+            from internal.skills_loader import load_skill_registry
+            main_agent.skills = load_skill_registry()
+            count = len(main_agent.skills.list_names())
+            print(f"Skills reloaded successfully. Loaded {count} skills.")
+        except Exception as e:
+            print(f"Failed to reload skills: {e}")
+    else:
+        print(f"Unknown skills command: {args[0]}")
+        print("Available commands:")
+        print("  /skills [list]        List all available skills")
+        print("  /skills info <name>   Show detailed info about a skill")
+        print("  /skills test <prompt> Test which skills match a prompt")
+        print("  /skills reload        Reload all skills from disk")
+
+
 def _format_history(history: list[tuple[str, str]], limit: int) -> str:
     if not history:
         return "No conversation history yet."
@@ -62,14 +182,18 @@ def _print_help() -> None:
         "\n".join(
             [
                 "Commands:",
-                "/help          Show this help.",
-                "/exit, /quit   Exit the session.",
-                "/clear         Clear the screen.",
-                "/history [N]   Show last N turns (default 5).",
-                "/last          Show last assistant reply.",
-                "/retry         Re-run the last user prompt.",
-                "/tools         List available tools.",
-                "/subagents     List available sub-agents.",
+                "/help              Show this help.",
+                "/exit, /quit       Exit the session.",
+                "/clear             Clear the screen.",
+                "/history [N]       Show last N turns (default 5).",
+                "/last              Show last assistant reply.",
+                "/retry             Re-run the last user prompt.",
+                "/tools             List available tools.",
+                "/subagents         List available sub-agents.",
+                "/skills [list]     List available skills.",
+                "/skills info <name> Show detailed info about a skill.",
+                "/skills test <text> Test which skills match a prompt.",
+                "/skills reload     Reload all skills from disk.",
             ]
         )
     )
@@ -113,6 +237,9 @@ def _handle_command(
         return None
     if name == "/subagents":
         print(_format_sub_agents_list(main_agent))
+        return None
+    if name == "/skills":
+        _handle_skills_command(args, main_agent)
         return None
 
     print("Unknown command. Type /help for options.")
