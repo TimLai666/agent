@@ -11,6 +11,8 @@ This system uses four agents:
 - Main agent talks to users and delegates execution via `delegate_to_subagent`.
 - Philosopher provides multi-turn reasoning threads.
 - Subagent runs tasks via `run_function_call_agent`.
+- Subagents can consult the philosopher co-agent through the `ask_philosopher` tool when they need deeper reasoning.
+- Each sub-agent under `internal/sub_agents/` is now automatically exposed as a main-agent tool named after the agent (prompt provided via the tool argument).
 - Function-call agent executes tools and MCP actions (including browser MCP).
 
 ## Code Organization

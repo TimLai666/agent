@@ -22,7 +22,7 @@ COMMAND_PREFIX = "/"
 
 
 def _format_tools_list(main_agent: MainAgent) -> str:
-    tools_meta = getattr(main_agent.agent, "_function_tools", {}) or {}
+    tools_meta = main_agent._get_function_tools()
     if not tools_meta:
         return "No tools registered."
     lines = ["Available tools:"]

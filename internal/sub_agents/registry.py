@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import re
 from pathlib import Path
+from typing import Awaitable, Callable
 
 from httpx import AsyncClient
 from pydantic_ai import Agent
@@ -14,6 +15,8 @@ from internal.services.agent_factory import (
     create_openai_model,
     load_agent_config_chain,
 )
+from internal.set_tools import add_all_tools
+from internal.co_agents.philosopher import PhilosopherCoAgent
 from internal.sub_agents.base import SubAgent
 
 SUB_AGENTS_DIR = Path(__file__).resolve().parent
@@ -81,6 +84,14 @@ class SubAgentRegistry:
             return None
         return self._agents.get(key)
 
+    def register_tools(self, agent: Agent) -> None:
+        if not self._specs:
+            return
+        for spec in self.list_specs():
+            tool = _build_subagent_tool(spec, self)
+            description = spec.short_description() or "Use this sub-agent to handle specific tasks."
+            agent.tool_plain(name=spec.name, description=description)(tool)
+
     def extract_mentions(self, text: str) -> tuple[str, list[str]]:
         if not text:
             return text, []
@@ -104,6 +115,7 @@ def load_sub_agent_registry(
     env: dict[str, str],
     http_client: AsyncClient,
     root_dir: Path | None = None,
+    philosopher: PhilosopherCoAgent | None = None,
 ) -> SubAgentRegistry:
     specs = load_sub_agent_specs(root_dir or SUB_AGENTS_DIR)
     if not specs:
@@ -123,15 +135,30 @@ def load_sub_agent_registry(
                 spec.path,
             )
             continue
+        prompt_text = spec.prompt.strip()
+        if philosopher:
+            prompt_text = (
+                f"{prompt_text}\n\n"
+                "When you need broader reasoning or planning guidance, "
+                "call the `ask_philosopher` tool to discuss the request with the philosopher co-agent."
+            )
         agent = Agent(
             model=model,
             system_prompt=SYSTEM_PROMPT,
-            instructions=build_runtime_instructions(spec.prompt),
+            instructions=build_runtime_instructions(prompt_text),
             tools=[],
             model_settings={"temperature": config.temperature},
         )
+        add_all_tools(
+            agent,
+            config.model_name,
+            config.base_url,
+            config.api_key,
+        )
+        if philosopher:
+            _register_philosopher_tools(agent, philosopher)
         spec_map[key] = spec
-        agents[key] = SubAgent(agent)
+        agents[key] = SubAgent(agent, philosopher=philosopher)
 
     return SubAgentRegistry(spec_map, agents)
 
@@ -252,3 +279,39 @@ def _normalize_name(name: str) -> str:
     while "--" in normalized:
         normalized = normalized.replace("--", "-")
     return normalized.strip("-")
+
+
+def _build_philosopher_tool(
+    tool_name: str, philosopher: PhilosopherCoAgent
+) -> Callable[[str], Awaitable[str]]:
+    async def tool(question: str) -> str:
+        return await philosopher.run(question)
+
+    tool.__name__ = tool_name
+    tool.__doc__ = "Ask the philosopher co-agent for deeper reasoning."
+    return tool
+
+
+def _register_philosopher_tools(
+    agent: Agent, philosopher: PhilosopherCoAgent
+) -> None:
+    for tool_name in ("ask_philosopher", "philosopher", "philosopher-co-agent"):
+        agent.tool_plain(_build_philosopher_tool(tool_name, philosopher))
+
+
+def _build_subagent_tool(
+    spec: SubAgentSpec, registry: SubAgentRegistry
+) -> Callable[[str], Awaitable[str]]:
+    normalized_name = _normalize_name(spec.name) or spec.name
+
+
+    async def tool(prompt: str) -> str:
+        agent = registry.get_agent(normalized_name)
+        if not agent:
+            return f"Sub-agent '{spec.name}' not available yet."
+        return await agent.run(prompt)
+
+    tool.__name__ = normalized_name
+    desc = spec.short_description() or "Use this sub-agent to handle specific tasks."
+    tool.__doc__ = desc
+    return tool

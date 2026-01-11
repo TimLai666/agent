@@ -58,7 +58,9 @@ class MainAgent:
     ) -> "MainAgent":
         if sub_agents is None:
             try:
-                sub_agents = load_sub_agent_registry(base_config, env, http_client)
+                sub_agents = load_sub_agent_registry(
+                    base_config, env, http_client, philosopher=philosopher
+                )
             except Exception:
                 logger.exception("Failed to load sub-agents; continuing without them")
                 sub_agents = SubAgentRegistry({}, {})
@@ -134,7 +136,12 @@ class MainAgent:
         # wrapped to log calls, arguments, results and exceptions.
         original_tool_plain = getattr(agent, "tool_plain", None)
         if original_tool_plain:
-            def logging_tool_plain(func):
+            def logging_tool_plain(func=None, /, **kwargs):
+                if func is None:
+                    def decorator(inner):
+                        return logging_tool_plain(inner, **kwargs)
+                    return decorator
+
                 # create a wrapped callable that logs on invocation
                 if inspect.iscoroutinefunction(func):
                     @functools.wraps(func)
@@ -162,7 +169,7 @@ class MainAgent:
                     wrapped_callable = wrapped_sync
 
                 # delegate to the original registration API with the wrapped callable
-                return original_tool_plain(wrapped_callable)
+                return original_tool_plain(wrapped_callable, **kwargs)
 
             cast(Any, agent).tool_plain = logging_tool_plain
 
@@ -179,6 +186,8 @@ class MainAgent:
                     main_agent.ask_sub_agent,
                 ],
             )
+            if sub_agents and not sub_agents.is_empty():
+                sub_agents.register_tools(agent)
             logger.info("Registered tools on MainAgent")
         except Exception:
             logger.exception("Failed to add tools to main agent; continuing without external tools")
@@ -303,7 +312,7 @@ class MainAgent:
             results.append(header)
             step_meta: dict[str, Any] = {"tool": tool_name, "args": args, "note": note}
 
-            registered = getattr(self.agent, "_function_tools", {}) or {}
+            registered = self._get_function_tools()
             allowed_names = set(registered.keys())
 
             attempts = 0
@@ -636,7 +645,7 @@ class MainAgent:
         return "\n".join(lines) + "\n\n"
 
     def _format_tools_context(self) -> str:
-        tools_meta = getattr(self.agent, "_function_tools", None)
+        tools_meta = self._get_function_tools()
         if tools_meta:
             tools_lines = ["Available tools:"]
             for name, tool in tools_meta.items():
@@ -654,6 +663,15 @@ class MainAgent:
                     tools_lines.append(f"- {name}{sig}")
             return "\n".join(tools_lines) + "\n\n"
         return "Available tools: (none)\n\n"
+
+    def _get_function_tools(self) -> dict[str, Any]:
+        tools_meta = getattr(self.agent, "_function_tools", None)
+        if tools_meta:
+            return tools_meta
+        toolset = getattr(self.agent, "_function_toolset", None)
+        if toolset and getattr(toolset, "tools", None):
+            return toolset.tools
+        return {}
 
     def _get_recent_tool_output(self) -> str | None:
         for step in reversed(self._last_execution_steps):
@@ -958,7 +976,7 @@ class MainAgent:
     def _prepare_prompt(self, prompt: str) -> tuple[str, list[str]]:
         if not prompt or not self.sub_agents or self.sub_agents.is_empty():
             return prompt, []
-        tools_meta = getattr(self.agent, "_function_tools", {}) or {}
+        tools_meta = self._get_function_tools()
         if "ask_sub_agent" not in tools_meta:
             return prompt, []
         return self.sub_agents.extract_mentions(prompt)
@@ -1055,7 +1073,7 @@ class MainAgent:
     ) -> list[str]:
         if not prompt or not self.sub_agents or self.sub_agents.is_empty():
             return []
-        tools_meta = getattr(self.agent, "_function_tools", {}) or {}
+        tools_meta = self._get_function_tools()
         if "ask_sub_agent" not in tools_meta:
             return []
 
@@ -1341,7 +1359,7 @@ class MainAgent:
         if parallel_results or plan_list or pending_parallel:
             yield "<tool-execution>\n"
             open_block = True
-            registered = getattr(self.agent, "_function_tools", {}) or {}
+            registered = self._get_function_tools()
             allowed_names = set(registered.keys())
             for line in parallel_results:
                 yield line + "\n"

@@ -1,11 +1,22 @@
+from __future__ import annotations
+
 from abc import ABC
+from typing import TYPE_CHECKING
 
 from pydantic_ai import Agent
 
+if TYPE_CHECKING:
+    from internal.co_agents.philosopher import PhilosopherCoAgent
+
 
 class SubAgent(ABC):
-    def __init__(self, agent: Agent[None, str]) -> None:
+    def __init__(
+        self,
+        agent: Agent[None, str],
+        philosopher: "PhilosopherCoAgent" | None = None,
+    ) -> None:
         self.agent = agent
+        self._philosopher = philosopher
 
     async def run(self, prompt: str) -> str:
         result = await self.agent.run(prompt)
@@ -18,3 +29,8 @@ class SubAgent(ABC):
                 if not chunk:
                     continue
                 yield chunk
+
+    async def ask_philosopher(self, question: str) -> str:
+        if not self._philosopher:
+            raise RuntimeError("Philosopher co-agent is not available.")
+        return await self._philosopher.run(question)
