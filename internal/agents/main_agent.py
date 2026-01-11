@@ -5,7 +5,13 @@ from pydantic_ai.messages import ModelRequest, ModelResponse
 
 from internal.co_agents.philosopher import PhilosopherCoAgent
 from internal.logger import logger
-from internal.prompts import SYSTEM_PROMPT, get_prompt
+import re
+from internal.prompts import (
+    SYSTEM_PROMPT,
+    build_runtime_instructions,
+    get_prompt,
+    load_keyword_triggers,
+)
 from internal.services.agent_factory import (
     AgentConfig,
     create_openai_model,
@@ -58,7 +64,7 @@ class MainAgent:
 
         config = load_agent_config_chain([cls.ENV_PREFIX], base_config, env)
         model = create_openai_model(config, http_client)
-        instructions = get_prompt(cls.PROMPT_KEY)
+        instructions = build_runtime_instructions(get_prompt(cls.PROMPT_KEY))
         if sub_agents and not sub_agents.is_empty():
             instructions += (
                 "\n\nSub-agents are available via tools: list_sub_agents, ask_sub_agent."
@@ -257,7 +263,11 @@ class MainAgent:
 
         return None
 
-    async def execute_plan(self, plan_obj: dict) -> list[str]:
+    async def execute_plan(
+        self,
+        plan_obj: dict,
+        pre_steps_meta: list[dict[str, Any]] | None = None,
+    ) -> list[str]:
         """Execute an execution_plan-like object.
 
         plan_obj may contain 'execution_plan' or 'plan' or 'steps'. Each step should be
@@ -846,6 +856,8 @@ class MainAgent:
             "每一步都必須明確指定 tool；無參數就省略 args 行。\n"
             "如果後續步驟需要前一步的輸出，使用 \"$last\" 或 \"$step1\" 佔位符。\n"
             "不得輸出 JSON。\n\n"
+            "重要：如果需求涉及時事/最新/新聞/趨勢，必須列出瀏覽器/MCP 工具或請求 trend-researcher；不可憑空編造。\n"
+            "若無法取得可靠來源，工具請求應為 none，並在 INTENT 指出需要使用者指定具體事件。\n\n"
             "常見需求對應工具（若符合就直接用）：\n"
             "- 詢問現在時間：get_now\n"
             "- 查某日期是星期幾：get_weekday，參數 date_str\n"
@@ -900,26 +912,183 @@ class MainAgent:
         if not isinstance(plan_list, list):
             plan_list = []
 
-        tools_meta = getattr(self.agent, "_function_tools", {}) or {}
-        if "get_now" in tools_meta:
-            has_time_step = any(
-                isinstance(step, dict) and step.get("tool") == "get_now"
-                for step in plan_list
-            )
-            if not has_time_step:
-                plan_list.insert(0, {"tool": "get_now"})
-
         return plan_list
 
-    async def _ensure_eager_execution(
+    def _prepare_prompt(self, prompt: str) -> tuple[str, list[str]]:
+        if not prompt or not self.sub_agents or self.sub_agents.is_empty():
+            return prompt, []
+        tools_meta = getattr(self.agent, "_function_tools", {}) or {}
+        if "ask_sub_agent" not in tools_meta:
+            return prompt, []
+        return self.sub_agents.extract_mentions(prompt)
+
+    def _strip_code_blocks(self, text: str) -> str:
+        if not text:
+            return text
+        text = re.sub(r"```[\s\S]*?```", "", text)
+        return re.sub(r"`[^`]+`", "", text)
+
+    def _apply_keyword_triggers(self, prompt: str) -> tuple[str, list[str]]:
+        triggers = load_keyword_triggers()
+        if not triggers or not prompt:
+            return prompt, []
+        cleaned = self._strip_code_blocks(prompt)
+        matched: list[str] = []
+        prefix_blocks: list[str] = []
+        suffix_blocks: list[str] = []
+        for trigger in triggers:
+            pattern = trigger.get("pattern", "")
+            try:
+                regex = re.compile(pattern)
+            except re.error:
+                continue
+            if not regex.search(cleaned):
+                continue
+            name = trigger.get("name", "keyword")
+            inject = trigger.get("inject", "")
+            if not inject:
+                continue
+            block = f"[keyword:{name}]\n{inject}"
+            if trigger.get("position") == "suffix":
+                suffix_blocks.append(block)
+            else:
+                prefix_blocks.append(block)
+            matched.append(name)
+        if prefix_blocks:
+            prompt = "\n\n".join(prefix_blocks) + "\n\n" + prompt
+        if suffix_blocks:
+            prompt = prompt + "\n\n" + "\n\n".join(suffix_blocks)
+        return prompt, matched
+
+    def _plan_requests_subagent(self, plan_list: list[dict[str, Any] | Any]) -> bool:
+        if not self.sub_agents or self.sub_agents.is_empty():
+            return False
+        for step in plan_list:
+            if not isinstance(step, dict):
+                continue
+            tool_name = step.get("tool")
+            if tool_name == "ask_sub_agent":
+                return True
+            if isinstance(tool_name, str) and self.sub_agents.resolve_name(tool_name):
+                return True
+        return False
+
+    def _filter_plan_subagent_steps(
+        self,
+        plan_list: list[dict[str, Any] | Any],
+        names: list[str],
+    ) -> list[dict[str, Any] | Any]:
+        if not names or not self.sub_agents or self.sub_agents.is_empty():
+            return plan_list
+        normalized = {self.sub_agents.resolve_name(name) for name in names}
+        normalized = {name for name in normalized if name}
+        if not normalized:
+            return plan_list
+        filtered: list[dict[str, Any] | Any] = []
+        for step in plan_list:
+            if not isinstance(step, dict):
+                filtered.append(step)
+                continue
+            tool_name = step.get("tool")
+            if tool_name == "ask_sub_agent":
+                target = ""
+                if isinstance(step.get("args"), dict):
+                    target = str(step.get("args", {}).get("name", "")).strip()
+                resolved = self.sub_agents.resolve_name(target) if target else None
+                if resolved and resolved in normalized:
+                    continue
+            if isinstance(tool_name, str):
+                resolved = self.sub_agents.resolve_name(tool_name)
+                if resolved and resolved in normalized:
+                    continue
+            filtered.append(step)
+        return filtered
+
+    async def _run_parallel_subagents(
+        self,
+        names: list[str],
+        prompt: str,
+    ) -> tuple[list[str], list[dict[str, Any]]]:
+        if not names or not self.sub_agents or self.sub_agents.is_empty():
+            return [], []
+        tasks = []
+        order: list[str] = []
+        for name in names:
+            resolved = self.sub_agents.resolve_name(name)
+            if not resolved:
+                continue
+            order.append(resolved)
+            tasks.append(self.ask_sub_agent(resolved, prompt))
+        if not tasks:
+            return [], []
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        output_lines: list[str] = []
+        steps_meta: list[dict[str, Any]] = []
+        for name, result in zip(order, results):
+            header = f"Parallel sub-agent: {name}"
+            output_lines.append(header)
+            step_meta: dict[str, Any] = {
+                "tool": "ask_sub_agent",
+                "args": {"name": name, "prompt": prompt},
+            }
+            if isinstance(result, Exception):
+                error_text = f"Execution error: {result}"
+                output_lines.append(f"  -> execution error: {error_text}")
+                step_meta["error"] = error_text
+            else:
+                output_lines.append(f"  -> result: {result}")
+                step_meta["result"] = result
+            steps_meta.append(step_meta)
+        return output_lines, steps_meta
+
+    async def _decide_sub_agents(
         self,
         prompt: str,
         message_history: list[ModelRequest | ModelResponse] | None = None,
     ) -> list[str]:
-        plan_list = await self._build_plan_list(prompt, message_history=message_history)
-        if not plan_list:
+        if not prompt or not self.sub_agents or self.sub_agents.is_empty():
             return []
-        return await self.execute_plan({"plan": plan_list})
+        tools_meta = getattr(self.agent, "_function_tools", {}) or {}
+        if "ask_sub_agent" not in tools_meta:
+            return []
+
+        summaries = self.sub_agents.list_summaries()
+        if not summaries:
+            return []
+
+        candidates = "\n".join(
+            f"- {item['name']}: {item['description']}" if item.get("description") else f"- {item['name']}"
+            for item in summaries
+        )
+
+        decision_prompt = (
+            "你是主 agent 的子代理選擇器。根據使用者需求，從清單挑選最合適的子代理。\n"
+            "若沒有明確需要，回傳空陣列。\n"
+            "只回傳 JSON：{\"agents\": [\"name1\", \"name2\"]}。\n"
+            "最多選 2 個，必須是清單中的名稱，不要輸出其他文字。\n\n"
+            "可用子代理：\n"
+            f"{candidates}\n\n"
+            "使用者需求：\n"
+            f"{prompt}\n"
+        )
+
+        try:
+            result = await self.agent.run(decision_prompt, message_history=message_history)
+            out = (result.output or "").strip()
+            parsed = json.loads(out)
+            agents = parsed.get("agents", [])
+            if not isinstance(agents, list):
+                return []
+            normalized = []
+            for name in agents:
+                if not isinstance(name, str):
+                    continue
+                resolved = self.sub_agents.resolve_name(name)
+                if resolved and resolved not in normalized:
+                    normalized.append(resolved)
+            return normalized[:2]
+        except Exception:
+            return []
 
     async def _should_end_discussion(
         self,
@@ -1007,7 +1176,26 @@ class MainAgent:
     ) -> str:
         self._previous_user_prompt = self._last_user_prompt
         self._last_user_prompt = prompt
-        exec_results = await self._ensure_eager_execution(prompt, message_history=message_history)
+        prompt, explicit_subagents = self._prepare_prompt(prompt)
+        prompt, _ = self._apply_keyword_triggers(prompt)
+        plan_list = await self._build_plan_list(prompt, message_history=message_history)
+        if explicit_subagents:
+            plan_list = self._filter_plan_subagent_steps(plan_list, explicit_subagents)
+        has_subagent_in_plan = self._plan_requests_subagent(plan_list)
+        auto_subagents = (
+            []
+            if explicit_subagents or has_subagent_in_plan
+            else await self._decide_sub_agents(prompt, message_history=message_history)
+        )
+        parallel_subagents = explicit_subagents or auto_subagents
+        parallel_results, parallel_meta = await self._run_parallel_subagents(parallel_subagents, prompt)
+        exec_results: list[str] = []
+        if parallel_results:
+            exec_results.extend(parallel_results)
+        if plan_list:
+            exec_results.extend(await self.execute_plan({"plan": plan_list}, pre_steps_meta=parallel_meta))
+        else:
+            self._last_execution_steps = parallel_meta
         current_time = self._extract_current_time()
         if current_time:
             prompt = f"Current time: {current_time}\n\n{prompt}"
@@ -1026,16 +1214,37 @@ class MainAgent:
         """Streamed version of run(): yields chunks from philosopher/subagents/main agent as they produce output."""
         self._previous_user_prompt = self._last_user_prompt
         self._last_user_prompt = prompt
+        prompt, explicit_subagents = self._prepare_prompt(prompt)
+        prompt, _ = self._apply_keyword_triggers(prompt)
         plan_list = await self._build_plan_list(prompt, message_history=message_history)
+        if explicit_subagents:
+            plan_list = self._filter_plan_subagent_steps(plan_list, explicit_subagents)
+        has_subagent_in_plan = self._plan_requests_subagent(plan_list)
+        auto_subagents = (
+            []
+            if explicit_subagents or has_subagent_in_plan
+            else await self._decide_sub_agents(prompt, message_history=message_history)
+        )
+        parallel_subagents = explicit_subagents or auto_subagents
         exec_results: list[str] = []
         step_outputs: list[str] = []
         steps_meta: list[dict[str, Any]] = []
         current_time = None
-        if plan_list:
+        parallel_results: list[str] = []
+        parallel_meta: list[dict[str, Any]] = []
+        if parallel_subagents:
+            parallel_results, parallel_meta = await self._run_parallel_subagents(
+                parallel_subagents, prompt
+            )
+            steps_meta.extend(parallel_meta)
+            exec_results.extend(parallel_results)
+        if parallel_results or plan_list:
             yield "<tool-execution>\n"
             open_block = True
             registered = getattr(self.agent, "_function_tools", {}) or {}
             allowed_names = set(registered.keys())
+            for line in parallel_results:
+                yield line + "\n"
             for idx, step in enumerate(plan_list, start=1):
                 tool_name = step.get("tool") if isinstance(step, dict) else None
                 args = step.get("args", {}) if isinstance(step, dict) else {}

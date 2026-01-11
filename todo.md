@@ -1,8 +1,0 @@
-我要把這個系統改成多agent架構 分為主agent 協助型的co-agent 和分工型的subagent
-主agent負責理解用戶需求和快速回復用戶
-co-agent負責協助主agent完成任務 co-agent裡有一個哲學家agent 當遇到複雜邏輯問題或是要制定執行計畫 主agent要找他討論
-subagent負責執行任務 subagent裡有一個負責function call的agent
-執行工作的mcp跟tool都綁在負責function call的agent
-查詢類的mcp則可以給主agent
-
-每個agent有自己的baseurl api_key model_name

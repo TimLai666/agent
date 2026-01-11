@@ -4,7 +4,7 @@ from pydantic_ai.messages import ModelRequest, ModelResponse
 
 from internal.co_agents.base import CoAgent
 from internal.logger import logger
-from internal.prompts import SYSTEM_PROMPT, get_prompt
+from internal.prompts import SYSTEM_PROMPT, build_runtime_instructions, get_prompt
 from internal.services.agent_factory import (
     AgentConfig,
     create_openai_model,
@@ -28,7 +28,7 @@ class PhilosopherCoAgent(CoAgent):
         agent: Agent[None, str] = Agent(
             model=model,
             system_prompt=SYSTEM_PROMPT,
-            instructions=get_prompt(cls.PROMPT_KEY),
+            instructions=build_runtime_instructions(get_prompt(cls.PROMPT_KEY)),
             tools=[],
             model_settings={"temperature": config.temperature},
         )

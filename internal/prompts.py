@@ -1,4 +1,6 @@
 from datetime import date
+from functools import lru_cache
+import json
 from pathlib import Path
 import sys
 
@@ -31,6 +33,7 @@ def _build_system_prompt() -> str:
 SYSTEM_PROMPT: str = _build_system_prompt()
 
 _LOCAL_INSTRUCTION_FILES = ("AGENTS.md", "CLAUDE.md", "CONTEXT.md")
+_KEYWORD_TRIGGER_FILE = PROMPTS_DIR / "KEYWORD_TRIGGERS.json"
 
 
 def _find_upwards(start_dir: Path, filename: str) -> Path | None:
@@ -97,3 +100,36 @@ def build_runtime_instructions(base_instructions: str, start_dir: Path | None = 
     if local_instructions:
         parts.append("\n\n".join(local_instructions))
     return "\n\n".join(parts)
+
+
+@lru_cache(maxsize=1)
+def load_keyword_triggers() -> list[dict[str, str]]:
+    if not _KEYWORD_TRIGGER_FILE.exists():
+        return []
+    try:
+        raw = _KEYWORD_TRIGGER_FILE.read_text(encoding="utf-8")
+        data = json.loads(raw)
+    except Exception:
+        return []
+
+    triggers: list[dict[str, str]] = []
+    for item in data.get("triggers", []):
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name", "")).strip()
+        pattern = str(item.get("pattern", "")).strip()
+        inject = str(item.get("inject", "")).strip()
+        position = str(item.get("position", "prefix")).strip().lower()
+        if not name or not pattern or not inject:
+            continue
+        if position not in {"prefix", "suffix"}:
+            position = "prefix"
+        triggers.append(
+            {
+                "name": name,
+                "pattern": pattern,
+                "inject": inject,
+                "position": position,
+            }
+        )
+    return triggers

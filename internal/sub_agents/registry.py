@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 from pathlib import Path
 
 from httpx import AsyncClient
 from pydantic_ai import Agent
 
 from internal.logger import logger
-from internal.prompts import SYSTEM_PROMPT
+from internal.prompts import SYSTEM_PROMPT, build_runtime_instructions
 from internal.services.agent_factory import (
     AgentConfig,
     create_openai_model,
@@ -16,6 +17,7 @@ from internal.services.agent_factory import (
 from internal.sub_agents.base import SubAgent
 
 SUB_AGENTS_DIR = Path(__file__).resolve().parent
+_MENTION_RE = re.compile(r"(?<![\\w`])@(\.?[^\s`,.]*(?:\.[^\s`,.]+)*)")
 
 
 @dataclass(frozen=True)
@@ -79,6 +81,23 @@ class SubAgentRegistry:
             return None
         return self._agents.get(key)
 
+    def extract_mentions(self, text: str) -> tuple[str, list[str]]:
+        if not text:
+            return text, []
+        matches: list[str] = []
+        seen: set[str] = set()
+        for match in _MENTION_RE.finditer(text):
+            raw = match.group(1)
+            name = self.resolve_name(raw)
+            if not name or name in seen:
+                continue
+            seen.add(name)
+            matches.append(name)
+        if not matches:
+            return text, []
+        cleaned = _strip_agent_mentions(text, set(matches))
+        return cleaned, matches
+
 
 def load_sub_agent_registry(
     base_config: AgentConfig,
@@ -107,7 +126,7 @@ def load_sub_agent_registry(
         agent = Agent(
             model=model,
             system_prompt=SYSTEM_PROMPT,
-            instructions=spec.prompt,
+            instructions=build_runtime_instructions(spec.prompt),
             tools=[],
             model_settings={"temperature": config.temperature},
         )
@@ -203,6 +222,23 @@ def _parse_tools(raw: str) -> list[str]:
         value = value[1:-1]
     tools = [item.strip() for item in value.split(",") if item.strip()]
     return tools
+
+
+def _strip_agent_mentions(text: str, names: set[str]) -> str:
+    if not text or not names:
+        return text
+    parts: list[str] = []
+    last = 0
+    for match in _MENTION_RE.finditer(text):
+        raw = match.group(1)
+        name = _normalize_name(raw)
+        if name in names:
+            parts.append(text[last:match.start()])
+            last = match.end()
+    parts.append(text[last:])
+    cleaned = "".join(parts)
+    cleaned = re.sub(r"\s{2,}", " ", cleaned).strip()
+    return cleaned
 
 
 def _normalize_name(name: str) -> str:
