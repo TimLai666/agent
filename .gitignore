@@ -5,3 +5,4 @@ __pycache__/
 
 _tmp_opencode
 _tmp_codex/
+.claude/
