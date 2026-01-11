@@ -804,8 +804,11 @@ class MainAgent:
         prompt: str,
         message_history: list[ModelRequest | ModelResponse] | None = None,
         attempt: int = 1,
+        force_tools: bool = False,
     ) -> dict | None:
-        draft = await self._draft_tool_requests(prompt, message_history=message_history)
+        draft = await self._draft_tool_requests(
+            prompt, message_history=message_history, force_tools=force_tools
+        )
         if not draft:
             return None
 
@@ -842,10 +845,18 @@ class MainAgent:
         self,
         prompt: str,
         message_history: list[ModelRequest | ModelResponse] | None = None,
+        force_tools: bool = False,
     ) -> str:
         tools_text = self._format_tools_context()
         sub_agents_text = self._format_sub_agents_context()
-        draft_prompt = (
+        force_hint = ""
+        if force_tools:
+            force_hint = (
+                "這是一個強制工具評估回合：若任何工具/子代?能提升準確性或避免猜測，"
+                "必須輸出 TOOL_REQUESTS，不可輸出 none。\n"
+                "若完全不需要工具（可直接回答且無需查證/執行），才可輸出 TOOL_REQUESTS: none。\n\n"
+            )
+        draft_prompt = (force_hint +
             "你是主 agent 的規劃器。先寫一段話描述你要做什麼、怎麼做，然後列出工具請求。\n"
             "輸出格式只允許下列兩種之一：\n"
             "1) INTENT: <一段話>\n"
@@ -886,6 +897,27 @@ class MainAgent:
             logger.exception("Failed to draft tool requests")
             return ""
 
+    async def _should_force_tool_use(
+        self,
+        prompt: str,
+        message_history: list[ModelRequest | ModelResponse] | None = None,
+    ) -> bool:
+        """Ask the main agent if a tool call is required to avoid guessing."""
+        decider = (
+            "你是工具使用判斷器。判斷此問題是否需要工具才能可靠回答。\n"
+            "若需要查檔案/執行命令/外部查證/多步推理驗證，force 應為 true。\n"
+            "若可直接回答且不需查證，force 為 false。\n"
+            "只輸出 JSON：{\"force\": true|false, \"reason\": \"...\"}\n\n"
+            f"使用者請求：\n{prompt}\n"
+        )
+        try:
+            res = await self.agent.run(decider, message_history=message_history)
+            out = (res.output or "").strip()
+            parsed = json.loads(out)
+            return bool(parsed.get("force", False))
+        except Exception:
+            return False
+
     async def _build_plan_list(
         self,
         prompt: str,
@@ -894,6 +926,14 @@ class MainAgent:
         plan_obj = await self._request_execution_plan(prompt, message_history=message_history, attempt=1)
         if plan_obj is None or _plan_is_empty(plan_obj):
             plan_obj = await self._request_execution_plan(prompt, message_history=message_history, attempt=2)
+        if plan_obj is None or _plan_is_empty(plan_obj):
+            if await self._should_force_tool_use(prompt, message_history=message_history):
+                plan_obj = await self._request_execution_plan(
+                    prompt,
+                    message_history=message_history,
+                    attempt=3,
+                    force_tools=True,
+                )
 
         plan_list: list[dict[str, Any]] | list[Any]
         if isinstance(plan_obj, dict):
