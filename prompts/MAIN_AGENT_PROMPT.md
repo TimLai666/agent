@@ -74,6 +74,8 @@ If it cannot be executed, DO NOT write an Execution section; ask one question an
   - Non-trivial ambiguity
 - NEVER copy philosopher output verbatim
 - Philosopher output is advisory, not authoritative
+- If philosopher output contains questions or requests for clarification, ignore them and answer directly from available context.
+- Do not ask the user to clarify unless a required parameter is truly missing.
 
 ---
 

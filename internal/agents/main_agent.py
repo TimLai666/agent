@@ -179,6 +179,9 @@ class MainAgent:
         self._planner_agent = planner_agent or agent
         self._last_messages: list[ModelRequest | ModelResponse] | None = None
         self._last_execution_steps: list[dict[str, Any]] = []
+        self._last_user_prompt: str | None = None
+        self._previous_user_prompt: str | None = None
+        self._last_assistant_reply: str | None = None
         # tools are registered via add_all_tools during create()
 
     async def _extract_execution_plan(self, text: str) -> dict | None:
@@ -290,12 +293,20 @@ class MainAgent:
                                 or ""
                             ).strip()
                         if not question:
-                            question = self._build_sub_agent_prompt(note, current_args)
-                        current_args = {"question": question}
+                            question = self._build_sub_agent_prompt(note, current_args, step_outputs)
+                        current_args = {
+                            "question": self._build_philosopher_prompt(
+                                note, current_args, step_outputs, question
+                            )
+                        }
                     elif current_tool in {"philosopher", "哲學家"}:
-                        question = self._build_sub_agent_prompt(note, current_args)
+                        question = self._build_sub_agent_prompt(note, current_args, step_outputs)
                         current_tool = "ask_philosopher"
-                        current_args = {"question": question}
+                        current_args = {
+                            "question": self._build_philosopher_prompt(
+                                note, current_args, step_outputs, question
+                            )
+                        }
                     elif current_tool == "ask_sub_agent":
                         name = ""
                         if isinstance(current_args, dict):
@@ -305,9 +316,13 @@ class MainAgent:
                             if isinstance(current_args, dict):
                                 question = str(current_args.get("prompt", "")).strip()
                             if not question:
-                                question = self._build_sub_agent_prompt(note, current_args)
+                                question = self._build_sub_agent_prompt(note, current_args, step_outputs)
                             current_tool = "ask_philosopher"
-                            current_args = {"question": question}
+                            current_args = {
+                                "question": self._build_philosopher_prompt(
+                                    note, current_args, step_outputs, question
+                                )
+                            }
 
                 if (
                     self.sub_agents
@@ -315,7 +330,7 @@ class MainAgent:
                     and self.sub_agents.get_agent(current_tool)
                     and "ask_sub_agent" in allowed_names
                 ):
-                    prompt = self._build_sub_agent_prompt(note, current_args)
+                    prompt = self._build_sub_agent_prompt(note, current_args, step_outputs)
                     current_args = {"name": current_tool, "prompt": prompt}
                     current_tool = "ask_sub_agent"
 
@@ -326,6 +341,10 @@ class MainAgent:
                 else:
                     if current_args:
                         current_args = self._resolve_args(current_args, step_outputs)
+                    if current_args is None:
+                        current_args = {}
+                    elif not isinstance(current_args, dict):
+                        current_args = {"value": current_args}
                     tool_def = registered.get(str(current_tool)) if isinstance(current_tool, str) else None
                     if tool_def is None:
                         current_error = f"Tool '{current_tool}' declared but not found on agent runtime."
@@ -555,15 +574,83 @@ class MainAgent:
             return "\n".join(tools_lines) + "\n\n"
         return "Available tools: (none)\n\n"
 
-    def _build_sub_agent_prompt(self, note: str | None, args: dict[str, Any] | None) -> str:
+    def _get_recent_tool_output(self) -> str | None:
+        for step in reversed(self._last_execution_steps):
+            if step.get("tool") == "get_now":
+                continue
+            if "result" in step:
+                return str(step["result"])
+        return None
+
+    def _extract_current_time(self) -> str | None:
+        for step in self._last_execution_steps:
+            if step.get("tool") == "get_now" and "result" in step:
+                return str(step["result"])
+        return None
+
+    def _build_sub_agent_prompt(
+        self,
+        note: str | None,
+        args: dict[str, Any] | None,
+        step_outputs: list[str] | None = None,
+    ) -> str:
         if args:
             for key in ("prompt", "question", "task", "input"):
                 value = args.get(key)
                 if value:
                     return str(value)
+        parts: list[str] = []
+        if self._last_user_prompt:
+            parts.append(self._last_user_prompt)
         if note:
-            return note
-        return "請協助處理此步驟。"
+            parts.append(f"Note: {note}")
+        if step_outputs:
+            parts.append(f"Latest tool output: {step_outputs[-1]}")
+        else:
+            recent_output = self._get_recent_tool_output()
+            if recent_output:
+                parts.append(f"Previous tool output: {recent_output}")
+        if parts:
+            return "\n\n".join(parts)
+        return "Please handle this step."
+
+    def _extract_user_reply(self, output: str | None) -> str | None:
+        if not output:
+            return None
+        text = output
+        if "<self-validation>" in text:
+            text = text.split("<self-validation>", 1)[0]
+        return text.strip() or None
+
+    def _build_philosopher_prompt(
+        self,
+        note: str | None,
+        args: dict[str, Any] | None,
+        step_outputs: list[str] | None,
+        question: str | None,
+    ) -> str:
+        parts = [
+            "You are the philosopher co-agent in an internal discussion with the main agent.",
+            "Provide reasoning and context the main agent can use to answer the user.",
+            "Do NOT ask the user questions. Answer directly based on context.",
+        ]
+        if self._previous_user_prompt:
+            parts.append(f"Previous user message: {self._previous_user_prompt}")
+        if self._last_assistant_reply:
+            parts.append(f"Previous assistant reply: {self._last_assistant_reply}")
+        if self._last_user_prompt:
+            parts.append(f"Current user message: {self._last_user_prompt}")
+        if note:
+            parts.append(f"Plan note: {note}")
+        if question:
+            parts.append(f"Question: {question}")
+        if step_outputs:
+            parts.append(f"Latest tool output: {step_outputs[-1]}")
+        else:
+            recent_output = self._get_recent_tool_output()
+            if recent_output:
+                parts.append(f"Previous tool output: {recent_output}")
+        return "\n\n".join(parts)
 
     def _resolve_args(self, args: Any, step_outputs: list[str]) -> Any:
         def resolve_value(value: Any) -> Any:
@@ -643,11 +730,37 @@ class MainAgent:
         plan_obj = await self._request_execution_plan(prompt, message_history=message_history, attempt=1)
         if plan_obj is None or _plan_is_empty(plan_obj):
             plan_obj = await self._request_execution_plan(prompt, message_history=message_history, attempt=2)
-            if plan_obj is None or _plan_is_empty(plan_obj):
-                return []
-        if not plan_obj:
+
+        plan_list: list[dict[str, Any]] | list[Any]
+        if isinstance(plan_obj, dict):
+            if "execution_plan" in plan_obj:
+                plan_list = plan_obj.get("execution_plan") or []
+            elif "plan" in plan_obj:
+                plan_list = plan_obj.get("plan") or []
+            elif "steps" in plan_obj:
+                plan_list = plan_obj.get("steps") or []
+            else:
+                plan_list = plan_obj if isinstance(plan_obj, list) else []
+        elif isinstance(plan_obj, list):
+            plan_list = plan_obj
+        else:
+            plan_list = []
+
+        if not isinstance(plan_list, list):
+            plan_list = []
+
+        tools_meta = getattr(self.agent, "_function_tools", {}) or {}
+        if "get_now" in tools_meta:
+            has_time_step = any(
+                isinstance(step, dict) and step.get("tool") == "get_now"
+                for step in plan_list
+            )
+            if not has_time_step:
+                plan_list.insert(0, {"tool": "get_now"})
+
+        if not plan_list:
             return []
-        return await self.execute_plan(plan_obj)
+        return await self.execute_plan({"plan": plan_list})
 
     async def _should_end_discussion(
         self,
@@ -732,7 +845,12 @@ class MainAgent:
         prompt: str,
         message_history: list[ModelRequest | ModelResponse] | None = None,
     ) -> str:
+        self._previous_user_prompt = self._last_user_prompt
+        self._last_user_prompt = prompt
         exec_results = await self._ensure_eager_execution(prompt, message_history=message_history)
+        current_time = self._extract_current_time()
+        if current_time:
+            prompt = f"Current time: {current_time}\n\n{prompt}"
         if exec_results:
             exec_text = "\n".join(exec_results)
             prompt = f"{prompt}\n\nTool execution results:\n{exec_text}"
@@ -741,11 +859,15 @@ class MainAgent:
             self._last_messages = result.all_messages()
         except Exception:
             self._last_messages = None
+        self._last_assistant_reply = self._extract_user_reply(result.output)
         return result.output
 
     async def run_stream(self, prompt: str, message_history: list[ModelRequest | ModelResponse] | None = None):
         """Streamed version of run(): yields chunks from philosopher/subagents/main agent as they produce output."""
+        self._previous_user_prompt = self._last_user_prompt
+        self._last_user_prompt = prompt
         exec_results = await self._ensure_eager_execution(prompt, message_history=message_history)
+        current_time = self._extract_current_time()
         if exec_results:
             exec_text = "\n".join(exec_results)
             yield "<tool-execution>\n"
@@ -765,12 +887,17 @@ class MainAgent:
                     yield line + "\n"
                 yield "</discussion>\n"
             prompt = f"{prompt}\n\nTool execution results:\n{exec_text}"
+        if current_time:
+            prompt = f"Current time: {current_time}\n\n{prompt}"
         async with self.agent.run_stream(user_prompt=prompt, message_history=message_history) as result:
+            collected = ""
             async for chunk in result.stream_text(delta=True):
                 if not chunk:
                     continue
+                collected += chunk
                 yield chunk
             try:
                 self._last_messages = result.all_messages()
             except Exception:
                 self._last_messages = None
+            self._last_assistant_reply = self._extract_user_reply(collected)
