@@ -12,6 +12,7 @@ from internal.services.agent_factory import (
     load_agent_config_chain,
 )
 from internal.set_tools import add_all_tools
+from internal.sub_agents import SubAgentRegistry, load_sub_agent_registry
 import sys
 import inspect
 import asyncio
@@ -26,6 +27,7 @@ ENV_PREFIX = "MAIN"
 class MainAgent:
     PROMPT_KEY = PROMPT_KEY
     ENV_PREFIX = ENV_PREFIX
+    TOOL_RECOVERY_MAX_ATTEMPTS = 2
 
     @classmethod
     def create(
@@ -34,9 +36,22 @@ class MainAgent:
         env: dict[str, str],
         http_client: AsyncClient,
         philosopher: PhilosopherCoAgent,
+        sub_agents: SubAgentRegistry | None = None,
     ) -> "MainAgent":
+        if sub_agents is None:
+            try:
+                sub_agents = load_sub_agent_registry(base_config, env, http_client)
+            except Exception:
+                logger.exception("Failed to load sub-agents; continuing without them")
+                sub_agents = SubAgentRegistry({}, {})
+
         config = load_agent_config_chain([cls.ENV_PREFIX], base_config, env)
         model = create_openai_model(config, http_client)
+        instructions = get_prompt(cls.PROMPT_KEY)
+        if sub_agents and not sub_agents.is_empty():
+            instructions += (
+                "\n\nSub-agents are available via tools: list_sub_agents, ask_sub_agent."
+            )
         # build MCP servers for browser tools
         mcp_env = env.copy()
         if config.api_key:
@@ -69,7 +84,7 @@ class MainAgent:
         agent: Agent[None, str] = Agent(
             model=model,
             system_prompt=SYSTEM_PROMPT,
-            instructions=get_prompt(cls.PROMPT_KEY),
+            instructions=instructions,
             tools=[],
             model_settings={"temperature": config.temperature},
             mcp_servers=mcp_servers,
@@ -120,15 +135,17 @@ class MainAgent:
             # restore original registration function if we replaced it
             if original_tool_plain:
                 cast(Any, agent).tool_plain = original_tool_plain
-        return cls(agent, philosopher)
+        return cls(agent, philosopher, sub_agents)
 
     def __init__(
         self,
         agent: Agent[None, str],
         philosopher: PhilosopherCoAgent,
+        sub_agents: SubAgentRegistry | None = None,
     ) -> None:
         self.agent = agent
         self.philosopher = philosopher
+        self.sub_agents = sub_agents
         self._last_messages: list[ModelRequest | ModelResponse] | None = None
         # register tool functions so agent can call them; defining as methods
         try:
@@ -138,6 +155,12 @@ class MainAgent:
         except Exception:
             # registration failures shouldn't break initialization
             logger.debug("Tool registration skipped or failed during init")
+        if self.sub_agents and not self.sub_agents.is_empty():
+            try:
+                cast(Any, self.agent).tool_plain(self.list_sub_agents)
+                cast(Any, self.agent).tool_plain(self.ask_sub_agent)
+            except Exception:
+                logger.debug("Sub-agent tool registration skipped or failed during init")
 
     async def _extract_execution_plan(self, text: str) -> dict | None:
         """Try to extract an execution plan JSON from free text.
@@ -160,17 +183,38 @@ class MainAgent:
         except Exception:
             pass
 
-        # Try to locate a JSON substring between first { and last }
-        start = text.find("{")
-        end = text.rfind("}")
-        if start != -1 and end != -1 and end > start:
-            snippet = text[start : end + 1]
-            try:
-                parsed = json.loads(snippet)
-                if isinstance(parsed, dict) and ("execution_plan" in parsed or "plan" in parsed or "steps" in parsed):
-                    return parsed
-            except Exception:
-                pass
+        # Try to locate JSON substrings by scanning for balanced braces
+        # This avoids naive first/last-brace substring matching which can
+        # capture unrelated trailing text. We scan for each '{' and find the
+        # matching '}' by counting depth, then try to json.loads() that slice.
+        text_len = len(text)
+        i = 0
+        while i < text_len:
+            if text[i] != '{':
+                i += 1
+                continue
+            depth = 0
+            j = i
+            while j < text_len:
+                if text[j] == '{':
+                    depth += 1
+                elif text[j] == '}':
+                    depth -= 1
+                    if depth == 0:
+                        snippet = text[i : j + 1]
+                        try:
+                            parsed = json.loads(snippet)
+                            if isinstance(parsed, dict) and (
+                                "execution_plan" in parsed or "plan" in parsed or "steps" in parsed
+                            ):
+                                return parsed
+                        except Exception:
+                            # ignore parse errors and continue scanning
+                            pass
+                        break
+                j += 1
+            # advance i to the next character after the current '{' to find other candidates
+            i += 1
 
         return None
 
@@ -206,43 +250,102 @@ class MainAgent:
                 header += f"  ({note})"
             results.append(header)
 
-            if not tool_name:
-                results.append("  -> skipped: missing 'tool' field")
-                continue
-
-            # Only allow tools that are in the agent's registered tools list
             registered = getattr(self.agent, "_registered_tools", []) or []
             allowed_names = {t.get("name") for t in registered if isinstance(t, dict)}
-            if tool_name not in allowed_names:
-                logger.warning("Tool '%s' not in registered tools; skipping", tool_name)
-                results.append(f"  -> skipped: tool '{tool_name}' is not in the agent's registered tools")
-                continue
 
-            # Try to find the callable on the agent (registered tools are exposed there)
-            callable_obj = None
-            if isinstance(tool_name, str) and hasattr(self.agent, tool_name):
-                callable_obj = getattr(self.agent, tool_name)
-            if callable_obj is None:
-                results.append(f"  -> tool '{tool_name}' declared but not found on agent runtime")
-                continue
-
-            try:
-                logger.info("Executing tool '%s' with args: %s", tool_name, args)
-                if inspect.iscoroutinefunction(callable_obj):
-                    res = await callable_obj(**args)
+            attempts = 0
+            current_tool = tool_name
+            current_args = args
+            current_error = ""
+            while True:
+                if not current_tool:
+                    current_error = "Missing 'tool' field."
+                elif current_tool not in allowed_names:
+                    current_error = f"Tool '{current_tool}' is not registered."
                 else:
-                    maybe = callable_obj(**args) if args else callable_obj()
-                    if asyncio.iscoroutine(maybe):
-                        res = await maybe
+                    callable_obj = getattr(self.agent, current_tool, None)
+                    if callable_obj is None:
+                        current_error = f"Tool '{current_tool}' declared but not found on agent runtime."
                     else:
-                        res = maybe
-                logger.info("Tool '%s' execution result: %s", tool_name, res)
-                results.append(f"  -> result: {res}")
-            except Exception as e:
-                logger.exception("Error executing tool %s", tool_name)
-                results.append(f"  -> execution error: {e}")
+                        try:
+                            logger.info("Executing tool '%s' with args: %s", current_tool, current_args)
+                            if inspect.iscoroutinefunction(callable_obj):
+                                res = await callable_obj(**current_args)
+                            else:
+                                maybe = callable_obj(**current_args) if current_args else callable_obj()
+                                if asyncio.iscoroutine(maybe):
+                                    res = await maybe
+                                else:
+                                    res = maybe
+                            logger.info("Tool '%s' execution result: %s", current_tool, res)
+                            results.append(f"  -> result: {res}")
+                            break
+                        except Exception as e:
+                            logger.exception("Error executing tool %s", current_tool)
+                            current_error = f"Execution error: {e}"
+
+                if attempts >= self.TOOL_RECOVERY_MAX_ATTEMPTS:
+                    if current_error:
+                        results.append(f"  -> execution error: {current_error}")
+                    break
+
+                attempts += 1
+                results.append(f"  -> recovery attempt {attempts}: {current_error}")
+                recovery = await self._recover_tool_call(
+                    tool=current_tool,
+                    args=current_args,
+                    error=current_error,
+                    note=note,
+                )
+                if not recovery:
+                    results.append("  -> recovery failed: no corrected tool call returned")
+                    break
+                current_tool = recovery.get("tool")
+                current_args = recovery.get("args", {})
 
         return results
+
+    async def _recover_tool_call(
+        self,
+        tool: str | None,
+        args: dict[str, Any] | None,
+        error: str,
+        note: str | None,
+    ) -> dict[str, Any] | None:
+        tools_meta = getattr(self.agent, "_registered_tools", []) or []
+        if tools_meta:
+            tools_lines = ["Available tools:"]
+            for t in tools_meta:
+                sig = t.get("signature", "()")
+                doc = t.get("doc", "").splitlines()[0] if t.get("doc") else ""
+                tools_lines.append(f"- {t.get('name')}{sig}: {doc}")
+            tools_text = "\n".join(tools_lines)
+        else:
+            tools_text = "Available tools: (none)"
+
+        sub_agents_text = self._format_sub_agents_context().strip()
+        note_text = f"Note: {note}\n" if note else ""
+        prompt = (
+            "A tool call failed. Reflect briefly on why, fix the tool name and/or args, then return only JSON.\n"
+            "You may call ask_sub_agent if it helps.\n\n"
+            f"{tools_text}\n"
+            f"{sub_agents_text}\n"
+            f"{note_text}"
+            f"Failed tool: {tool}\n"
+            f"Args: {args}\n"
+            f"Error: {error}\n\n"
+            "Return JSON only in this format: {\"tool\": \"tool_name\", \"args\": {\"key\": \"value\"}}\n"
+        )
+
+        try:
+            result = await self.agent.run(prompt)
+            out = (result.output or "").strip()
+            parsed = json.loads(out)
+            if isinstance(parsed, dict) and parsed.get("tool"):
+                return {"tool": parsed.get("tool"), "args": parsed.get("args", {})}
+        except Exception:
+            logger.exception("Tool recovery failed")
+        return None
 
     async def _should_consult_philosopher(
         self, prompt: str, message_history: list[ModelRequest | ModelResponse] | None = None
@@ -297,6 +400,41 @@ class MainAgent:
                 collected += chunk
             return collected
         return await self.philosopher.run(question)
+
+    def list_sub_agents(self) -> list[dict[str, str]]:
+        """Tool: list available sub-agents (name + short description)."""
+        if not self.sub_agents:
+            return []
+        return self.sub_agents.list_summaries()
+
+    async def ask_sub_agent(self, name: str, prompt: str) -> str:
+        """Tool: delegate a task to a sub-agent by name."""
+        if not self.sub_agents or self.sub_agents.is_empty():
+            return "No sub-agents are registered."
+
+        agent = self.sub_agents.get_agent(name)
+        if not agent:
+            available = ", ".join(self.sub_agents.list_names())
+            return f"Unknown sub-agent '{name}'. Available: {available}"
+
+        if hasattr(agent, "run_stream"):
+            collected = ""
+            async for chunk in agent.run_stream(prompt):
+                collected += chunk
+            return collected
+        return await agent.run(prompt)
+
+    def _format_sub_agents_context(self) -> str:
+        if not self.sub_agents or self.sub_agents.is_empty():
+            return "Available sub-agents: (none)\n\n"
+        lines = ["Available sub-agents:"]
+        for spec in self.sub_agents.list_specs():
+            desc = spec.short_description()
+            if desc:
+                lines.append(f"- {spec.name}: {desc}")
+            else:
+                lines.append(f"- {spec.name}")
+        return "\n".join(lines) + "\n\n"
 
     async def _should_end_discussion(
         self,
@@ -432,14 +570,18 @@ class MainAgent:
                     tools_text = "\n".join(tools_lines) + "\n\n"
                 else:
                     tools_text = "Available tools: (none)\n\n"
+                sub_agents_text = self._format_sub_agents_context()
 
                 phil_prompt = (
                     f"{round_tag} - {depth_instr} Before analyzing, explicitly define the discussion scope: list what to focus on (Focus) and what is out of scope for this discussion (Out of scope).\n\n"
                     + tools_text
+                    + sub_agents_text
+                    + "SUB-AGENTS: If any sub-agent is relevant, explicitly recommend which one(s) to consult by name.\n\n"
                     + f"Then analyze the following question and list uncertainties, assumptions, and reasoning steps:\n\n{current_prompt}\n\n"
-                    "IMPORTANT: Only reference tools from the 'Available tools' list above. Use the exact tool name as listed; do not invent or call other tools."
-                    " If you propose actionable steps that require calling tools, include a top-level JSON object named 'execution_plan' with a key 'plan' that is a list of steps."
-                    " Each step should be an object with 'tool' (string matching an available tool name exactly), optional 'args' (object), and optional 'note' (string)."
+                    "CONCISENESS RULES: Keep responses short and focused. First give a one-line Focus summary, then list up to 3 key uncertainties (bulleted), then a very short analysis (no more than 4 sentences)."
+                    "FACTS & TOOLS: If you require factual data or live information, produce a minimal 'execution_plan' JSON only (no long analysis) with the key 'plan' listing the necessary tool calls."
+                    "The Main Agent will execute that plan and return results for you to continue analysis. IMPORTANT: Only reference tools from the 'Available tools' list above and use exact tool names."
+                    " Each step object must have 'tool' (string matching an available tool name exactly), optional 'args' (object), and optional 'note' (string)."
                     " Place the JSON on its own line so it can be parsed separately."
                 )
                 logger.info("Main agent requesting philosopher analysis (round %d)", r + 1)
@@ -450,10 +592,31 @@ class MainAgent:
                 break
 
             discussion.append(("Philosopher", phil_resp))
-
             # If philosopher provided an execution plan JSON, parse and execute it
             try:
                 plan_obj = await self._extract_execution_plan(phil_resp)
+                # If no plan found but philosopher text suggests needing facts, ask for a plan
+                if plan_obj is None:
+                    need_keywords = [
+                        "需要查", "需要查證", "需要查詢", "需要確認", "核實", "verify", "check", "need to",
+                    ]
+                    lower = (phil_resp or "").lower()
+                    if any(k in lower for k in need_keywords):
+                        logger.info("Philosopher analysis indicates need for factual checks; requesting execution_plan")
+                        try:
+                            plan_request = (
+                                "Your previous analysis suggests you need factual checks or live data. "
+                                "Please output a minimal execution_plan JSON (one line) with key 'plan' listing the tool calls required. "
+                                "Use only the Available tools names exactly."
+                            )
+                            plan_only = await self.philosopher.run(plan_request)
+                            plan_obj = await self._extract_execution_plan(plan_only) or None
+                            if plan_obj:
+                                # append philosopher's plan-only response to discussion
+                                discussion.append(("PhilosopherPlanRequest", plan_only))
+                        except Exception:
+                            logger.exception("Failed to request execution_plan from philosopher")
+
                 if plan_obj:
                     logger.info("Philosopher provided an execution plan; executing")
                     exec_results = await self.execute_plan(plan_obj)
@@ -588,14 +751,18 @@ class MainAgent:
                 tools_text = "\n".join(tools_lines) + "\n\n"
             else:
                 tools_text = "Available tools: (none)\n\n"
+            sub_agents_text = self._format_sub_agents_context()
 
             phil_prompt = (
                 f"{round_tag} - {depth_instr} Before analyzing, explicitly define the discussion scope: list what to focus on (Focus) and what is out of scope for this discussion (Out of scope).\n\n"
                 + tools_text
+                + sub_agents_text
+                + "SUB-AGENTS: If any sub-agent is relevant, explicitly recommend which one(s) to consult by name.\n\n"
                 + f"Then analyze the following question and list uncertainties, assumptions, and reasoning steps:\n\n{current_prompt}\n\n"
-                "IMPORTANT: Only reference tools from the 'Available tools' list above. Use the exact tool name as listed; do not invent or call other tools."
-                " If you propose actionable steps that require calling tools, include a top-level JSON object named 'execution_plan' with a key 'plan' that is a list of steps."
-                " Each step should be an object with 'tool' (string matching an available tool name exactly), optional 'args' (object), and optional 'note' (string)."
+                "CONCISENESS RULES: Keep responses short and focused. First give a one-line Focus summary, then list up to 3 key uncertainties (bulleted), then a very short analysis (no more than 4 sentences)."
+                "FACTS & TOOLS: If you require factual data or live information, produce a minimal 'execution_plan' JSON only (no long analysis) with the key 'plan' listing the necessary tool calls."
+                "The Main Agent will execute that plan and return results for you to continue analysis. IMPORTANT: Only reference tools from the 'Available tools' list above and use exact tool names."
+                " Each step object must have 'tool' (string matching an available tool name exactly), optional 'args' (object), and optional 'note' (string)."
                 " Place the JSON on its own line so it can be parsed separately."
             )
             yield f"--- {round_tag} 哲學家分析開始 ---\n"

@@ -3,6 +3,7 @@ from pydantic_ai import Agent
 from pydantic_ai.messages import ModelRequest, ModelResponse
 
 from internal.co_agents.base import CoAgent
+from internal.logger import logger
 from internal.prompts import SYSTEM_PROMPT, get_prompt
 from internal.services.agent_factory import (
     AgentConfig,
@@ -61,16 +62,37 @@ class PhilosopherCoAgent(CoAgent):
         """Stream philosopher output while maintaining internal history."""
         if message_history is None:
             message_history = self._history
-        async with self.agent.run_stream(user_prompt=prompt, message_history=message_history) as result:
-            collected = ""
-            async for chunk in result.stream_text(delta=True):
-                if not chunk:
-                    continue
-                collected += chunk
-                yield chunk
+        collected = ""
+        try:
+            async with self.agent.run_stream(user_prompt=prompt, message_history=message_history) as result:
+                async for chunk in result.stream_text(delta=True):
+                    if not chunk:
+                        continue
+                    collected += chunk
+                    yield chunk
 
-            # update history after completion
+                # update history after completion
+                try:
+                    self._history = result.all_messages()[-self._history_limit :]
+                except Exception:
+                    pass
+                return
+        except Exception:
+            logger.exception("Philosopher stream failed; falling back to non-stream")
+
+        if collected:
+            # Avoid duplicating partial output; update history in the background.
             try:
+                result = await self.agent.run(prompt, message_history=message_history)
                 self._history = result.all_messages()[-self._history_limit :]
             except Exception:
-                pass
+                logger.exception("Philosopher non-stream fallback failed after partial stream")
+            return
+
+        try:
+            result = await self.agent.run(prompt, message_history=message_history)
+            self._history = result.all_messages()[-self._history_limit :]
+            if result.output:
+                yield result.output
+        except Exception:
+            logger.exception("Philosopher non-stream fallback failed")
