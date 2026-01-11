@@ -2,7 +2,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from httpx import AsyncClient
-from pydantic_ai.models.openai import OpenAIModel
+from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.openai import OpenAIProvider
 
 from internal.logger import logger
@@ -26,7 +26,7 @@ def normalize_base_url(base_url: str | None) -> str | None:
     return base_url
 
 
-def create_openai_model(config: AgentConfig, http_client: AsyncClient) -> OpenAIModel:
+def create_openai_model(config: AgentConfig, http_client: AsyncClient) -> OpenAIChatModel:
     base_url = f"{config.base_url}/v1" if config.base_url else None
     provider = OpenAIProvider(
         base_url=base_url,
@@ -35,7 +35,7 @@ def create_openai_model(config: AgentConfig, http_client: AsyncClient) -> OpenAI
     )
     if not config.model_name:
         logger.warning(f"{config.name} model name is empty.")
-    return OpenAIModel(model_name=config.model_name, provider=provider)
+    return OpenAIChatModel(model_name=config.model_name, provider=provider)
 
 
 def load_agent_config(
