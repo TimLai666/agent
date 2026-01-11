@@ -142,9 +142,21 @@ async def run_cli(prompt_once: str | None = None, single_turn: bool = False) -> 
 
         async with AsyncExitStack() as stack:
             # MCP servers are run by the main agent (contains browser tools)
-            await stack.enter_async_context(main_agent.agent.run_mcp_servers())
+            mcp_started = False
+            try:
+                await stack.enter_async_context(main_agent.agent.run_mcp_servers())
+            except Exception as exc:  # pragma: no cover - best effort when MCP fails
+                logger.warning("MCP browser tools failed to start; continuing without them.", exc_info=exc)
+            else:
+                mcp_started = True
 
-            print("\nAgent ready. Type /help for commands.")
+            ready_msg = "\nAgent ready. Type /help for commands."
+            if not mcp_started:
+                ready_msg = (
+                    "\nAgent ready (browser tools disabled). Type /help for commands."
+                    "\nNote: install Playwright via `uv run playwright install` if you want browser tooling."
+                )
+            print(ready_msg)
             if prompt_once is not None:
                 user_input = prompt_once.strip()
                 if not user_input:

@@ -25,8 +25,13 @@ class VoiceManager:
 
             # 使用 Whisper 進行辨識
             result = self.model.transcribe(audio_np, fp16=False)
-            text = result["text"].strip()
-            return text
+            text_field = result.get("text")
+            if isinstance(text_field, list):
+                # join list elements into a single string
+                text = " ".join(str(t) for t in text_field).strip()
+            else:
+                text = str(text_field).strip() if text_field is not None else ""
+            return text if text != "" else None
         except Exception as e:
             print(f"Whisper 識別出錯: {e}")
             return None
