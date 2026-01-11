@@ -100,6 +100,13 @@ class MainAgent:
             model_settings={"temperature": config.temperature},
             mcp_servers=mcp_servers,
         )
+        planner_agent: Agent[None, str] = Agent(
+            model=model,
+            system_prompt=SYSTEM_PROMPT,
+            instructions="你是嚴格的工具規劃器，只能輸出 JSON。",
+            tools=[],
+            model_settings={"temperature": config.temperature},
+        )
         # register global tools directly on the main agent
         # Wrap agent.tool_plain temporarily so that each registered tool is
         # wrapped to log calls, arguments, results and exceptions.
@@ -146,17 +153,19 @@ class MainAgent:
             # restore original registration function if we replaced it
             if original_tool_plain:
                 cast(Any, agent).tool_plain = original_tool_plain
-        return cls(agent, philosopher, sub_agents)
+        return cls(agent, philosopher, sub_agents, planner_agent)
 
     def __init__(
         self,
         agent: Agent[None, str],
         philosopher: PhilosopherCoAgent,
         sub_agents: SubAgentRegistry | None = None,
+        planner_agent: Agent[None, str] | None = None,
     ) -> None:
         self.agent = agent
         self.philosopher = philosopher
         self.sub_agents = sub_agents
+        self._planner_agent = planner_agent or agent
         self._last_messages: list[ModelRequest | ModelResponse] | None = None
         # register tool functions so agent can call them; defining as methods
         try:
@@ -261,43 +270,47 @@ class MainAgent:
                 header += f"  ({note})"
             results.append(header)
 
-            registered = getattr(self.agent, "_registered_tools", []) or []
-            allowed_names = {t.get("name") for t in registered if isinstance(t, dict)}
+            registered = getattr(self.agent, "_function_tools", {}) or {}
+            allowed_names = set(registered.keys())
 
             attempts = 0
             current_tool = tool_name
             current_args = args
             current_error = ""
             while True:
-                if self.sub_agents and isinstance(current_tool, str):
-                    sub_agent = self.sub_agents.get_agent(current_tool)
-                    if sub_agent:
-                        prompt = self._build_sub_agent_prompt(note, current_args)
-                        results.append(f"  -> delegated to sub-agent '{current_tool}'")
-                        try:
-                            if hasattr(sub_agent, "run_stream"):
-                                collected = ""
-                                async for chunk in sub_agent.run_stream(prompt):
-                                    collected += chunk
-                                results.append(f"  -> result: {collected}")
-                            else:
-                                res = await sub_agent.run(prompt)
-                                results.append(f"  -> result: {res}")
-                        except Exception as e:
-                            logger.exception("Error executing sub-agent %s", current_tool)
-                            results.append(f"  -> execution error: {e}")
-                        break
+                if (
+                    self.sub_agents
+                    and isinstance(current_tool, str)
+                    and self.sub_agents.get_agent(current_tool)
+                    and "ask_sub_agent" in allowed_names
+                ):
+                    prompt = self._build_sub_agent_prompt(note, current_args)
+                    current_args = {"name": current_tool, "prompt": prompt}
+                    current_tool = "ask_sub_agent"
 
                 if not current_tool:
                     current_error = "Missing 'tool' field."
                 elif current_tool not in allowed_names:
                     current_error = f"Tool '{current_tool}' is not registered."
                 else:
-                    callable_obj = getattr(self.agent, str(current_tool), None) if isinstance(current_tool, str) else None
-                    if callable_obj is None:
+                    tool_def = registered.get(str(current_tool)) if isinstance(current_tool, str) else None
+                    if tool_def is None:
                         current_error = f"Tool '{current_tool}' declared but not found on agent runtime."
+                    elif getattr(tool_def, "takes_ctx", False):
+                        current_error = f"Tool '{current_tool}' requires context and cannot be called directly."
                     else:
+                        callable_obj = tool_def.function
                         try:
+                            try:
+                                schema = tool_def.function_schema.json_schema or {}
+                                expected_keys = list((schema.get("properties") or {}).keys())
+                            except Exception:
+                                expected_keys = []
+                            if current_args and expected_keys:
+                                expected_set = set(expected_keys)
+                                if not set(current_args.keys()).issubset(expected_set):
+                                    if len(expected_keys) == 1 and len(current_args) == 1:
+                                        current_args = {expected_keys[0]: next(iter(current_args.values()))}
                             logger.info("Executing tool '%s' with args: %s", current_tool, current_args)
                             if inspect.iscoroutinefunction(callable_obj):
                                 res = await callable_obj(**current_args)
@@ -342,39 +355,34 @@ class MainAgent:
         error: str,
         note: str | None,
     ) -> dict[str, Any] | None:
-        tools_meta = getattr(self.agent, "_registered_tools", []) or []
-        if tools_meta:
-            tools_lines = ["Available tools:"]
-            for t in tools_meta:
-                sig = t.get("signature", "()")
-                doc = t.get("doc", "").splitlines()[0] if t.get("doc") else ""
-                tools_lines.append(f"- {t.get('name')}{sig}: {doc}")
-            tools_text = "\n".join(tools_lines)
-        else:
-            tools_text = "Available tools: (none)"
+        tools_text = self._format_tools_context().strip()
 
         sub_agents_text = self._format_sub_agents_context().strip()
         note_text = f"Note: {note}\n" if note else ""
         prompt = (
-            "A tool call failed. Reflect briefly on why, fix the tool name and/or args, then return only JSON.\n"
-            "You may call ask_sub_agent if it helps.\n\n"
+            "工具呼叫失敗。你必須修正 tool 名稱與/或 args，並且只輸出 JSON。\n"
+            "可使用 ask_sub_agent 協助。\n\n"
             f"{tools_text}\n"
             f"{sub_agents_text}\n"
             f"{note_text}"
-            f"Failed tool: {tool}\n"
-            f"Args: {args}\n"
-            f"Error: {error}\n\n"
-            "Return JSON only in this format: {\"tool\": \"tool_name\", \"args\": {\"key\": \"value\"}}\n"
+            f"失敗的 tool：{tool}\n"
+            f"args：{args}\n"
+            f"錯誤：{error}\n\n"
+            "只輸出 JSON，格式：{\"tool\": \"tool_name\", \"args\": {\"key\": \"value\"}}\n"
         )
 
-        try:
-            result = await self.agent.run(prompt)
-            out = (result.output or "").strip()
-            parsed = json.loads(out)
-            if isinstance(parsed, dict) and parsed.get("tool"):
-                return {"tool": parsed.get("tool"), "args": parsed.get("args", {})}
-        except Exception:
-            logger.exception("Tool recovery failed")
+        for attempt in range(2):
+            try:
+                retry_hint = ""
+                if attempt == 1:
+                    retry_hint = "上一次沒有輸出合法 JSON。這次只輸出 JSON，不能有其他文字。\n\n"
+                result = await self._planner_agent.run(retry_hint + prompt)
+                out = (result.output or "").strip()
+                parsed = json.loads(out)
+                if isinstance(parsed, dict) and parsed.get("tool"):
+                    return {"tool": parsed.get("tool"), "args": parsed.get("args", {})}
+            except Exception:
+                logger.exception("Tool recovery failed")
         return None
 
     async def _should_consult_philosopher(
@@ -467,13 +475,22 @@ class MainAgent:
         return "\n".join(lines) + "\n\n"
 
     def _format_tools_context(self) -> str:
-        tools_meta = getattr(self.agent, "_registered_tools", None)
+        tools_meta = getattr(self.agent, "_function_tools", None)
         if tools_meta:
             tools_lines = ["Available tools:"]
-            for t in tools_meta:
-                sig = t.get("signature", "()")
-                doc = t.get("doc", "").splitlines()[0] if t.get("doc") else ""
-                tools_lines.append(f"- {t.get('name')}{sig}: {doc}")
+            for name, tool in tools_meta.items():
+                doc = tool.description.splitlines()[0] if tool.description else ""
+                params = []
+                try:
+                    schema = tool.function_schema.json_schema or {}
+                    params = list((schema.get("properties") or {}).keys())
+                except Exception:
+                    params = []
+                sig = f"({', '.join(params)})" if params else "()"
+                if doc:
+                    tools_lines.append(f"- {name}{sig}: {doc}")
+                else:
+                    tools_lines.append(f"- {name}{sig}")
             return "\n".join(tools_lines) + "\n\n"
         return "Available tools: (none)\n\n"
 
@@ -487,6 +504,7 @@ class MainAgent:
             return note
         return "請協助處理此步驟。"
 
+
     async def _request_execution_plan(
         self,
         prompt: str,
@@ -497,22 +515,37 @@ class MainAgent:
         sub_agents_text = self._format_sub_agents_context()
         retry_hint = ""
         if attempt > 1:
-            retry_hint = "Your previous output was not valid JSON. Output JSON only.\n\n"
+            retry_hint = (
+                "你上一次沒有輸出合法 JSON。這次只能輸出 JSON。\n"
+                "除非完全沒有工具可用，否則不得輸出空 plan；必須至少一個步驟。\n\n"
+            )
 
         plan_prompt = (
-            "You MUST propose tool calls before answering. Output ONLY a JSON object with key 'plan' (a list of steps). "
-            "If no tool is needed, return {\"plan\": []}. Prefer tools over prose; do not write analysis.\n"
-            "If delegation is needed, use tool ask_sub_agent with args {\"name\": \"...\", \"prompt\": \"...\"}.\n\n"
+            "你必須先規劃工具呼叫再回答。只輸出 JSON，格式固定為 {\"plan\": [ ... ]}。\n"
+            "每個步驟必須包含 tool 欄位；需要參數時加入 args 物件，沒有參數就省略或用 {}。\n"
+            "若不需要工具，回傳 {\"plan\": []}。不要寫分析或其他文字。\n"
+            "若要委派給 sub-agent，使用工具 ask_sub_agent，args 為 {\"name\": \"...\", \"prompt\": \"...\"}。\n\n"
+            "常見需求對應工具（若符合就直接用）：\n"
+            "- 詢問現在時間：get_now\n"
+            "- 查某日期是星期幾：get_weekday，參數 date_str\n"
+            "- 擲骰子：roll_dice\n"
+            "- 從清單隨機挑一個：random_pick，參數 items\n"
+            "- 目前工作目錄：get_current_directory\n"
+            "- 列出目錄檔案：list_files_in_directory，參數 dir\n"
+            "- 讀取檔案內容：read_file，參數 file_path\n"
+            "- 作業系統/架構：get_platform_info\n"
+            "- 股價/股史：get_current_stock_price 或 get_stock_history\n\n"
             + retry_hint
             + tools_text
             + sub_agents_text
-            + f"User request:\n{prompt}\n\n"
-            "Return JSON only."
+            + f"使用者需求：\n{prompt}\n\n"
+            "只輸出 JSON。"
         )
 
         try:
-            result = await self.agent.run(plan_prompt, message_history=message_history)
+            result = await self._planner_agent.run(plan_prompt)
             out = (result.output or "").strip()
+            logger.info("Planner output (attempt %s): %s", attempt, out)
             return await self._extract_execution_plan(out)
         except Exception:
             logger.exception("Failed to request execution plan")
@@ -661,16 +694,7 @@ class MainAgent:
                     depth_instr = "Provide a moderate-depth analysis listing main uncertainties, assumptions, and suggested checks."
 
                 # include available tools for philosopher to reference
-                tools_meta = getattr(self.agent, "_registered_tools", None)
-                if tools_meta:
-                    tools_lines = ["Available tools:"]
-                    for t in tools_meta:
-                        sig = t.get("signature", "()")
-                        doc = t.get("doc", "").splitlines()[0] if t.get("doc") else ""
-                        tools_lines.append(f"- {t.get('name')}{sig}: {doc}")
-                    tools_text = "\n".join(tools_lines) + "\n\n"
-                else:
-                    tools_text = "Available tools: (none)\n\n"
+                tools_text = self._format_tools_context()
                 sub_agents_text = self._format_sub_agents_context()
 
                 phil_prompt = (
@@ -857,16 +881,7 @@ class MainAgent:
                 depth_instr = "以中等深度分析，列出主要不確定處、假設與建議的檢驗步驟。"
 
             # include available tools for philosopher to reference (stream flow)
-            tools_meta = getattr(self.agent, "_registered_tools", None)
-            if tools_meta:
-                tools_lines = ["Available tools:"]
-                for t in tools_meta:
-                    sig = t.get("signature", "()")
-                    doc = t.get("doc", "").splitlines()[0] if t.get("doc") else ""
-                    tools_lines.append(f"- {t.get('name')}{sig}: {doc}")
-                tools_text = "\n".join(tools_lines) + "\n\n"
-            else:
-                tools_text = "Available tools: (none)\n\n"
+            tools_text = self._format_tools_context()
             sub_agents_text = self._format_sub_agents_context()
 
             phil_prompt = (
