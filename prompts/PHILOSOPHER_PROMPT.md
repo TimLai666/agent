@@ -32,6 +32,9 @@ Do NOT infer additional goals.
    - List unknowns or edge cases
    - Max 5 lines
 
+4. ## Consensus
+   - End with `Agreement: yes` or `Agreement: no`
+
 ---
 
 ## HARD LIMITS

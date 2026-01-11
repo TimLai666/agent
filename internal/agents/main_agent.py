@@ -103,7 +103,22 @@ class MainAgent:
         planner_agent: Agent[None, str] = Agent(
             model=model,
             system_prompt=SYSTEM_PROMPT,
-            instructions="你是嚴格的工具規劃器，只能輸出 JSON。",
+            instructions=(
+                "你是嚴格的 JSON 轉換器。"
+                "只負責把主 agent 給你的工具請求轉成 JSON，"
+                "不要自行決定工具或新增步驟。"
+            ),
+            tools=[],
+            model_settings={"temperature": config.temperature},
+        )
+        discussion_agent: Agent[None, str] = Agent(
+            model=model,
+            system_prompt=SYSTEM_PROMPT,
+            instructions=(
+                "You are the main agent in an internal discussion with the philosopher. "
+                "Provide a concise candidate answer for the user and respond to critique. "
+                "Do not call tools. Do not include self-validation."
+            ),
             tools=[],
             model_settings={"temperature": config.temperature},
         )
@@ -144,7 +159,7 @@ class MainAgent:
 
             cast(Any, agent).tool_plain = logging_tool_plain
 
-        main_agent = cls(agent, philosopher, sub_agents, planner_agent)
+        main_agent = cls(agent, philosopher, sub_agents, planner_agent, discussion_agent)
         try:
             add_all_tools(
                 agent,
@@ -172,11 +187,13 @@ class MainAgent:
         philosopher: PhilosopherCoAgent,
         sub_agents: SubAgentRegistry | None = None,
         planner_agent: Agent[None, str] | None = None,
+        discussion_agent: Agent[None, str] | None = None,
     ) -> None:
         self.agent = agent
         self.philosopher = philosopher
         self.sub_agents = sub_agents
         self._planner_agent = planner_agent or agent
+        self._discussion_agent = discussion_agent
         self._last_messages: list[ModelRequest | ModelResponse] | None = None
         self._last_execution_steps: list[dict[str, Any]] = []
         self._last_user_prompt: str | None = None
@@ -364,10 +381,6 @@ class MainAgent:
                                     if len(expected_keys) == 1 and len(current_args) == 1:
                                         current_args = {expected_keys[0]: next(iter(current_args.values()))}
                             if current_tool == "get_stock_history":
-                                ticker = current_args.get("ticker_symbol")
-                                if isinstance(ticker, str):
-                                    if ticker.isdigit() and not ticker.upper().endswith(".TW"):
-                                        current_args["ticker_symbol"] = f"{ticker}.TW"
                                 period = current_args.get("period")
                                 if isinstance(period, str):
                                     normalized = period.lower()
@@ -375,12 +388,6 @@ class MainAgent:
                                         current_args["period"] = "1mo"
                                     elif normalized in {"3m"}:
                                         current_args["period"] = "3mo"
-                            elif current_tool == "get_current_stock_price":
-                                ticker = current_args.get("ticker_symbol")
-                                if isinstance(ticker, str):
-                                    if ticker.isdigit() and not ticker.upper().endswith(".TW"):
-                                        current_args["ticker_symbol"] = f"{ticker}.TW"
-                                        current_args.setdefault("is_taiwan_stock", "True")
                             logger.info("Executing tool '%s' with args: %s", current_tool, current_args)
                             if inspect.iscoroutinefunction(callable_obj):
                                 res = await callable_obj(**current_args)
@@ -511,13 +518,76 @@ class MainAgent:
         """Tool: forward question to philosopher co-agent."""
         logger.info("Main agent -> philosopher")
         print("[LOG] main -> philosopher")
-        # prefer streaming if available
-        if hasattr(self.philosopher, "run_stream"):
-            collected = ""
-            async for chunk in self.philosopher.run_stream(question):
-                collected += chunk
-            return collected
-        return await self.philosopher.run(question)
+        return await self._run_philosopher_discussion(question)
+
+    async def _run_philosopher_discussion(self, question: str) -> str:
+        discussion: list[tuple[str, str]] = []
+        max_rounds = 5
+        main_draft: str | None = None
+        discussion_agent = self._discussion_agent or self.agent
+        initial_prompt = self._build_main_discussion_prompt(None, None)
+        main_result = await discussion_agent.run(initial_prompt)
+        main_draft = (main_result.output or "").strip()
+        discussion.append(("MainAgent", main_draft))
+
+        for _ in range(max_rounds):
+            phil_prompt = self._build_philosopher_prompt(
+                note=None,
+                args=None,
+                step_outputs=None,
+                question=question,
+                main_draft=main_draft,
+            )
+            phil_output = await self.philosopher.run(phil_prompt)
+            discussion.append(("Philosopher", phil_output))
+
+            main_prompt = self._build_main_discussion_prompt(phil_output, main_draft)
+            main_result = await discussion_agent.run(main_prompt)
+            main_draft = (main_result.output or "").strip()
+            discussion.append(("MainAgent", main_draft))
+
+            phil_agrees = self._parse_philosopher_agreement(phil_output)
+            if phil_agrees is True and await self._should_end_discussion(
+                discussion, last_main_answer=main_draft
+            ):
+                break
+
+        return "\n".join(f"{speaker}: {text}" for speaker, text in discussion)
+
+    async def _run_philosopher_discussion_stream(self, question: str):
+        discussion: list[tuple[str, str]] = []
+        max_rounds = 5
+        main_draft: str | None = None
+        discussion_agent = self._discussion_agent or self.agent
+        initial_prompt = self._build_main_discussion_prompt(None, None)
+        main_result = await discussion_agent.run(initial_prompt)
+        main_draft = (main_result.output or "").strip()
+        discussion.append(("MainAgent", main_draft))
+        yield f"MainAgent: {main_draft}"
+
+        for _ in range(max_rounds):
+            phil_prompt = self._build_philosopher_prompt(
+                note=None,
+                args=None,
+                step_outputs=None,
+                question=question,
+                main_draft=main_draft,
+            )
+            phil_output = await self.philosopher.run(phil_prompt)
+            discussion.append(("Philosopher", phil_output))
+            yield f"Philosopher: {phil_output}"
+
+            main_prompt = self._build_main_discussion_prompt(phil_output, main_draft)
+            main_result = await discussion_agent.run(main_prompt)
+            main_draft = (main_result.output or "").strip()
+            discussion.append(("MainAgent", main_draft))
+            yield f"MainAgent: {main_draft}"
+
+            phil_agrees = self._parse_philosopher_agreement(phil_output)
+            if phil_agrees is True and await self._should_end_discussion(
+                discussion, last_main_answer=main_draft
+            ):
+                break
 
     def list_sub_agents(self) -> list[dict[str, str]]:
         """Tool: list available sub-agents (name + short description)."""
@@ -628,11 +698,13 @@ class MainAgent:
         args: dict[str, Any] | None,
         step_outputs: list[str] | None,
         question: str | None,
+        main_draft: str | None = None,
     ) -> str:
         parts = [
             "You are the philosopher co-agent in an internal discussion with the main agent.",
             "Provide reasoning and context the main agent can use to answer the user.",
             "Do NOT ask the user questions. Answer directly based on context.",
+            "End with a line: Agreement: yes/no.",
         ]
         if self._previous_user_prompt:
             parts.append(f"Previous user message: {self._previous_user_prompt}")
@@ -644,6 +716,8 @@ class MainAgent:
             parts.append(f"Plan note: {note}")
         if question:
             parts.append(f"Question: {question}")
+        if main_draft:
+            parts.append(f"Main agent draft response: {main_draft}")
         if step_outputs:
             parts.append(f"Latest tool output: {step_outputs[-1]}")
         else:
@@ -651,6 +725,46 @@ class MainAgent:
             if recent_output:
                 parts.append(f"Previous tool output: {recent_output}")
         return "\n\n".join(parts)
+
+    def _parse_philosopher_agreement(self, text: str | None) -> bool | None:
+        if not text:
+            return None
+        lowered = text.lower()
+        if "agreement:" in lowered:
+            for line in lowered.splitlines():
+                if "agreement:" in line:
+                    if "yes" in line:
+                        return True
+                    if "no" in line:
+                        return False
+        if "同意" in text:
+            return True
+        if "不同意" in text or "不認同" in text:
+            return False
+        return None
+
+    def _build_main_discussion_prompt(
+        self,
+        phil_output: str | None,
+        main_draft: str | None,
+    ) -> str:
+        prompt = (
+            "You are the main agent in an internal discussion with the philosopher.\n"
+            "Respond to the philosopher's points and draft a concise answer for the user.\n"
+            "Do not call tools. Do not include self-validation. Do not ask the user questions.\n\n"
+        )
+        if self._previous_user_prompt:
+            prompt += f"Previous user message: {self._previous_user_prompt}\n\n"
+        if self._last_assistant_reply:
+            prompt += f"Previous assistant reply: {self._last_assistant_reply}\n\n"
+        if self._last_user_prompt:
+            prompt += f"Current user message: {self._last_user_prompt}\n\n"
+        if main_draft:
+            prompt += f"Previous draft: {main_draft}\n\n"
+        if phil_output:
+            prompt += f"Philosopher feedback:\n{phil_output}\n\n"
+        prompt += "Provide the updated draft answer only."
+        return prompt
 
     def _resolve_args(self, args: Any, step_outputs: list[str]) -> Any:
         def resolve_value(value: Any) -> Any:
@@ -680,37 +794,28 @@ class MainAgent:
         message_history: list[ModelRequest | ModelResponse] | None = None,
         attempt: int = 1,
     ) -> dict | None:
-        tools_text = self._format_tools_context()
-        sub_agents_text = self._format_sub_agents_context()
+        draft = await self._draft_tool_requests(prompt, message_history=message_history)
+        if not draft:
+            return None
+
         retry_hint = ""
         if attempt > 1:
             retry_hint = (
                 "你上一次沒有輸出合法 JSON。這次只能輸出 JSON。\n"
-                "除非完全沒有工具可用，否則不得輸出空 plan；必須至少一個步驟。\n\n"
+                "不得新增或刪除主 agent 的工具步驟。\n\n"
             )
 
         plan_prompt = (
-            "你必須先規劃工具呼叫再回答。只輸出 JSON，格式固定為 {\"plan\": [ ... ]}。\n"
+            "你只能把下列工具請求轉成 JSON，格式固定為 {\"plan\": [ ... ]}。\n"
+            "不得自行決定工具、不得新增/刪除步驟、不得更改參數語意。\n"
             "每個步驟必須包含 tool 欄位；需要參數時加入 args 物件，沒有參數就省略或用 {}。\n"
-            "若不需要工具，回傳 {\"plan\": []}。不要寫分析或其他文字。\n"
-            "若要委派給 sub-agent，使用工具 ask_sub_agent，args 為 {\"name\": \"...\", \"prompt\": \"...\"}。\n"
-            "哲學家不是 sub-agent，若需請教哲學家，使用工具 ask_philosopher，參數 question。\n"
-            "如果後續步驟需要前一步的輸出，使用 \"$last\" 或 \"$step1\" 這類佔位符。\n\n"
-            "常見需求對應工具（若符合就直接用）：\n"
-            "- 詢問現在時間：get_now\n"
-            "- 查某日期是星期幾：get_weekday，參數 date_str\n"
-            "- 擲骰子：roll_dice\n"
-            "- 從清單隨機挑一個：random_pick，參數 items\n"
-            "- 目前工作目錄：get_current_directory\n"
-            "- 列出目錄檔案：list_files_in_directory，參數 dir\n"
-            "- 讀取檔案內容：read_file，參數 file_path\n"
-            "- 作業系統/架構：get_platform_info\n"
-            "- 股價/股史：get_current_stock_price 或 get_stock_history\n\n"
+            "若請求為 none，回傳 {\"plan\": []}。\n"
+            "忽略 INTENT，只轉換 TOOL_REQUESTS。\n"
+            "只輸出 JSON。\n\n"
             + retry_hint
-            + tools_text
-            + sub_agents_text
-            + f"使用者需求：\n{prompt}\n\n"
-            "只輸出 JSON。"
+            + "主 agent 說明與工具請求：\n"
+            + draft
+            + "\n\n只輸出 JSON。"
         )
 
         try:
@@ -722,11 +827,57 @@ class MainAgent:
             logger.exception("Failed to request execution plan")
             return None
 
-    async def _ensure_eager_execution(
+    async def _draft_tool_requests(
         self,
         prompt: str,
         message_history: list[ModelRequest | ModelResponse] | None = None,
-    ) -> list[str]:
+    ) -> str:
+        tools_text = self._format_tools_context()
+        sub_agents_text = self._format_sub_agents_context()
+        draft_prompt = (
+            "你是主 agent 的規劃器。先寫一段話描述你要做什麼、怎麼做，然後列出工具請求。\n"
+            "輸出格式只允許下列兩種之一：\n"
+            "1) INTENT: <一段話>\n"
+            "   TOOL_REQUESTS: none\n"
+            "2) INTENT: <一段話>\n"
+            "   TOOL_REQUESTS:\n"
+            "   - tool: tool_name\n"
+            "     args: {\"key\": \"value\"}\n"
+            "每一步都必須明確指定 tool；無參數就省略 args 行。\n"
+            "如果後續步驟需要前一步的輸出，使用 \"$last\" 或 \"$step1\" 佔位符。\n"
+            "不得輸出 JSON。\n\n"
+            "常見需求對應工具（若符合就直接用）：\n"
+            "- 詢問現在時間：get_now\n"
+            "- 查某日期是星期幾：get_weekday，參數 date_str\n"
+            "- 擲骰子：roll_dice\n"
+            "- 從清單隨機挑一個：random_pick，參數 items\n"
+            "- 目前工作目錄：get_current_directory\n"
+            "- 列出目錄檔案：list_files_in_directory，參數 dir\n"
+            "- 讀取檔案內容：read_file，參數 file_path\n"
+            "- 作業系統/架構：get_platform_info\n"
+            "- 股價/股史：get_current_stock_price 或 get_stock_history\n"
+            "  - ticker_symbol 請使用使用者原始市場代碼（例如 AAPL、TSLA、7203.T、2330.TW）\n"
+            "  - 台股如無後綴，請在 args 補上 2330.TW 或提供 is_taiwan_stock=true\n\n"
+            + tools_text
+            + sub_agents_text
+            + f"使用者需求：\n{prompt}\n\n"
+            "只輸出工具請求清單。"
+        )
+
+        try:
+            result = await self.agent.run(draft_prompt, message_history=message_history)
+            out = (result.output or "").strip()
+            logger.info("Draft tool requests: %s", out)
+            return out
+        except Exception:
+            logger.exception("Failed to draft tool requests")
+            return ""
+
+    async def _build_plan_list(
+        self,
+        prompt: str,
+        message_history: list[ModelRequest | ModelResponse] | None = None,
+    ) -> list[dict[str, Any] | Any]:
         plan_obj = await self._request_execution_plan(prompt, message_history=message_history, attempt=1)
         if plan_obj is None or _plan_is_empty(plan_obj):
             plan_obj = await self._request_execution_plan(prompt, message_history=message_history, attempt=2)
@@ -758,6 +909,14 @@ class MainAgent:
             if not has_time_step:
                 plan_list.insert(0, {"tool": "get_now"})
 
+        return plan_list
+
+    async def _ensure_eager_execution(
+        self,
+        prompt: str,
+        message_history: list[ModelRequest | ModelResponse] | None = None,
+    ) -> list[str]:
+        plan_list = await self._build_plan_list(prompt, message_history=message_history)
         if not plan_list:
             return []
         return await self.execute_plan({"plan": plan_list})
@@ -775,7 +934,7 @@ class MainAgent:
         Falls back to keyword checks on philosopher critique when parsing fails.
         """
         # Build a short prompt summarizing the discussion and candidate answer
-        summary = """請判斷下列討論與主 agent 的候選回答是否已足以得出最終答案。只回傳 JSON：{" + '"end": true/false, "reason": "短理由"}' + "，不要其他文字。\n\n討論摘要：\n"""
+        summary = """請判斷下列討論與主 agent 的候選回答是否已足以得出最終答案。只有在哲學家明確同意（Agreement: yes/同意）時才能結束。只回傳 JSON：{" + '"end": true/false, "reason": "短理由"}' + "，不要其他文字。\n\n討論摘要：\n"""
         for speaker, text in discussion:
             summary += f"{speaker}: {text}\n"
         if last_main_answer:
@@ -783,8 +942,9 @@ class MainAgent:
 
         summary += "\n**重要**：不要呼叫任何工具。只依據討論判斷並回傳 JSON。"
 
+        decider = self._discussion_agent or self.agent
         try:
-            res = await self.agent.run(summary, message_history=message_history)
+            res = await decider.run(summary, message_history=message_history)
             out = (res.output or "").strip()
             try:
                 parsed = json.loads(out)
@@ -866,26 +1026,199 @@ class MainAgent:
         """Streamed version of run(): yields chunks from philosopher/subagents/main agent as they produce output."""
         self._previous_user_prompt = self._last_user_prompt
         self._last_user_prompt = prompt
-        exec_results = await self._ensure_eager_execution(prompt, message_history=message_history)
-        current_time = self._extract_current_time()
-        if exec_results:
-            exec_text = "\n".join(exec_results)
+        plan_list = await self._build_plan_list(prompt, message_history=message_history)
+        exec_results: list[str] = []
+        step_outputs: list[str] = []
+        steps_meta: list[dict[str, Any]] = []
+        current_time = None
+        if plan_list:
             yield "<tool-execution>\n"
-            for line in exec_results:
-                yield line + "\n"
-            yield "</tool-execution>\n"
-            discussion_lines = []
-            for step in self._last_execution_steps:
-                if step.get("tool") == "ask_philosopher":
-                    if "result" in step:
-                        discussion_lines.append(str(step["result"]))
-                    elif "error" in step:
-                        discussion_lines.append(f"Error: {step['error']}")
-            if discussion_lines:
-                yield "<discussion>\n"
-                for line in discussion_lines:
+            open_block = True
+            registered = getattr(self.agent, "_function_tools", {}) or {}
+            allowed_names = set(registered.keys())
+            for idx, step in enumerate(plan_list, start=1):
+                tool_name = step.get("tool") if isinstance(step, dict) else None
+                args = step.get("args", {}) if isinstance(step, dict) else {}
+                note = step.get("note") if isinstance(step, dict) else None
+                header = f"Step {idx}: {tool_name}"
+                if note:
+                    header += f"  ({note})"
+                yield header + "\n"
+                exec_results.append(header)
+                step_meta: dict[str, Any] = {"tool": tool_name, "args": args, "note": note}
+
+                attempts = 0
+                current_tool = tool_name
+                current_args = args
+                current_error = ""
+                while True:
+                    if isinstance(current_tool, str) and "ask_philosopher" in allowed_names:
+                        if current_tool == "ask_philosopher":
+                            question = ""
+                            if isinstance(current_args, dict):
+                                question = str(
+                                    current_args.get("question")
+                                    or current_args.get("prompt")
+                                    or ""
+                                ).strip()
+                            if not question:
+                                question = self._build_sub_agent_prompt(note, current_args, step_outputs)
+                            current_args = {
+                                "question": self._build_philosopher_prompt(
+                                    note, current_args, step_outputs, question
+                                )
+                            }
+                        elif current_tool in {"philosopher", "哲學家"}:
+                            question = self._build_sub_agent_prompt(note, current_args, step_outputs)
+                            current_tool = "ask_philosopher"
+                            current_args = {
+                                "question": self._build_philosopher_prompt(
+                                    note, current_args, step_outputs, question
+                                )
+                            }
+                        elif current_tool == "ask_sub_agent":
+                            name = ""
+                            if isinstance(current_args, dict):
+                                name = str(current_args.get("name", "")).strip().lower()
+                            if name in {"philosopher", "哲學家", "philosopher-co-agent"}:
+                                question = ""
+                                if isinstance(current_args, dict):
+                                    question = str(current_args.get("prompt", "")).strip()
+                                if not question:
+                                    question = self._build_sub_agent_prompt(note, current_args, step_outputs)
+                                current_tool = "ask_philosopher"
+                                current_args = {
+                                    "question": self._build_philosopher_prompt(
+                                        note, current_args, step_outputs, question
+                                    )
+                                }
+
+                    if (
+                        self.sub_agents
+                        and isinstance(current_tool, str)
+                        and self.sub_agents.get_agent(current_tool)
+                        and "ask_sub_agent" in allowed_names
+                    ):
+                        prompt = self._build_sub_agent_prompt(note, current_args, step_outputs)
+                        current_args = {"name": current_tool, "prompt": prompt}
+                        current_tool = "ask_sub_agent"
+
+                    if not current_tool:
+                        current_error = "Missing 'tool' field."
+                    elif current_tool not in allowed_names:
+                        current_error = f"Tool '{current_tool}' is not registered."
+                    else:
+                        if current_args:
+                            current_args = self._resolve_args(current_args, step_outputs)
+                        if current_args is None:
+                            current_args = {}
+                        elif not isinstance(current_args, dict):
+                            current_args = {"value": current_args}
+                        tool_def = registered.get(str(current_tool)) if isinstance(current_tool, str) else None
+                        if tool_def is None:
+                            current_error = f"Tool '{current_tool}' declared but not found on agent runtime."
+                        elif getattr(tool_def, "takes_ctx", False):
+                            current_error = f"Tool '{current_tool}' requires context and cannot be called directly."
+                        else:
+                            callable_obj = tool_def.function
+                            try:
+                                try:
+                                    schema = tool_def.function_schema.json_schema or {}
+                                    expected_keys = list((schema.get("properties") or {}).keys())
+                                except Exception:
+                                    expected_keys = []
+                                if current_args and expected_keys:
+                                    expected_set = set(expected_keys)
+                                    if not set(current_args.keys()).issubset(expected_set):
+                                        if len(expected_keys) == 1 and len(current_args) == 1:
+                                            current_args = {expected_keys[0]: next(iter(current_args.values()))}
+                                if current_tool == "get_stock_history":
+                                    period = current_args.get("period")
+                                    if isinstance(period, str):
+                                        normalized = period.lower()
+                                        if normalized in {"month", "1m"}:
+                                            current_args["period"] = "1mo"
+                                        elif normalized in {"3m"}:
+                                            current_args["period"] = "3mo"
+
+                                if current_tool == "ask_philosopher":
+                                    question = str(current_args.get("question", ""))
+                                    yield "  -> result: (see discussion)\n"
+                                    if open_block:
+                                        yield "</tool-execution>\n"
+                                        open_block = False
+                                    yield "<discussion>\n"
+                                    transcript_lines: list[str] = []
+                                    async for line in self._run_philosopher_discussion_stream(question):
+                                        yield line + "\n"
+                                        transcript_lines.append(line)
+                                    yield "</discussion>\n"
+                                    transcript = "\n".join(transcript_lines)
+                                    exec_results.append(f"  -> result: {transcript}")
+                                    step_outputs.append(transcript)
+                                    step_meta["result"] = transcript
+                                    step_meta["tool"] = current_tool
+                                    if idx < len(plan_list):
+                                        yield "<tool-execution>\n"
+                                        open_block = True
+                                    break
+
+                                logger.info("Executing tool '%s' with args: %s", current_tool, current_args)
+                                if inspect.iscoroutinefunction(callable_obj):
+                                    res = await callable_obj(**current_args)
+                                else:
+                                    maybe = callable_obj(**current_args) if current_args else callable_obj()
+                                    if asyncio.iscoroutine(maybe):
+                                        res = await maybe
+                                    else:
+                                        res = maybe
+                                logger.info("Tool '%s' execution result: %s", current_tool, res)
+                                line = f"  -> result: {res}"
+                                yield line + "\n"
+                                exec_results.append(line)
+                                step_outputs.append(str(res))
+                                step_meta["result"] = res
+                                step_meta["tool"] = current_tool
+                                break
+                            except Exception as e:
+                                logger.exception("Error executing tool %s", current_tool)
+                                current_error = f"Execution error: {e}"
+                                step_meta["error"] = current_error
+
+                    if attempts >= self.TOOL_RECOVERY_MAX_ATTEMPTS:
+                        if current_error:
+                            line = f"  -> execution error: {current_error}"
+                            yield line + "\n"
+                            exec_results.append(line)
+                            step_meta["error"] = current_error
+                        break
+
+                    attempts += 1
+                    line = f"  -> recovery attempt {attempts}: {current_error}"
                     yield line + "\n"
-                yield "</discussion>\n"
+                    exec_results.append(line)
+                    recovery = await self._recover_tool_call(
+                        tool=current_tool,
+                        args=current_args,
+                        error=current_error,
+                        note=note,
+                    )
+                    if not recovery:
+                        line = "  -> recovery failed: no corrected tool call returned"
+                        yield line + "\n"
+                        exec_results.append(line)
+                        step_meta["error"] = "recovery failed: no corrected tool call returned"
+                        break
+                    current_tool = recovery.get("tool")
+                    current_args = recovery.get("args", {})
+
+                steps_meta.append(step_meta)
+
+            if open_block:
+                yield "</tool-execution>\n"
+            self._last_execution_steps = steps_meta
+            current_time = self._extract_current_time()
+            exec_text = "\n".join(exec_results)
             prompt = f"{prompt}\n\nTool execution results:\n{exec_text}"
         if current_time:
             prompt = f"Current time: {current_time}\n\n{prompt}"
