@@ -1,6 +1,8 @@
 import numpy as np
 import speech_recognition as sr
 import whisper
+import types
+from typing import cast
 
 
 class VoiceManager:
@@ -18,7 +20,21 @@ class VoiceManager:
 
         try:
             # 將語音數據轉換為 Whisper 可讀取的格式 (16kHz, float32 numpy array)
-            raw_data = audio.get_raw_data(convert_rate=16000, convert_width=2)
+            audio_data = audio
+            if isinstance(audio, types.GeneratorType):
+                try:
+                    audio_data = next(audio)
+                except StopIteration:
+                    print("沒有收到音訊資料")
+                    return None
+            if not hasattr(audio_data, "get_raw_data"):
+                print("收到的音訊物件不支援 'get_raw_data'")
+                return None
+
+            # help static type checkers by casting to sr.AudioData
+            audio_data = cast(sr.AudioData, audio_data)
+
+            raw_data = audio_data.get_raw_data(convert_rate=16000, convert_width=2)
             audio_np = (
                 np.frombuffer(raw_data, dtype=np.int16).astype(np.float32) / 32768.0
             )
