@@ -13,6 +13,10 @@ from internal.services.agent_factory import (
 )
 from internal.set_tools import add_all_tools
 import sys
+import inspect
+import asyncio
+import functools
+from typing import Any, cast
 from pydantic_ai.mcp import MCPServerStdio
 
 PROMPT_KEY = "MAIN_AGENT_PROMPT"
@@ -71,11 +75,51 @@ class MainAgent:
             mcp_servers=mcp_servers,
         )
         # register global tools directly on the main agent
+        # Wrap agent.tool_plain temporarily so that each registered tool is
+        # wrapped to log calls, arguments, results and exceptions.
+        original_tool_plain = getattr(agent, "tool_plain", None)
+        if original_tool_plain:
+            def logging_tool_plain(func):
+                # create a wrapped callable that logs on invocation
+                if inspect.iscoroutinefunction(func):
+                    @functools.wraps(func)
+                    async def wrapped_async(*args, **kwargs):
+                        logger.info("Tool call start: %s args=%s kwargs=%s", func.__name__, args, kwargs)
+                        try:
+                            res = await func(*args, **kwargs)
+                            logger.info("Tool call end: %s result=%s", func.__name__, res)
+                            return res
+                        except Exception:
+                            logger.exception("Tool %s raised an exception", func.__name__)
+                            raise
+                    wrapped_callable = wrapped_async
+                else:
+                    @functools.wraps(func)
+                    def wrapped_sync(*args, **kwargs):
+                        logger.info("Tool call start: %s args=%s kwargs=%s", func.__name__, args, kwargs)
+                        try:
+                            res = func(*args, **kwargs)
+                            logger.info("Tool call end: %s result=%s", func.__name__, res)
+                            return res
+                        except Exception:
+                            logger.exception("Tool %s raised an exception", func.__name__)
+                            raise
+                    wrapped_callable = wrapped_sync
+
+                # delegate to the original registration API with the wrapped callable
+                return original_tool_plain(wrapped_callable)
+
+            cast(Any, agent).tool_plain = logging_tool_plain
+
         try:
             add_all_tools(agent, config.model_name, config.base_url, config.api_key)
             logger.info("Registered tools on MainAgent")
         except Exception:
             logger.exception("Failed to add tools to main agent; continuing without external tools")
+        finally:
+            # restore original registration function if we replaced it
+            if original_tool_plain:
+                cast(Any, agent).tool_plain = original_tool_plain
         return cls(agent, philosopher)
 
     def __init__(
@@ -89,11 +133,112 @@ class MainAgent:
         # register tool functions so agent can call them; defining as methods
         try:
             # calling tool_plain with the bound method registers it
-            self.agent.tool_plain(self.ask_philosopher)
+            cast(Any, self.agent).tool_plain(self.ask_philosopher)
             # tools from internal.set_tools were added during create()
         except Exception:
             # registration failures shouldn't break initialization
             logger.debug("Tool registration skipped or failed during init")
+
+    async def _extract_execution_plan(self, text: str) -> dict | None:
+        """Try to extract an execution plan JSON from free text.
+
+        Expected forms:
+        - A top-level JSON object containing key 'execution_plan' or 'plan'
+        - A raw JSON object representing the plan
+        Returns parsed dict or None.
+        """
+        if not text:
+            return None
+        # Try full-text JSON parse first
+        try:
+            parsed = json.loads(text)
+            if isinstance(parsed, dict) and ("execution_plan" in parsed or "plan" in parsed):
+                return parsed
+            # if the parsed dict itself *is* a plan
+            if isinstance(parsed, dict) and ("steps" in parsed or "plan" in parsed or "execution_plan" in parsed):
+                return parsed
+        except Exception:
+            pass
+
+        # Try to locate a JSON substring between first { and last }
+        start = text.find("{")
+        end = text.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            snippet = text[start : end + 1]
+            try:
+                parsed = json.loads(snippet)
+                if isinstance(parsed, dict) and ("execution_plan" in parsed or "plan" in parsed or "steps" in parsed):
+                    return parsed
+            except Exception:
+                pass
+
+        return None
+
+    async def execute_plan(self, plan_obj: dict) -> list[str]:
+        """Execute an execution_plan-like object.
+
+        plan_obj may contain 'execution_plan' or 'plan' or 'steps'. Each step should be
+        an object with at least 'tool' and optional 'args' (dict) and 'note'.
+
+        Returns a list of result messages (strings) for each step.
+        """
+        results: list[str] = []
+        # normalize
+        if "execution_plan" in plan_obj:
+            plan = plan_obj.get("execution_plan")
+        elif "plan" in plan_obj:
+            plan = plan_obj.get("plan")
+        elif "steps" in plan_obj:
+            plan = plan_obj.get("steps")
+        else:
+            # maybe the plan_obj itself is the list
+            plan = plan_obj
+
+        if not isinstance(plan, list):
+            return ["Plan format invalid: expected a list of steps."]
+
+        for idx, step in enumerate(plan):
+            tool_name = step.get("tool") if isinstance(step, dict) else None
+            args = step.get("args", {}) if isinstance(step, dict) else {}
+            note = step.get("note") if isinstance(step, dict) else None
+            header = f"Step {idx+1}: {tool_name}"
+            if note:
+                header += f"  ({note})"
+            results.append(header)
+
+            if not tool_name:
+                results.append("  -> skipped: missing 'tool' field")
+                continue
+
+            # Try to find callable on agent first, then on self
+            callable_obj = None
+            # common agent helper names
+            if hasattr(self.agent, tool_name):
+                callable_obj = getattr(self.agent, tool_name)
+            elif hasattr(self, tool_name):
+                callable_obj = getattr(self, tool_name)
+
+            if callable_obj is None:
+                results.append(f"  -> tool '{tool_name}' not found on agent")
+                continue
+
+            try:
+                logger.info("Executing tool '%s' with args: %s", tool_name, args)
+                if inspect.iscoroutinefunction(callable_obj):
+                    res = await callable_obj(**args)
+                else:
+                    maybe = callable_obj(**args) if args else callable_obj()
+                    if asyncio.iscoroutine(maybe):
+                        res = await maybe
+                    else:
+                        res = maybe
+                logger.info("Tool '%s' execution result: %s", tool_name, res)
+                results.append(f"  -> result: {res}")
+            except Exception as e:
+                logger.exception("Error executing tool %s", tool_name)
+                results.append(f"  -> execution error: {e}")
+
+        return results
 
     async def _should_consult_philosopher(
         self, prompt: str, message_history: list[ModelRequest | ModelResponse] | None = None
@@ -260,21 +405,24 @@ class MainAgent:
             round_tag = f"回合 {r+1}"
             # 向哲學家請求分析/內省
             try:
-                # 根據 depth_label 決定分析指示文字
+                # depth instruction text (English)
                 if depth_label == "very_shallow":
-                    depth_instr = "以極簡摘要回覆，只給出直接結論或最關鍵答案（一行或兩行）。"
+                    depth_instr = "Provide a very concise summary: give the direct conclusion or key answer in one or two lines."
                 elif depth_label == "shallow":
-                    depth_instr = "以淺層重點式回覆，直接列出要點與最關鍵的不確定處。"
+                    depth_instr = "Provide a brief, focused analysis listing the key points and the most critical uncertainties."
                 elif depth_label == "deep":
-                    depth_instr = "以深度、逐步內省 (step-by-step) 方式分析，詳列不確定處、假設、證據、反駁與驗證步驟。"
+                    depth_instr = "Provide a deep, step-by-step introspective analysis, detailing uncertainties, assumptions, evidence, counterarguments, and verification steps."
                 elif depth_label == "very_deep":
-                    depth_instr = "以非常深度、全面性的內省分析，提供詳細證據檢驗方法、替代觀點與潛在風險評估。"
+                    depth_instr = "Provide a very deep, comprehensive introspective analysis, including detailed evidence evaluation, alternative perspectives, and risk assessment."
                 else:
-                    depth_instr = "以中等深度分析，列出主要不確定處、假設與建議的檢驗步驟。"
+                    depth_instr = "Provide a moderate-depth analysis listing main uncertainties, assumptions, and suggested checks."
 
                 phil_prompt = (
-                    f"{round_tag} - {depth_instr} 在開始分析前，先明確劃定討論範圍：列出要聚焦的內容（Focus）與不在本次討論範圍的項目（Out of scope）。"
-                    f" 然後請分析下列問題，並列出不確定處、假設與判斷依據：\n\n{current_prompt}"
+                    f"{round_tag} - {depth_instr} Before analyzing, explicitly define the discussion scope: list what to focus on (Focus) and what is out of scope for this discussion (Out of scope)."
+                    f" Then analyze the following question and list uncertainties, assumptions, and reasoning steps:\n\n{current_prompt}\n\n"
+                    "If you propose actionable steps that require calling tools, optionally include a top-level JSON object named 'execution_plan' with a key 'plan' that is a list of steps."
+                    " Each step should be an object with 'tool' (string), optional 'args' (object), and optional 'note' (string)."
+                    " Place the JSON on its own line so it can be parsed separately."
                 )
                 logger.info("Main agent requesting philosopher analysis (round %d)", r + 1)
                 print(f"[LOG] main -> philosopher (deliberation) round {r+1}")
@@ -284,6 +432,17 @@ class MainAgent:
                 break
 
             discussion.append(("Philosopher", phil_resp))
+
+            # If philosopher provided an execution plan JSON, parse and execute it
+            try:
+                plan_obj = await self._extract_execution_plan(phil_resp)
+                if plan_obj:
+                    logger.info("Philosopher provided an execution plan; executing")
+                    exec_results = await self.execute_plan(plan_obj)
+                    exec_text = "\n".join(exec_results)
+                    discussion.append(("Execution", exec_text))
+            except Exception:
+                logger.exception("Failed to parse or execute philosopher plan")
 
             # 主 agent 基於目前討論產生候選回答
             main_input = f"原始問題：\n{prompt}\n\n討論紀錄：\n"
@@ -298,10 +457,10 @@ class MainAgent:
             # 將主 agent 的候選回答回饋給哲學家，請其評論並指出是否可作為結論
             try:
                 critique_prompt = (
-                    "請檢視以下主 agent 的候選回答，指出錯誤、遺漏與改進建議，"
-                    "並說明是否可以作為最終結論；若可以，請以「結論：...」明確給出；否則請提供修正方向：\n\n"
+                    "Review the Main Agent's candidate answer below. Point out errors, omissions, and suggestions for improvement,"
+                    " and indicate whether this can be considered the final conclusion. If yes, provide a clear 'Conclusion: ...'; otherwise, provide corrections and next steps:\n\n"
                     + main_answer
-                    + "\n\n原始問題：\n"
+                    + "\n\nOriginal question:\n"
                     + prompt
                 )
                 print(f"[LOG] main -> philosopher (critique) round {r+1}")
@@ -390,8 +549,11 @@ class MainAgent:
                 depth_instr = "以中等深度分析，列出主要不確定處、假設與建議的檢驗步驟。"
 
             phil_prompt = (
-                f"{round_tag} - {depth_instr} 在開始分析前，先明確劃定討論範圍：列出要聚焦的內容（Focus）與不在本次討論範圍的項目（Out of scope）。"
-                f" 然後請分析下列問題，並列出不確定處、假設與判斷依據：\n\n{current_prompt}"
+                f"{round_tag} - {depth_instr} Before analyzing, explicitly define the discussion scope: list what to focus on (Focus) and what is out of scope for this discussion (Out of scope)."
+                f" Then analyze the following question and list uncertainties, assumptions, and reasoning steps:\n\n{current_prompt}\n\n"
+                "If you propose actionable steps that require calling tools, optionally include a top-level JSON object named 'execution_plan' with a key 'plan' that is a list of steps."
+                " Each step should be an object with 'tool' (string), optional 'args' (object), and optional 'note' (string)."
+                " Place the JSON on its own line so it can be parsed separately."
             )
             yield f"--- {round_tag} 哲學家分析開始 ---\n"
             collected_phil = ""
@@ -409,6 +571,18 @@ class MainAgent:
 
             yield f"\n--- {round_tag} 哲學家分析結束 ---\n"
             discussion.append(("Philosopher", collected_phil))
+
+            # detect & execute plan if present
+            try:
+                plan_obj = await self._extract_execution_plan(collected_phil)
+                if plan_obj:
+                    yield "--- Philosopher provided execution plan ---\n"
+                    exec_results = await self.execute_plan(plan_obj)
+                    for line in exec_results:
+                        yield line + "\n"
+                    discussion.append(("Execution", "\n".join(exec_results)))
+            except Exception:
+                logger.exception("Failed to parse or execute philosopher plan (stream)")
 
             # 主 agent candidate answer (stream)
             main_input = f"原始問題：\n{prompt}\n\n討論紀錄：\n"
@@ -429,10 +603,10 @@ class MainAgent:
 
             # philosopher critique (stream)
             critique_prompt = (
-                "請檢視以下主 agent 的候選回答，指出錯誤、遺漏與改進建議，"
-                "並說明是否可以作為最終結論；若可以，請以「結論：...」明確給出；否則請提供修正方向：\n\n"
+                "Review the Main Agent's candidate answer below. Point out errors, omissions, and suggestions for improvement,"
+                " and indicate whether this can be considered the final conclusion. If yes, provide a clear 'Conclusion: ...'; otherwise, provide corrections and next steps:\n\n"
                 + collected_main
-                + "\n\n原始問題：\n"
+                + "\n\nOriginal question:\n"
                 + prompt
             )
             yield f"--- 哲學家評論（回合 {r+1}）開始 ---\n"
