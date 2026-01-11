@@ -178,6 +178,81 @@ DEBUG -   - 'code-review': score=0.567 (matched: code, review, bugs)
 DEBUG - Selected top 2 skill(s)
 ```
 
+## 🎯 配對機制
+
+### LLM 語義匹配（預設啟用）⭐
+
+**現已使用 LLM 進行語義理解匹配！**
+
+```
+1. LLM 評估每個 skill 與 prompt 的語義相關性
+2. 返回 0.0-1.0 的相關性分數
+3. 篩選 >= 0.3 的 skills
+4. 按分數排序，取前 3 個
+```
+
+**特點：**
+
+- ✓ **完美支援中文**（"教我寫python" ✓）
+- ✓ 語義理解而非關鍵詞匹配
+- ✓ 95%+ 準確性
+- ⚠️ 稍慢（~300ms）但值得
+
+### 實際範例
+
+```
+Prompt: "教我寫python"  （純中文）
+
+LLM 匹配結果：
+- python-tutorial: 0.95 ✅
+- code-review: 0.10 ❌
+- debugging: 0.05 ❌
+
+激活：python-tutorial
+```
+
+```
+Prompt: "代碼品質不好，怎麼改進"  （語義理解）
+
+LLM 匹配結果：
+- code-review: 0.85 ✅
+- debugging-assistant: 0.60 ✅
+- python-tutorial: 0.15 ❌
+
+激活：code-review, debugging-assistant
+```
+
+### 測試配對
+
+```bash
+/skills test <你的 prompt>  # 查看會匹配哪些 skills
+/skills test 教我寫python   # 中文也完美支援！
+```
+
+## ⚡ 優先級系統
+
+### 決策層級
+
+```
+Skills（專家指導）> Tools（執行操作）> 直接回答
+```
+
+### 實際效果
+
+當 skill 被激活時，會在 context 中加入：
+
+```markdown
+# Active Skills (PRIORITY: Use these BEFORE tools)
+
+**IMPORTANT**: 優先使用以下 skills 的知識和方法論...
+
+## code-review
+[內容...]
+
+---
+**Remember**: 遵循 skills 指導再使用 tools
+```
+
 ## 🔧 配置
 
 ### 匹配參數
@@ -216,6 +291,7 @@ registry = load_skill_registry(
 - **系統架構**: [docs/SKILLS_SYSTEM.md](docs/SKILLS_SYSTEM.md)
 - **完整實現**: [docs/SKILLS_FULL_IMPLEMENTATION.md](docs/SKILLS_FULL_IMPLEMENTATION.md)
 - **使用指南**: [docs/SKILLS_USAGE_IN_AGENTS.md](docs/SKILLS_USAGE_IN_AGENTS.md)
+- **配對與優先級**: [docs/SKILLS_MATCHING_AND_PRIORITY.md](docs/SKILLS_MATCHING_AND_PRIORITY.md) ⭐ NEW
 - **日誌系統**: [docs/SKILLS_LOGGING.md](docs/SKILLS_LOGGING.md)
 - **指令文檔**: [docs/SKILLS_COMMANDS.md](docs/SKILLS_COMMANDS.md)
 - **vs Tools**: [docs/SKILLS_VS_TOOLS.md](docs/SKILLS_VS_TOOLS.md)

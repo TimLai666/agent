@@ -173,7 +173,7 @@ class SkillRegistry:
             for name, spec in self._skills.items()
         }
 
-    def find_relevant_skills(
+    async def find_relevant_skills(
         self,
         prompt: str,
         max_skills: int = 3,
@@ -200,7 +200,7 @@ class SkillRegistry:
 
         # Use LLM scoring if available and requested
         if use_llm and self._llm_scorer:
-            return self._llm_scorer.score_skills_sync(prompt, list(self._skills.values()), max_skills, min_score)
+            return await self._llm_scorer.score_skills(prompt, list(self._skills.values()), max_skills, min_score)
 
         # Fall back to keyword-based matching
         return self._keyword_based_matching(prompt, max_skills, min_score)
@@ -256,14 +256,26 @@ class SkillRegistry:
         return [skill for _, skill in scored_skills[:max_skills]]
 
     def build_skills_context(self, skills: list[SkillSpec]) -> str:
-        """Build context string from selected skills."""
+        """Build context string from selected skills with priority guidance."""
         if not skills:
             return ""
 
-        parts = ["# Active Skills\n"]
+        parts = [
+            "# Active Skills (PRIORITY: Use these BEFORE tools)\n",
+            "",
+            "**IMPORTANT**: The following skills have been activated for this task. "
+            "You MUST prioritize the knowledge and methodologies provided in these skills "
+            "over direct tool usage. Think of these as expert guidance that should inform "
+            "all your decisions and actions.\n",
+            ""
+        ]
+
         for skill in skills:
             parts.append(f"## {skill.name}\n")
             parts.append(f"{skill.content}\n")
+
+        parts.append("\n---\n")
+        parts.append("**Remember**: Follow the skills guidance above before using any tools.\n")
 
         return "\n".join(parts)
 

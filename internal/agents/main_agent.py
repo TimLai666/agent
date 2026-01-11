@@ -123,6 +123,7 @@ class MainAgent:
             model_settings={"temperature": config.temperature},
             mcp_servers=mcp_servers,
         )
+
         planner_agent: Agent[None, str] = Agent(
             model=model,
             system_prompt=SYSTEM_PROMPT,
@@ -145,6 +146,10 @@ class MainAgent:
             tools=[],
             model_settings={"temperature": config.temperature},
         )
+        # Register skill tool (Claude Code compatible)
+        from internal.tools.skill_tools import register_skill_tool
+        register_skill_tool(agent, skills)
+
         # register global tools directly on the main agent
         # Wrap agent.tool_plain temporarily so that each registered tool is
         # wrapped to log calls, arguments, results and exceptions.
@@ -631,8 +636,21 @@ class MainAgent:
             return []
         return self.sub_agents.list_summaries()
 
-    async def ask_sub_agent(self, name: str, prompt: str) -> str:
-        """Tool: delegate a task to a sub-agent by name."""
+    async def ask_sub_agent(self, name: str, prompt: str, **kwargs) -> str:
+        """Tool: delegate a task to a sub-agent by name.
+
+        Args:
+            name: Name of the sub-agent to use
+            prompt: The task or question for the sub-agent
+            **kwargs: Additional arguments (ignored for compatibility)
+
+        Returns:
+            The sub-agent's response
+        """
+        # Ignore extra kwargs (e.g., 'role') for compatibility
+        if kwargs:
+            logger.debug(f"ask_sub_agent ignoring extra arguments: {list(kwargs.keys())}")
+
         if not self.sub_agents or self.sub_agents.is_empty():
             return "No sub-agents are registered."
 
@@ -1038,40 +1056,6 @@ class MainAgent:
             prompt = prompt + "\n\n" + "\n\n".join(suffix_blocks)
         return prompt, {"names": matched, "background": background_enabled}
 
-    def _apply_skills(self, prompt: str) -> str:
-        """Find and apply relevant skills to the prompt."""
-        if not self.skills or self.skills.is_empty():
-            return prompt
-
-        # Find relevant skills based on prompt content
-        relevant_skills = self.skills.find_relevant_skills(prompt, max_skills=3)
-
-        if not relevant_skills:
-            logger.debug("[MainAgent] No relevant skills found for prompt")
-            return prompt
-
-        # Build skills context
-        skills_context = self.skills.build_skills_context(relevant_skills)
-
-        if skills_context:
-            skill_names = [skill.name for skill in relevant_skills]
-            logger.info(
-                "🎯 [MainAgent] Activated %d skill(s): %s",
-                len(skill_names),
-                ", ".join(skill_names)
-            )
-            # Log individual skill details at debug level
-            for skill in relevant_skills:
-                logger.debug(
-                    "  └─ Skill '%s': %s",
-                    skill.name,
-                    skill.short_description()
-                )
-            # Prepend skills context to the prompt
-            prompt = f"{skills_context}\n\n---\n\n{prompt}"
-
-        return prompt
-
     def _plan_requests_subagent(self, plan_list: list[dict[str, Any] | Any]) -> bool:
         if not self.sub_agents or self.sub_agents.is_empty():
             return False
@@ -1331,8 +1315,7 @@ class MainAgent:
         prompt, explicit_subagents = self._prepare_prompt(prompt)
         prompt, trigger_state = self._apply_keyword_triggers(prompt)
 
-        # Apply relevant skills to the prompt
-        prompt = self._apply_skills(prompt)
+        # Skills are now tool-based (use_skill tool) - no automatic injection
         plan_list = await self._build_plan_list(prompt, message_history=message_history)
         if explicit_subagents:
             plan_list = self._filter_plan_subagent_steps(plan_list, explicit_subagents)
@@ -1386,8 +1369,7 @@ class MainAgent:
         prompt, explicit_subagents = self._prepare_prompt(prompt)
         prompt, trigger_state = self._apply_keyword_triggers(prompt)
 
-        # Apply relevant skills to the prompt
-        prompt = self._apply_skills(prompt)
+        # Skills are now tool-based (use_skill tool) - no automatic injection
         plan_list = await self._build_plan_list(prompt, message_history=message_history)
         if explicit_subagents:
             plan_list = self._filter_plan_subagent_steps(plan_list, explicit_subagents)
