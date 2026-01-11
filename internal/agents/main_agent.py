@@ -210,16 +210,20 @@ class MainAgent:
                 results.append("  -> skipped: missing 'tool' field")
                 continue
 
-            # Try to find callable on agent first, then on self
-            callable_obj = None
-            # common agent helper names
-            if hasattr(self.agent, tool_name):
-                callable_obj = getattr(self.agent, tool_name)
-            elif hasattr(self, tool_name):
-                callable_obj = getattr(self, tool_name)
+            # Only allow tools that are in the agent's registered tools list
+            registered = getattr(self.agent, "_registered_tools", []) or []
+            allowed_names = {t.get("name") for t in registered if isinstance(t, dict)}
+            if tool_name not in allowed_names:
+                logger.warning("Tool '%s' not in registered tools; skipping", tool_name)
+                results.append(f"  -> skipped: tool '{tool_name}' is not in the agent's registered tools")
+                continue
 
+            # Try to find the callable on the agent (registered tools are exposed there)
+            callable_obj = None
+            if isinstance(tool_name, str) and hasattr(self.agent, tool_name):
+                callable_obj = getattr(self.agent, tool_name)
             if callable_obj is None:
-                results.append(f"  -> tool '{tool_name}' not found on agent")
+                results.append(f"  -> tool '{tool_name}' declared but not found on agent runtime")
                 continue
 
             try:
@@ -417,11 +421,25 @@ class MainAgent:
                 else:
                     depth_instr = "Provide a moderate-depth analysis listing main uncertainties, assumptions, and suggested checks."
 
+                # include available tools for philosopher to reference
+                tools_meta = getattr(self.agent, "_registered_tools", None)
+                if tools_meta:
+                    tools_lines = ["Available tools:"]
+                    for t in tools_meta:
+                        sig = t.get("signature", "()")
+                        doc = t.get("doc", "").splitlines()[0] if t.get("doc") else ""
+                        tools_lines.append(f"- {t.get('name')}{sig}: {doc}")
+                    tools_text = "\n".join(tools_lines) + "\n\n"
+                else:
+                    tools_text = "Available tools: (none)\n\n"
+
                 phil_prompt = (
-                    f"{round_tag} - {depth_instr} Before analyzing, explicitly define the discussion scope: list what to focus on (Focus) and what is out of scope for this discussion (Out of scope)."
-                    f" Then analyze the following question and list uncertainties, assumptions, and reasoning steps:\n\n{current_prompt}\n\n"
-                    "If you propose actionable steps that require calling tools, optionally include a top-level JSON object named 'execution_plan' with a key 'plan' that is a list of steps."
-                    " Each step should be an object with 'tool' (string), optional 'args' (object), and optional 'note' (string)."
+                    f"{round_tag} - {depth_instr} Before analyzing, explicitly define the discussion scope: list what to focus on (Focus) and what is out of scope for this discussion (Out of scope).\n\n"
+                    + tools_text
+                    + f"Then analyze the following question and list uncertainties, assumptions, and reasoning steps:\n\n{current_prompt}\n\n"
+                    "IMPORTANT: Only reference tools from the 'Available tools' list above. Use the exact tool name as listed; do not invent or call other tools."
+                    " If you propose actionable steps that require calling tools, include a top-level JSON object named 'execution_plan' with a key 'plan' that is a list of steps."
+                    " Each step should be an object with 'tool' (string matching an available tool name exactly), optional 'args' (object), and optional 'note' (string)."
                     " Place the JSON on its own line so it can be parsed separately."
                 )
                 logger.info("Main agent requesting philosopher analysis (round %d)", r + 1)
@@ -441,6 +459,17 @@ class MainAgent:
                     exec_results = await self.execute_plan(plan_obj)
                     exec_text = "\n".join(exec_results)
                     discussion.append(("Execution", exec_text))
+                    # Inform philosopher of the execution results and ask for follow-up analysis
+                    try:
+                        follow_prompt = (
+                            "The main agent executed the plan and produced the following results:\n"
+                            + exec_text
+                            + "\n\nPlease update your analysis based on these results. If this changes focus or next steps, state them."
+                        )
+                        phil_follow = await self.philosopher.run(follow_prompt)
+                        discussion.append(("Philosopher", phil_follow))
+                    except Exception:
+                        logger.exception("Failed to get follow-up analysis from philosopher after execution")
             except Exception:
                 logger.exception("Failed to parse or execute philosopher plan")
 
@@ -548,11 +577,25 @@ class MainAgent:
             else:
                 depth_instr = "以中等深度分析，列出主要不確定處、假設與建議的檢驗步驟。"
 
+            # include available tools for philosopher to reference (stream flow)
+            tools_meta = getattr(self.agent, "_registered_tools", None)
+            if tools_meta:
+                tools_lines = ["Available tools:"]
+                for t in tools_meta:
+                    sig = t.get("signature", "()")
+                    doc = t.get("doc", "").splitlines()[0] if t.get("doc") else ""
+                    tools_lines.append(f"- {t.get('name')}{sig}: {doc}")
+                tools_text = "\n".join(tools_lines) + "\n\n"
+            else:
+                tools_text = "Available tools: (none)\n\n"
+
             phil_prompt = (
-                f"{round_tag} - {depth_instr} Before analyzing, explicitly define the discussion scope: list what to focus on (Focus) and what is out of scope for this discussion (Out of scope)."
-                f" Then analyze the following question and list uncertainties, assumptions, and reasoning steps:\n\n{current_prompt}\n\n"
-                "If you propose actionable steps that require calling tools, optionally include a top-level JSON object named 'execution_plan' with a key 'plan' that is a list of steps."
-                " Each step should be an object with 'tool' (string), optional 'args' (object), and optional 'note' (string)."
+                f"{round_tag} - {depth_instr} Before analyzing, explicitly define the discussion scope: list what to focus on (Focus) and what is out of scope for this discussion (Out of scope).\n\n"
+                + tools_text
+                + f"Then analyze the following question and list uncertainties, assumptions, and reasoning steps:\n\n{current_prompt}\n\n"
+                "IMPORTANT: Only reference tools from the 'Available tools' list above. Use the exact tool name as listed; do not invent or call other tools."
+                " If you propose actionable steps that require calling tools, include a top-level JSON object named 'execution_plan' with a key 'plan' that is a list of steps."
+                " Each step should be an object with 'tool' (string matching an available tool name exactly), optional 'args' (object), and optional 'note' (string)."
                 " Place the JSON on its own line so it can be parsed separately."
             )
             yield f"--- {round_tag} 哲學家分析開始 ---\n"
@@ -581,6 +624,27 @@ class MainAgent:
                     for line in exec_results:
                         yield line + "\n"
                     discussion.append(("Execution", "\n".join(exec_results)))
+                    # inform philosopher of execution results and stream their follow-up
+                    exec_text = "\n".join(exec_results)
+                    follow_prompt = (
+                        "The main agent executed the plan and produced the following results:\n"
+                        + exec_text
+                        + "\n\nPlease update your analysis based on these results. If this changes focus or next steps, state them."
+                    )
+                    yield "--- Philosopher follow-up after execution ---\n"
+                    collected_follow = ""
+                    try:
+                        if hasattr(self.philosopher, "run_stream"):
+                            async for chunk in self.philosopher.run_stream(follow_prompt):
+                                collected_follow += chunk
+                                yield chunk
+                        else:
+                            collected_follow = await self.philosopher.run(follow_prompt)
+                            yield collected_follow
+                    except Exception:
+                        logger.exception("Philosopher follow-up after execution failed (stream)")
+                    yield "\n--- Philosopher follow-up end ---\n"
+                    discussion.append(("Philosopher", collected_follow))
             except Exception:
                 logger.exception("Failed to parse or execute philosopher plan (stream)")
 
