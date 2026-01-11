@@ -6,7 +6,7 @@ dependencies = [
     "beautifulsoup4>=4.13.4",
     "browser-use>=0.5.4",
     "ddgs>=9.10.0",
-    "numpy>=2.2.3",
+    "numpy==2.3.*",
     "mcp>=1.6.0",
     "openai>=1.63.2",
     "openai-whisper>=20240930",
