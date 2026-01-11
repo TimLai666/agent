@@ -144,8 +144,19 @@ class MainAgent:
 
             cast(Any, agent).tool_plain = logging_tool_plain
 
+        main_agent = cls(agent, philosopher, sub_agents, planner_agent)
         try:
-            add_all_tools(agent, config.model_name, config.base_url, config.api_key)
+            add_all_tools(
+                agent,
+                config.model_name,
+                config.base_url,
+                config.api_key,
+                extra_tools=[
+                    main_agent.ask_philosopher,
+                    main_agent.list_sub_agents,
+                    main_agent.ask_sub_agent,
+                ],
+            )
             logger.info("Registered tools on MainAgent")
         except Exception:
             logger.exception("Failed to add tools to main agent; continuing without external tools")
@@ -153,7 +164,7 @@ class MainAgent:
             # restore original registration function if we replaced it
             if original_tool_plain:
                 cast(Any, agent).tool_plain = original_tool_plain
-        return cls(agent, philosopher, sub_agents, planner_agent)
+        return main_agent
 
     def __init__(
         self,
@@ -167,20 +178,8 @@ class MainAgent:
         self.sub_agents = sub_agents
         self._planner_agent = planner_agent or agent
         self._last_messages: list[ModelRequest | ModelResponse] | None = None
-        # register tool functions so agent can call them; defining as methods
-        try:
-            # calling tool_plain with the bound method registers it
-            cast(Any, self.agent).tool_plain(self.ask_philosopher)
-            # tools from internal.set_tools were added during create()
-        except Exception:
-            # registration failures shouldn't break initialization
-            logger.debug("Tool registration skipped or failed during init")
-        if self.sub_agents and not self.sub_agents.is_empty():
-            try:
-                cast(Any, self.agent).tool_plain(self.list_sub_agents)
-                cast(Any, self.agent).tool_plain(self.ask_sub_agent)
-            except Exception:
-                logger.debug("Sub-agent tool registration skipped or failed during init")
+        self._last_execution_steps: list[dict[str, Any]] = []
+        # tools are registered via add_all_tools during create()
 
     async def _extract_execution_plan(self, text: str) -> dict | None:
         """Try to extract an execution plan JSON from free text.
@@ -261,6 +260,8 @@ class MainAgent:
         if not isinstance(plan, list):
             return ["Plan format invalid: expected a list of steps."]
 
+        step_outputs: list[str] = []
+        steps_meta: list[dict[str, Any]] = []
         for idx, step in enumerate(plan):
             tool_name = step.get("tool") if isinstance(step, dict) else None
             args = step.get("args", {}) if isinstance(step, dict) else {}
@@ -269,6 +270,7 @@ class MainAgent:
             if note:
                 header += f"  ({note})"
             results.append(header)
+            step_meta: dict[str, Any] = {"tool": tool_name, "args": args, "note": note}
 
             registered = getattr(self.agent, "_function_tools", {}) or {}
             allowed_names = set(registered.keys())
@@ -278,6 +280,35 @@ class MainAgent:
             current_args = args
             current_error = ""
             while True:
+                if isinstance(current_tool, str) and "ask_philosopher" in allowed_names:
+                    if current_tool == "ask_philosopher":
+                        question = ""
+                        if isinstance(current_args, dict):
+                            question = str(
+                                current_args.get("question")
+                                or current_args.get("prompt")
+                                or ""
+                            ).strip()
+                        if not question:
+                            question = self._build_sub_agent_prompt(note, current_args)
+                        current_args = {"question": question}
+                    elif current_tool in {"philosopher", "哲學家"}:
+                        question = self._build_sub_agent_prompt(note, current_args)
+                        current_tool = "ask_philosopher"
+                        current_args = {"question": question}
+                    elif current_tool == "ask_sub_agent":
+                        name = ""
+                        if isinstance(current_args, dict):
+                            name = str(current_args.get("name", "")).strip().lower()
+                        if name in {"philosopher", "哲學家", "philosopher-co-agent"}:
+                            question = ""
+                            if isinstance(current_args, dict):
+                                question = str(current_args.get("prompt", "")).strip()
+                            if not question:
+                                question = self._build_sub_agent_prompt(note, current_args)
+                            current_tool = "ask_philosopher"
+                            current_args = {"question": question}
+
                 if (
                     self.sub_agents
                     and isinstance(current_tool, str)
@@ -293,6 +324,8 @@ class MainAgent:
                 elif current_tool not in allowed_names:
                     current_error = f"Tool '{current_tool}' is not registered."
                 else:
+                    if current_args:
+                        current_args = self._resolve_args(current_args, step_outputs)
                     tool_def = registered.get(str(current_tool)) if isinstance(current_tool, str) else None
                     if tool_def is None:
                         current_error = f"Tool '{current_tool}' declared but not found on agent runtime."
@@ -311,6 +344,24 @@ class MainAgent:
                                 if not set(current_args.keys()).issubset(expected_set):
                                     if len(expected_keys) == 1 and len(current_args) == 1:
                                         current_args = {expected_keys[0]: next(iter(current_args.values()))}
+                            if current_tool == "get_stock_history":
+                                ticker = current_args.get("ticker_symbol")
+                                if isinstance(ticker, str):
+                                    if ticker.isdigit() and not ticker.upper().endswith(".TW"):
+                                        current_args["ticker_symbol"] = f"{ticker}.TW"
+                                period = current_args.get("period")
+                                if isinstance(period, str):
+                                    normalized = period.lower()
+                                    if normalized in {"month", "1m"}:
+                                        current_args["period"] = "1mo"
+                                    elif normalized in {"3m"}:
+                                        current_args["period"] = "3mo"
+                            elif current_tool == "get_current_stock_price":
+                                ticker = current_args.get("ticker_symbol")
+                                if isinstance(ticker, str):
+                                    if ticker.isdigit() and not ticker.upper().endswith(".TW"):
+                                        current_args["ticker_symbol"] = f"{ticker}.TW"
+                                        current_args.setdefault("is_taiwan_stock", "True")
                             logger.info("Executing tool '%s' with args: %s", current_tool, current_args)
                             if inspect.iscoroutinefunction(callable_obj):
                                 res = await callable_obj(**current_args)
@@ -322,14 +373,19 @@ class MainAgent:
                                     res = maybe
                             logger.info("Tool '%s' execution result: %s", current_tool, res)
                             results.append(f"  -> result: {res}")
+                            step_outputs.append(str(res))
+                            step_meta["result"] = res
+                            step_meta["tool"] = current_tool
                             break
                         except Exception as e:
                             logger.exception("Error executing tool %s", current_tool)
                             current_error = f"Execution error: {e}"
+                            step_meta["error"] = current_error
 
                 if attempts >= self.TOOL_RECOVERY_MAX_ATTEMPTS:
                     if current_error:
                         results.append(f"  -> execution error: {current_error}")
+                        step_meta["error"] = current_error
                     break
 
                 attempts += 1
@@ -342,10 +398,14 @@ class MainAgent:
                 )
                 if not recovery:
                     results.append("  -> recovery failed: no corrected tool call returned")
+                    step_meta["error"] = "recovery failed: no corrected tool call returned"
                     break
                 current_tool = recovery.get("tool")
                 current_args = recovery.get("args", {})
 
+            steps_meta.append(step_meta)
+
+        self._last_execution_steps = steps_meta
         return results
 
     async def _recover_tool_call(
@@ -368,7 +428,8 @@ class MainAgent:
             f"失敗的 tool：{tool}\n"
             f"args：{args}\n"
             f"錯誤：{error}\n\n"
-            "只輸出 JSON，格式：{\"tool\": \"tool_name\", \"args\": {\"key\": \"value\"}}\n"
+            "只輸出 JSON，格式：{\"tool\": \"tool_name\", \"args\": {\"key\": \"value\"}}。\n"
+            "如需使用前一步結果，可用 \"$last\" 或 \"$step1\" 佔位符。\n"
         )
 
         for attempt in range(2):
@@ -504,6 +565,27 @@ class MainAgent:
             return note
         return "請協助處理此步驟。"
 
+    def _resolve_args(self, args: Any, step_outputs: list[str]) -> Any:
+        def resolve_value(value: Any) -> Any:
+            if isinstance(value, str):
+                if value == "$last" and step_outputs:
+                    return step_outputs[-1]
+                if value.startswith("$step"):
+                    try:
+                        idx = int(value[5:]) - 1
+                        if 0 <= idx < len(step_outputs):
+                            return step_outputs[idx]
+                    except ValueError:
+                        return value
+                return value
+            if isinstance(value, list):
+                return [resolve_value(item) for item in value]
+            if isinstance(value, dict):
+                return {key: resolve_value(val) for key, val in value.items()}
+            return value
+
+        return resolve_value(args)
+
 
     async def _request_execution_plan(
         self,
@@ -524,7 +606,9 @@ class MainAgent:
             "你必須先規劃工具呼叫再回答。只輸出 JSON，格式固定為 {\"plan\": [ ... ]}。\n"
             "每個步驟必須包含 tool 欄位；需要參數時加入 args 物件，沒有參數就省略或用 {}。\n"
             "若不需要工具，回傳 {\"plan\": []}。不要寫分析或其他文字。\n"
-            "若要委派給 sub-agent，使用工具 ask_sub_agent，args 為 {\"name\": \"...\", \"prompt\": \"...\"}。\n\n"
+            "若要委派給 sub-agent，使用工具 ask_sub_agent，args 為 {\"name\": \"...\", \"prompt\": \"...\"}。\n"
+            "哲學家不是 sub-agent，若需請教哲學家，使用工具 ask_philosopher，參數 question。\n"
+            "如果後續步驟需要前一步的輸出，使用 \"$last\" 或 \"$step1\" 這類佔位符。\n\n"
             "常見需求對應工具（若符合就直接用）：\n"
             "- 詢問現在時間：get_now\n"
             "- 查某日期是星期幾：get_weekday，參數 date_str\n"
@@ -648,383 +732,45 @@ class MainAgent:
         prompt: str,
         message_history: list[ModelRequest | ModelResponse] | None = None,
     ) -> str:
-        # 根據 prompt 判斷是否要與哲學家多輪討論（由主 agent 模型決定）
-        if not await self._should_consult_philosopher(prompt, message_history=message_history):
-            exec_results = await self._ensure_eager_execution(prompt, message_history=message_history)
-            if exec_results:
-                exec_text = "\n".join(exec_results)
-                prompt = f"{prompt}\n\nTool execution results:\n{exec_text}"
-            # 直接由主 agent 回答（較快速路徑）
-            result = await self.agent.run(prompt, message_history=message_history)
-            try:
-                self._last_messages = result.all_messages()
-            except Exception:
-                self._last_messages = None
-            output = result.output
-
-            return output
-
-        # 多輪討論流程：主 agent 與哲學家 co-agent 一來一回討論，直到哲學家表示可作為結論或達到最大輪數
-        # 決定討論內容深度（shallow/medium/deep）由主 agent 模型決定
+        exec_results = await self._ensure_eager_execution(prompt, message_history=message_history)
+        if exec_results:
+            exec_text = "\n".join(exec_results)
+            prompt = f"{prompt}\n\nTool execution results:\n{exec_text}"
+        result = await self.agent.run(prompt, message_history=message_history)
         try:
-            depth_choice = await self._decide_discussion_depth(prompt, message_history=message_history)
-            depth_label = depth_choice.get("depth", "medium")
-            max_rounds = int(depth_choice.get("rounds", 2))
-        except Exception:
-            depth_label = "medium"
-            max_rounds = 2
-        discussion: list[tuple[str, str]] = []
-        executed_plan = False
-        current_prompt = prompt
-
-        for r in range(max_rounds):
-            round_tag = f"回合 {r+1}"
-            # 向哲學家請求分析/內省
-            try:
-                # depth instruction text (English)
-                if depth_label == "very_shallow":
-                    depth_instr = "Provide a very concise summary: give the direct conclusion or key answer in one or two lines."
-                elif depth_label == "shallow":
-                    depth_instr = "Provide a brief, focused analysis listing the key points and the most critical uncertainties."
-                elif depth_label == "deep":
-                    depth_instr = "Provide a deep, step-by-step introspective analysis, detailing uncertainties, assumptions, evidence, counterarguments, and verification steps."
-                elif depth_label == "very_deep":
-                    depth_instr = "Provide a very deep, comprehensive introspective analysis, including detailed evidence evaluation, alternative perspectives, and risk assessment."
-                else:
-                    depth_instr = "Provide a moderate-depth analysis listing main uncertainties, assumptions, and suggested checks."
-
-                # include available tools for philosopher to reference
-                tools_text = self._format_tools_context()
-                sub_agents_text = self._format_sub_agents_context()
-
-                phil_prompt = (
-                    f"{round_tag} - {depth_instr} Before analyzing, explicitly define the discussion scope: list what to focus on (Focus) and what is out of scope for this discussion (Out of scope).\n\n"
-                    + tools_text
-                    + sub_agents_text
-                    + "SUB-AGENTS: Sub-agents are not tools. If any sub-agent is relevant, explicitly recommend which one(s) to consult by name. If you need to delegate during execution_plan, use tool ask_sub_agent with args {\"name\": \"...\", \"prompt\": \"...\"}.\n\n"
-                    + f"Then analyze the following question and list uncertainties, assumptions, and reasoning steps:\n\n{current_prompt}\n\n"
-                    "CONCISENESS RULES: Keep responses short and focused. First give a one-line Focus summary, then list up to 3 key uncertainties (bulleted), then a very short analysis (no more than 4 sentences)."
-                    "FACTS & TOOLS: If you require factual data or live information, produce a minimal 'execution_plan' JSON only (no long analysis) with the key 'plan' listing the necessary tool calls."
-                    "The Main Agent will execute that plan and return results for you to continue analysis. IMPORTANT: Only reference tools from the 'Available tools' list above and use exact tool names."
-                    " Each step object must have 'tool' (string matching an available tool name exactly), optional 'args' (object), and optional 'note' (string)."
-                    " Place the JSON on its own line so it can be parsed separately."
-                )
-                logger.info("Main agent requesting philosopher analysis (round %d)", r + 1)
-                print(f"[LOG] main -> philosopher (deliberation) round {r+1}")
-                phil_resp = await self.philosopher.run(phil_prompt)
-            except Exception:
-                logger.exception("Philosopher co-agent failed during deliberation; breaking")
-                break
-
-            discussion.append(("Philosopher", phil_resp))
-            # If philosopher provided an execution plan JSON, parse and execute it
-            try:
-                plan_obj = await self._extract_execution_plan(phil_resp)
-                # If no plan found but philosopher text suggests needing facts, ask for a plan
-                if plan_obj is None:
-                    need_keywords = [
-                        "需要查", "需要查證", "需要查詢", "需要確認", "核實", "verify", "check", "need to",
-                    ]
-                    lower = (phil_resp or "").lower()
-                    if any(k in lower for k in need_keywords):
-                        logger.info("Philosopher analysis indicates need for factual checks; requesting execution_plan")
-                        try:
-                            plan_request = (
-                                "Your previous analysis suggests you need factual checks or live data. "
-                                "Please output a minimal execution_plan JSON (one line) with key 'plan' listing the tool calls required. "
-                                "Use only the Available tools names exactly."
-                            )
-                            plan_only = await self.philosopher.run(plan_request)
-                            plan_obj = await self._extract_execution_plan(plan_only) or None
-                            if plan_obj:
-                                # append philosopher's plan-only response to discussion
-                                discussion.append(("PhilosopherPlanRequest", plan_only))
-                        except Exception:
-                            logger.exception("Failed to request execution_plan from philosopher")
-
-                if plan_obj:
-                    logger.info("Philosopher provided an execution plan; executing")
-                    exec_results = await self.execute_plan(plan_obj)
-                    exec_text = "\n".join(exec_results)
-                    discussion.append(("Execution", exec_text))
-                    executed_plan = True
-                    # Inform philosopher of the execution results and ask for follow-up analysis
-                    try:
-                        follow_prompt = (
-                            "The main agent executed the plan and produced the following results:\n"
-                            + exec_text
-                            + "\n\nPlease update your analysis based on these results. If this changes focus or next steps, state them."
-                        )
-                        phil_follow = await self.philosopher.run(follow_prompt)
-                        discussion.append(("Philosopher", phil_follow))
-                    except Exception:
-                        logger.exception("Failed to get follow-up analysis from philosopher after execution")
-            except Exception:
-                logger.exception("Failed to parse or execute philosopher plan")
-
-            # 主 agent 基於目前討論產生候選回答
-            main_input = f"原始問題：\n{prompt}\n\n討論紀錄：\n"
-            for speaker, text in discussion:
-                main_input += f"{speaker}: {text}\n\n"
-            main_input += "請基於上述討論，提出一個候選回答（標註是否為最終結論）："
-
-            main_result = await self.agent.run(main_input, message_history=message_history)
-            main_answer = main_result.output
-            discussion.append(("MainAgent", main_answer))
-
-            # 將主 agent 的候選回答回饋給哲學家，請其評論並指出是否可作為結論
-            try:
-                critique_prompt = (
-                    "Review the Main Agent's candidate answer below. Focus ONLY on the task substance (facts, reasoning gaps, missing data),"
-                    " and do NOT critique response structure, formatting, or writing style. Indicate whether this can be considered the final conclusion."
-                    " If yes, provide a clear 'Conclusion: ...'; otherwise, provide corrections and next steps (prefer tool calls or sub-agent use if needed):\n\n"
-                    + main_answer
-                    + "\n\nOriginal question:\n"
-                    + prompt
-                )
-                print(f"[LOG] main -> philosopher (critique) round {r+1}")
-                phil_crit = await self.philosopher.run(critique_prompt)
-            except Exception:
-                logger.exception("Philosopher co-agent failed during critique; breaking")
-                break
-
-            discussion.append(("Philosopher", phil_crit))
-
-            # 讓主 agent 判斷是否要結束討論（以模型回應為主，無法解析時退回哲學家關鍵字）
-            try:
-                should_end = await self._should_end_discussion(
-                    discussion, last_main_answer=main_answer, message_history=message_history
-                )
-            except Exception:
-                should_end = False
-
-            if should_end:
-                break
-
-            # 否則以哲學家回饋更新 current_prompt，進入下一輪
-            current_prompt = f"{prompt}\n\n哲學家回饋：\n{phil_crit}\n\n請根據回饋修正並提出新的候選回答。"
-
-        # 最終：請主 agent 根據整個討論產出最終答案，並一併輸出討論紀錄
-        if not executed_plan:
-            exec_results = await self._ensure_eager_execution(prompt, message_history=message_history)
-            if exec_results:
-                exec_text = "\n".join(exec_results)
-                discussion.append(("Execution", exec_text))
-        final_prompt = f"原始問題：\n{prompt}\n\n完整討論紀錄：\n"
-        for speaker, text in discussion:
-            final_prompt += f"{speaker}: {text}\n\n"
-        final_prompt += "請根據上述討論給出清楚標示為「最終答案」的回覆，並補充可驗證的依據或步驟："
-
-        final_result = await self.agent.run(final_prompt, message_history=message_history)
-        final_answer = final_result.output
-        # 儲存最後的 message history，供外層呼叫者（例如 CLI）使用
-        try:
-            self._last_messages = final_result.all_messages()
+            self._last_messages = result.all_messages()
         except Exception:
             self._last_messages = None
-
-        # 回傳包含討論過程與最終答案的內容，討論使用 <discussion> 標籤包起來，最終答案為純文字
-        discussion_text = "\n".join([f"[{s}]\n{t}\n" for s, t in discussion])
-        return f"<discussion>\n{discussion_text}\n</discussion>\n{final_answer}"
+        return result.output
 
     async def run_stream(self, prompt: str, message_history: list[ModelRequest | ModelResponse] | None = None):
         """Streamed version of run(): yields chunks from philosopher/subagents/main agent as they produce output."""
-        # decision
-        consult = await self._should_consult_philosopher(prompt, message_history=message_history)
-        if not consult:
-            exec_results = await self._ensure_eager_execution(prompt, message_history=message_history)
-            if exec_results:
-                exec_text = "\n".join(exec_results)
-                yield "--- Tool execution ---\n"
-                for line in exec_results:
+        exec_results = await self._ensure_eager_execution(prompt, message_history=message_history)
+        if exec_results:
+            exec_text = "\n".join(exec_results)
+            yield "<tool-execution>\n"
+            for line in exec_results:
+                yield line + "\n"
+            yield "</tool-execution>\n"
+            discussion_lines = []
+            for step in self._last_execution_steps:
+                if step.get("tool") == "ask_philosopher":
+                    if "result" in step:
+                        discussion_lines.append(str(step["result"]))
+                    elif "error" in step:
+                        discussion_lines.append(f"Error: {step['error']}")
+            if discussion_lines:
+                yield "<discussion>\n"
+                for line in discussion_lines:
                     yield line + "\n"
-                prompt = f"{prompt}\n\nTool execution results:\n{exec_text}"
-            async with self.agent.run_stream(user_prompt=prompt, message_history=message_history) as result:
-                async for chunk in result.stream_text(delta=True):
-                    if not chunk:
-                        continue
-                    yield chunk
-                try:
-                    self._last_messages = result.all_messages()
-                except Exception:
-                    self._last_messages = None
-            return
-
-        # consult philosopher multi-round, streaming each step
-        try:
-            depth_choice = await self._decide_discussion_depth(prompt, message_history=message_history)
-            depth_label = depth_choice.get("depth", "medium")
-            max_rounds = int(depth_choice.get("rounds", 2))
-        except Exception:
-            depth_label = "medium"
-            max_rounds = 2
-        discussion: list[tuple[str, str]] = []
-        executed_plan = False
-        current_prompt = prompt
-
-        # start discussion wrapper for stream
-        yield "<discussion>\n"
-
-        for r in range(max_rounds):
-            round_tag = f"回合 {r+1}"
-            # philosopher analysis (stream)
-            # 根據 depth_label 決定分析指示文字
-            if depth_label == "very_shallow":
-                depth_instr = "以極簡摘要回覆，只給出直接結論或最關鍵答案（一行或兩行）。"
-            elif depth_label == "shallow":
-                depth_instr = "以淺層重點式回覆，直接列出要點與最關鍵的不確定處。"
-            elif depth_label == "deep":
-                depth_instr = "以深度、逐步內省 (step-by-step) 方式分析，詳列不確定處、假設、證據、反駁與驗證步驟。"
-            elif depth_label == "very_deep":
-                depth_instr = "以非常深度、全面性的內省分析，提供詳細證據檢驗方法、替代觀點與潛在風險評估。"
-            else:
-                depth_instr = "以中等深度分析，列出主要不確定處、假設與建議的檢驗步驟。"
-
-            # include available tools for philosopher to reference (stream flow)
-            tools_text = self._format_tools_context()
-            sub_agents_text = self._format_sub_agents_context()
-
-            phil_prompt = (
-                f"{round_tag} - {depth_instr} Before analyzing, explicitly define the discussion scope: list what to focus on (Focus) and what is out of scope for this discussion (Out of scope).\n\n"
-                + tools_text
-                + sub_agents_text
-                + "SUB-AGENTS: Sub-agents are not tools. If any sub-agent is relevant, explicitly recommend which one(s) to consult by name. If you need to delegate during execution_plan, use tool ask_sub_agent with args {\"name\": \"...\", \"prompt\": \"...\"}.\n\n"
-                + f"Then analyze the following question and list uncertainties, assumptions, and reasoning steps:\n\n{current_prompt}\n\n"
-                "CONCISENESS RULES: Keep responses short and focused. First give a one-line Focus summary, then list up to 3 key uncertainties (bulleted), then a very short analysis (no more than 4 sentences)."
-                "FACTS & TOOLS: If you require factual data or live information, produce a minimal 'execution_plan' JSON only (no long analysis) with the key 'plan' listing the necessary tool calls."
-                "The Main Agent will execute that plan and return results for you to continue analysis. IMPORTANT: Only reference tools from the 'Available tools' list above and use exact tool names."
-                " Each step object must have 'tool' (string matching an available tool name exactly), optional 'args' (object), and optional 'note' (string)."
-                " Place the JSON on its own line so it can be parsed separately."
-            )
-            yield f"--- {round_tag} 哲學家分析開始 ---\n"
-            collected_phil = ""
-            try:
-                if hasattr(self.philosopher, "run_stream"):
-                    async for chunk in self.philosopher.run_stream(phil_prompt):
-                        collected_phil += chunk
-                        yield chunk
-                else:
-                    collected_phil = await self.philosopher.run(phil_prompt)
-                    yield collected_phil
-            except Exception:
-                logger.exception("Philosopher co-agent failed during deliberation; breaking")
-                break
-
-            yield f"\n--- {round_tag} 哲學家分析結束 ---\n"
-            discussion.append(("Philosopher", collected_phil))
-
-            # detect & execute plan if present
-            try:
-                plan_obj = await self._extract_execution_plan(collected_phil)
-                if plan_obj:
-                    yield "--- Philosopher provided execution plan ---\n"
-                    exec_results = await self.execute_plan(plan_obj)
-                    for line in exec_results:
-                        yield line + "\n"
-                    discussion.append(("Execution", "\n".join(exec_results)))
-                    executed_plan = True
-                    # inform philosopher of execution results and stream their follow-up
-                    exec_text = "\n".join(exec_results)
-                    follow_prompt = (
-                        "The main agent executed the plan and produced the following results:\n"
-                        + exec_text
-                        + "\n\nPlease update your analysis based on these results. If this changes focus or next steps, state them."
-                    )
-                    yield "--- Philosopher follow-up after execution ---\n"
-                    collected_follow = ""
-                    try:
-                        if hasattr(self.philosopher, "run_stream"):
-                            async for chunk in self.philosopher.run_stream(follow_prompt):
-                                collected_follow += chunk
-                                yield chunk
-                        else:
-                            collected_follow = await self.philosopher.run(follow_prompt)
-                            yield collected_follow
-                    except Exception:
-                        logger.exception("Philosopher follow-up after execution failed (stream)")
-                    yield "\n--- Philosopher follow-up end ---\n"
-                    discussion.append(("Philosopher", collected_follow))
-            except Exception:
-                logger.exception("Failed to parse or execute philosopher plan (stream)")
-
-            # 主 agent candidate answer (stream)
-            main_input = f"原始問題：\n{prompt}\n\n討論紀錄：\n"
-            for speaker, text in discussion:
-                main_input += f"{speaker}: {text}\n\n"
-            main_input += "請基於上述討論，提出一個候選回答（標註是否為最終結論）："
-
-            yield f"--- MainAgent 候選回答（回合 {r+1}）開始 ---\n"
-            collected_main = ""
-            async with self.agent.run_stream(user_prompt=main_input, message_history=message_history) as mres:
-                async for chunk in mres.stream_text(delta=True):
-                    if not chunk:
-                        continue
-                    collected_main += chunk
-                    yield chunk
-            yield f"\n--- MainAgent 候選回答（回合 {r+1}）結束 ---\n"
-            discussion.append(("MainAgent", collected_main))
-
-            # philosopher critique (stream)
-            critique_prompt = (
-                "Review the Main Agent's candidate answer below. Focus ONLY on the task substance (facts, reasoning gaps, missing data),"
-                " and do NOT critique response structure, formatting, or writing style. Indicate whether this can be considered the final conclusion."
-                " If yes, provide a clear 'Conclusion: ...'; otherwise, provide corrections and next steps (prefer tool calls or sub-agent use if needed):\n\n"
-                + collected_main
-                + "\n\nOriginal question:\n"
-                + prompt
-            )
-            yield f"--- 哲學家評論（回合 {r+1}）開始 ---\n"
-            collected_crit = ""
-            try:
-                if hasattr(self.philosopher, "run_stream"):
-                    async for chunk in self.philosopher.run_stream(critique_prompt):
-                        collected_crit += chunk
-                        yield chunk
-                else:
-                    collected_crit = await self.philosopher.run(critique_prompt)
-                    yield collected_crit
-            except Exception:
-                logger.exception("Philosopher co-agent failed during critique; breaking")
-                break
-            yield f"\n--- 哲學家評論（回合 {r+1}）結束 ---\n"
-            discussion.append(("Philosopher", collected_crit))
-            # 由主 agent 判斷是否要結束討論
-            try:
-                should_end = await self._should_end_discussion(
-                    discussion, last_main_answer=collected_main, message_history=message_history
-                )
-            except Exception:
-                should_end = False
-
-            if should_end:
-                break
-
-            current_prompt = f"{prompt}\n\n哲學家回饋：\n{collected_crit}\n\n請根據回饋修正並提出新的候選回答。"
-
-        # close discussion wrapper before final answer
-        if not executed_plan:
-            exec_results = await self._ensure_eager_execution(prompt, message_history=message_history)
-            if exec_results:
-                exec_text = "\n".join(exec_results)
-                yield "--- Tool execution ---\n"
-                for line in exec_results:
-                    yield line + "\n"
-                discussion.append(("Execution", exec_text))
-        yield "</discussion>\n"
-
-        # 最終答案（stream）
-        final_prompt = f"原始問題：\n{prompt}\n\n完整討論紀錄：\n"
-        for speaker, text in discussion:
-            final_prompt += f"{speaker}: {text}\n\n"
-        final_prompt += "請根據上述討論給出清楚標示為「最終答案」的回覆，並補充可驗證的依據或步驟："
-        async with self.agent.run_stream(user_prompt=final_prompt, message_history=message_history) as fres:
-            final_collected = ""
-            async for chunk in fres.stream_text(delta=True):
+                yield "</discussion>\n"
+            prompt = f"{prompt}\n\nTool execution results:\n{exec_text}"
+        async with self.agent.run_stream(user_prompt=prompt, message_history=message_history) as result:
+            async for chunk in result.stream_text(delta=True):
                 if not chunk:
                     continue
-                final_collected += chunk
                 yield chunk
             try:
-                self._last_messages = fres.all_messages()
+                self._last_messages = result.all_messages()
             except Exception:
                 self._last_messages = None
