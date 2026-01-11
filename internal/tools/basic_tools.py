@@ -1,10 +1,11 @@
-from zoneinfo import ZoneInfo
-from pydantic_ai import Agent
-from datetime import datetime, timedelta
-from typing import Literal
 import random
 import time
+from datetime import datetime, timedelta
+from typing import Literal
+from zoneinfo import ZoneInfo
+
 import tzlocal
+from pydantic_ai import Agent
 
 from internal.logger import logger
 
@@ -27,7 +28,7 @@ def add_basic_tools(agent: Agent) -> None:
                 total_minutes: float = offset.total_seconds() / 60
                 hours = int(total_minutes // 60)
                 minutes = int(abs(total_minutes) % 60)
-                sign: Literal['+'] | Literal['-'] = '+' if hours >= 0 else '-'
+                sign: Literal["+"] | Literal["-"] = "+" if hours >= 0 else "-"
                 offset_str = f"UTC{sign}{abs(hours):02d}:{minutes:02d}"
             else:
                 offset_str = "UTC+00:00"
@@ -37,12 +38,21 @@ def add_basic_tools(agent: Agent) -> None:
             return f"{now.isoformat()} (timezone info unavailable)"
 
     @agent.tool_plain
+    def get_time() -> str:
+        """Compatibility alias: same as `get_now()`.
+
+        Some prompts or models may call `get_time()`; register it as an alias to
+        avoid 'tool not found' errors.
+        """
+        return get_now()
+
+    @agent.tool_plain
     def get_weekday(date_str: str) -> str:
         """Get the weekday of a given date in English."""
         logger.info(f"Getting weekday for date: {date_str}")
         # 去除括號及其內容（如時區資訊），只保留日期部分
-        if '(' in date_str:
-            date_str = date_str.split('(')[0].strip()
+        if "(" in date_str:
+            date_str = date_str.split("(")[0].strip()
         try:
             date_obj: datetime = datetime.strptime(date_str, "%Y-%m-%d")
             return date_obj.strftime("%A")  # e.g., "Monday"

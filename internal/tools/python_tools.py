@@ -1,8 +1,9 @@
 import io
 import os
 import sys
+from typing import Any, TextIO
+
 from pydantic_ai import Agent
-from typing import TextIO, Any
 
 from internal.cli import TeeStdout, confirm
 
@@ -21,7 +22,7 @@ def add_python_tools(agent: Agent) -> None:
         try:
             if not confirm(
                 message=f"Agent wants to run Python script({description}), allow?",
-                default_choice='Y'
+                default_choice="Y",
             ):
                 raise PermissionError("Script execution cancelled by user.")
             old_stdout: TextIO | Any = sys.stdout

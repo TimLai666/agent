@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "triggers": [
+    {
+      "name": "ultrawork",
+      "pattern": "(?i)\\b(ultrawork|ulw)\\b",
+      "position": "prefix",
+      "inject": "Ultrawork mode: maximize agent utilization and tool execution. Use subagents for exploration/analysis and verify results before answering.",
+      "background": true
+    },
+    {
+      "name": "search",
+      "pattern": "(?i)\\b(search|find|locate|lookup|explore|discover|scan|grep|query|browse|trace|seek|track|pinpoint|hunt)\\b",
+      "position": "prefix",
+      "inject": "Search mode: widen coverage, use directory listing and file search tools, and delegate to subagents when exploration is heavy.",
+      "background": true
+    },
+    {
+      "name": "analyze",
+      "pattern": "(?i)\\b(analyze|analyse|investigate|examine|research|study|inspect|audit|evaluate|assess|review|diagnose|debug)\\b",
+      "position": "prefix",
+      "inject": "Analyze mode: gather context before conclusions, validate assumptions, and use subagents for specialized reasoning if needed."
+    }
+  ]
+}
