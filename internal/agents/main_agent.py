@@ -58,8 +58,11 @@ class MainAgent:
     ) -> "MainAgent":
         if sub_agents is None:
             try:
-                sub_agents = load_sub_agent_registry(
-                    base_config, env, http_client, philosopher=philosopher
+                sub_agents = cast(
+                    SubAgentRegistry,
+                    load_sub_agent_registry(
+                        base_config, env, http_client, philosopher=philosopher
+                    ),
                 )
             except Exception:
                 logger.exception("Failed to load sub-agents; continuing without them")

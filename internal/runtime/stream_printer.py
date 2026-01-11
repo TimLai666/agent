@@ -105,6 +105,13 @@ async def stream_print(
             delay = max(base_delay * min_factor, base_delay * speed_factor)
             await asyncio.sleep(delay)
 
+    if buffer:
+        if mode == "normal":
+            pending.append(buffer)
+        else:
+            print(buffer, end="", flush=True)
+        buffer = ""
+
     while pending:
         backlog_len = sum(len(s) for s in pending)
         left = pending[0]
