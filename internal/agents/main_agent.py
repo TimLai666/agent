@@ -149,6 +149,84 @@ class MainAgent:
             return collected
         return await self.philosopher.run(question)
 
+    async def _should_end_discussion(
+        self,
+        discussion: list[tuple[str, str]],
+        last_main_answer: str | None = None,
+        message_history: list[ModelRequest | ModelResponse] | None = None,
+    ) -> bool:
+        """Ask the main agent model whether the discussion can end.
+
+        Returns True if the main agent judges the discussion sufficient to form
+        a final answer. Expects a strict JSON reply: {"end": true|false, "reason": "..."}.
+        Falls back to keyword checks on philosopher critique when parsing fails.
+        """
+        # Build a short prompt summarizing the discussion and candidate answer
+        summary = """請判斷下列討論與主 agent 的候選回答是否已足以得出最終答案。只回傳 JSON：{" + '"end": true/false, "reason": "短理由"}' + "，不要其他文字。\n\n討論摘要：\n"""
+        for speaker, text in discussion:
+            summary += f"{speaker}: {text}\n"
+        if last_main_answer:
+            summary += f"\n主 agent 候選回答：\n{last_main_answer}\n"
+
+        summary += "\n**重要**：不要呼叫任何工具。只依據討論判斷並回傳 JSON。"
+
+        try:
+            res = await self.agent.run(summary, message_history=message_history)
+            out = (res.output or "").strip()
+            try:
+                parsed = json.loads(out)
+                return bool(parsed.get("end", False))
+            except Exception:
+                # 尝试基于可解析的文字作简单判定；若无法解析则不结束
+                lower = out.lower()
+                if "true" in lower or "yes" in lower or "可以" in lower or "結束" in lower:
+                    return True
+                if "false" in lower or "no" in lower or "不" in lower or "還需要" in lower:
+                    return False
+                # 解析失敗：不回退、不使用任何後備規則，直接回傳 False（繼續討論）
+                return False
+        except Exception:
+            logger.exception("End-discussion decision call failed; defaulting to NO end")
+            return False
+
+    async def _decide_discussion_depth(
+        self,
+        prompt: str,
+        message_history: list[ModelRequest | ModelResponse] | None = None,
+    ) -> dict:
+        """Ask the main agent model what discussion depth to use.
+        Returns a dict like {"depth": "very_shallow"|"shallow"|"medium"|"deep"|"very_deep", "rounds": 1..5}.
+        On parse failure or exception, return {'depth':'medium','rounds':2}.
+        """
+        dec = (
+            "你是主 agent 的討論深度決策器。請根據下列使用者問題判斷哲學家討論的內容深度（very_shallow/shallow/medium/deep/very_deep），"
+            " 並回傳嚴格的 JSON：{\"depth\": \"very_shallow|shallow|medium|deep|very_deep\", \"rounds\": 1..5}."
+            " 範例：\n輸入：'現在幾點'\n輸出：{\"depth\": \"very_shallow\", \"rounds\": 1}\n"
+            "輸入：'評估不同投資組合的風險與報酬'\n輸出：{\"depth\": \"very_deep\", \"rounds\": 5}\n\n使用者輸入：\n"
+            + prompt
+            + "\n\n請只回傳 JSON，且不要呼叫工具。"
+        )
+
+        try:
+            res = await self.agent.run(dec, message_history=message_history)
+            out = (res.output or "").strip()
+            try:
+                parsed = json.loads(out)
+                depth = parsed.get("depth", "medium")
+                rounds = int(parsed.get("rounds", 2))
+                if depth not in ("very_shallow", "shallow", "medium", "deep", "very_deep"):
+                    depth = "medium"
+                if rounds < 1:
+                    rounds = 1
+                if rounds > 5:
+                    rounds = 5
+                return {"depth": depth, "rounds": rounds}
+            except Exception:
+                return {"depth": "medium", "rounds": 2}
+        except Exception:
+            logger.exception("Discussion depth decision failed; defaulting to medium")
+            return {"depth": "medium", "rounds": 2}
+
     async def run(
         self,
         prompt: str,
@@ -167,7 +245,14 @@ class MainAgent:
             return output
 
         # 多輪討論流程：主 agent 與哲學家 co-agent 一來一回討論，直到哲學家表示可作為結論或達到最大輪數
-        max_rounds = 3
+        # 決定討論內容深度（shallow/medium/deep）由主 agent 模型決定
+        try:
+            depth_choice = await self._decide_discussion_depth(prompt, message_history=message_history)
+            depth_label = depth_choice.get("depth", "medium")
+            max_rounds = int(depth_choice.get("rounds", 2))
+        except Exception:
+            depth_label = "medium"
+            max_rounds = 2
         discussion: list[tuple[str, str]] = []
         current_prompt = prompt
 
@@ -175,8 +260,21 @@ class MainAgent:
             round_tag = f"回合 {r+1}"
             # 向哲學家請求分析/內省
             try:
+                # 根據 depth_label 決定分析指示文字
+                if depth_label == "very_shallow":
+                    depth_instr = "以極簡摘要回覆，只給出直接結論或最關鍵答案（一行或兩行）。"
+                elif depth_label == "shallow":
+                    depth_instr = "以淺層重點式回覆，直接列出要點與最關鍵的不確定處。"
+                elif depth_label == "deep":
+                    depth_instr = "以深度、逐步內省 (step-by-step) 方式分析，詳列不確定處、假設、證據、反駁與驗證步驟。"
+                elif depth_label == "very_deep":
+                    depth_instr = "以非常深度、全面性的內省分析，提供詳細證據檢驗方法、替代觀點與潛在風險評估。"
+                else:
+                    depth_instr = "以中等深度分析，列出主要不確定處、假設與建議的檢驗步驟。"
+
                 phil_prompt = (
-                    f"{round_tag} - 請以內省（step-by-step）方式分析下列問題，列出不確定處、假設與判斷依據：\n\n{current_prompt}"
+                    f"{round_tag} - {depth_instr} 在開始分析前，先明確劃定討論範圍：列出要聚焦的內容（Focus）與不在本次討論範圍的項目（Out of scope）。"
+                    f" 然後請分析下列問題，並列出不確定處、假設與判斷依據：\n\n{current_prompt}"
                 )
                 logger.info("Main agent requesting philosopher analysis (round %d)", r + 1)
                 print(f"[LOG] main -> philosopher (deliberation) round {r+1}")
@@ -214,9 +312,15 @@ class MainAgent:
 
             discussion.append(("Philosopher", phil_crit))
 
-            # 終止條件：哲學家回應明確包含「結論」字眼或表示同意
-            lower = phil_crit.lower()
-            if "結論" in phil_crit or "可以作為最終" in lower or "最終結論" in lower or "conclusion" in lower:
+            # 讓主 agent 判斷是否要結束討論（以模型回應為主，無法解析時退回哲學家關鍵字）
+            try:
+                should_end = await self._should_end_discussion(
+                    discussion, last_main_answer=main_answer, message_history=message_history
+                )
+            except Exception:
+                should_end = False
+
+            if should_end:
                 break
 
             # 否則以哲學家回饋更新 current_prompt，進入下一輪
@@ -257,7 +361,13 @@ class MainAgent:
             return
 
         # consult philosopher multi-round, streaming each step
-        max_rounds = 3
+        try:
+            depth_choice = await self._decide_discussion_depth(prompt, message_history=message_history)
+            depth_label = depth_choice.get("depth", "medium")
+            max_rounds = int(depth_choice.get("rounds", 2))
+        except Exception:
+            depth_label = "medium"
+            max_rounds = 2
         discussion: list[tuple[str, str]] = []
         current_prompt = prompt
 
@@ -267,8 +377,21 @@ class MainAgent:
         for r in range(max_rounds):
             round_tag = f"回合 {r+1}"
             # philosopher analysis (stream)
+            # 根據 depth_label 決定分析指示文字
+            if depth_label == "very_shallow":
+                depth_instr = "以極簡摘要回覆，只給出直接結論或最關鍵答案（一行或兩行）。"
+            elif depth_label == "shallow":
+                depth_instr = "以淺層重點式回覆，直接列出要點與最關鍵的不確定處。"
+            elif depth_label == "deep":
+                depth_instr = "以深度、逐步內省 (step-by-step) 方式分析，詳列不確定處、假設、證據、反駁與驗證步驟。"
+            elif depth_label == "very_deep":
+                depth_instr = "以非常深度、全面性的內省分析，提供詳細證據檢驗方法、替代觀點與潛在風險評估。"
+            else:
+                depth_instr = "以中等深度分析，列出主要不確定處、假設與建議的檢驗步驟。"
+
             phil_prompt = (
-                f"{round_tag} - 請以內省（step-by-step）方式分析下列問題，列出不確定處、假設與判斷依據：\n\n{current_prompt}"
+                f"{round_tag} - {depth_instr} 在開始分析前，先明確劃定討論範圍：列出要聚焦的內容（Focus）與不在本次討論範圍的項目（Out of scope）。"
+                f" 然後請分析下列問題，並列出不確定處、假設與判斷依據：\n\n{current_prompt}"
             )
             yield f"--- {round_tag} 哲學家分析開始 ---\n"
             collected_phil = ""
@@ -327,9 +450,15 @@ class MainAgent:
                 break
             yield f"\n--- 哲學家評論（回合 {r+1}）結束 ---\n"
             discussion.append(("Philosopher", collected_crit))
+            # 由主 agent 判斷是否要結束討論
+            try:
+                should_end = await self._should_end_discussion(
+                    discussion, last_main_answer=collected_main, message_history=message_history
+                )
+            except Exception:
+                should_end = False
 
-            lower = collected_crit.lower()
-            if "結論" in collected_crit or "可以作為最終" in lower or "最終結論" in lower or "conclusion" in lower:
+            if should_end:
                 break
 
             current_prompt = f"{prompt}\n\n哲學家回饋：\n{collected_crit}\n\n請根據回饋修正並提出新的候選回答。"
