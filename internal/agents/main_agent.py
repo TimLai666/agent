@@ -20,6 +20,7 @@ from internal.services.agent_factory import (
 )
 from internal.set_tools import add_all_tools
 from internal.sub_agents import SubAgentRegistry, load_sub_agent_registry
+from internal.skills_loader import SkillRegistry, load_skill_registry
 import sys
 import inspect
 import asyncio
@@ -55,6 +56,7 @@ class MainAgent:
         http_client: AsyncClient,
         philosopher: PhilosopherCoAgent,
         sub_agents: SubAgentRegistry | None = None,
+        skills: SkillRegistry | None = None,
     ) -> "MainAgent":
         if sub_agents is None:
             try:
@@ -67,6 +69,13 @@ class MainAgent:
             except Exception:
                 logger.exception("Failed to load sub-agents; continuing without them")
                 sub_agents = SubAgentRegistry({}, {})
+
+        if skills is None:
+            try:
+                skills = load_skill_registry()
+            except Exception:
+                logger.exception("Failed to load skills; continuing without them")
+                skills = SkillRegistry({})
 
         config = load_agent_config_chain([cls.ENV_PREFIX], base_config, env)
         model = create_openai_model(config, http_client)
@@ -176,7 +185,7 @@ class MainAgent:
 
             cast(Any, agent).tool_plain = logging_tool_plain
 
-        main_agent = cls(agent, philosopher, sub_agents, planner_agent, discussion_agent)
+        main_agent = cls(agent, philosopher, sub_agents, planner_agent, discussion_agent, skills)
         try:
             add_all_tools(
                 agent,
@@ -207,10 +216,12 @@ class MainAgent:
         sub_agents: SubAgentRegistry | None = None,
         planner_agent: Agent[None, str] | None = None,
         discussion_agent: Agent[None, str] | None = None,
+        skills: SkillRegistry | None = None,
     ) -> None:
         self.agent = agent
         self.philosopher = philosopher
         self.sub_agents = sub_agents
+        self.skills = skills
         self._planner_agent = planner_agent or agent
         self._discussion_agent = discussion_agent
         self._last_messages: list[ModelRequest | ModelResponse] | None = None
@@ -1025,6 +1036,30 @@ class MainAgent:
             prompt = prompt + "\n\n" + "\n\n".join(suffix_blocks)
         return prompt, {"names": matched, "background": background_enabled}
 
+    def _apply_skills(self, prompt: str) -> str:
+        """Find and apply relevant skills to the prompt."""
+        if not self.skills or self.skills.is_empty():
+            return prompt
+
+        # Find relevant skills based on prompt content
+        relevant_skills = self.skills.find_relevant_skills(prompt, max_skills=3)
+
+        if not relevant_skills:
+            return prompt
+
+        # Build skills context
+        skills_context = self.skills.build_skills_context(relevant_skills)
+
+        if skills_context:
+            logger.info(
+                "Activated skills: %s",
+                ", ".join([skill.name for skill in relevant_skills])
+            )
+            # Prepend skills context to the prompt
+            prompt = f"{skills_context}\n\n---\n\n{prompt}"
+
+        return prompt
+
     def _plan_requests_subagent(self, plan_list: list[dict[str, Any] | Any]) -> bool:
         if not self.sub_agents or self.sub_agents.is_empty():
             return False
@@ -1283,6 +1318,9 @@ class MainAgent:
         self._last_user_prompt = prompt
         prompt, explicit_subagents = self._prepare_prompt(prompt)
         prompt, trigger_state = self._apply_keyword_triggers(prompt)
+
+        # Apply relevant skills to the prompt
+        prompt = self._apply_skills(prompt)
         plan_list = await self._build_plan_list(prompt, message_history=message_history)
         if explicit_subagents:
             plan_list = self._filter_plan_subagent_steps(plan_list, explicit_subagents)
@@ -1335,6 +1373,9 @@ class MainAgent:
         self._last_user_prompt = prompt
         prompt, explicit_subagents = self._prepare_prompt(prompt)
         prompt, trigger_state = self._apply_keyword_triggers(prompt)
+
+        # Apply relevant skills to the prompt
+        prompt = self._apply_skills(prompt)
         plan_list = await self._build_plan_list(prompt, message_history=message_history)
         if explicit_subagents:
             plan_list = self._filter_plan_subagent_steps(plan_list, explicit_subagents)
