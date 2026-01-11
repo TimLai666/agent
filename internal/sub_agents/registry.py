@@ -158,6 +158,10 @@ def load_sub_agent_registry(
         )
         if philosopher:
             _register_philosopher_tools(agent, philosopher)
+        # Register skill tool if skills available
+        if skills:
+            from internal.tools.skill_tools import register_skill_tool
+            register_skill_tool(agent, skills)
         spec_map[key] = spec
         agents[key] = SubAgent(agent, philosopher=philosopher, skills=skills)
 

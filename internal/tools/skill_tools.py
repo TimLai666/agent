@@ -32,23 +32,42 @@ def register_skill_tool(agent: "Agent", skills: "SkillRegistry") -> None:
 
     skills_desc = "\n".join(skills_list) if skills_list else "  (No skills loaded)"
 
-    # Register the tool with dynamic description
-    @agent.tool_plain
-    def use_skill(skill_name: str) -> str:
-        f"""Activate a skill to guide your response with specialized knowledge and methodology.
+    # Build the tool description (must be done before function definition)
+    tool_description = f"""ACTIVATE A SKILL for expert guidance on specialized tasks.
 
-Skills provide expert domain knowledge, best practices, and systematic approaches.
-Call this tool BEFORE processing requests that match a skill's domain.
+*** CRITICAL: You MUST use this tool when the user's request matches ANY skill below. ***
 
-Available skills:
+Skills provide expert knowledge, proven methodologies, and best practices that will
+significantly improve your response quality. Always check if a skill is relevant BEFORE
+responding to the user.
+
+AVAILABLE SKILLS:
 {skills_desc}
 
+WHEN TO USE:
+1. Read the skill descriptions above carefully
+2. If the user's request matches a skill's domain, call this tool FIRST
+3. Get the skill's guidance BEFORE formulating your response
+4. Follow the skill's methodology exactly
+
+EXAMPLES:
+- User asks about Python -> use_skill("python-tutorial")
+- User asks to review code -> use_skill("code-review")
+- User reports a bug -> use_skill("debugging-assistant")
+- User asks about tools -> use_skill("tool-usage-guide")
+- User wants to learn programming -> use_skill("python-tutorial")
+- User asks how to debug -> use_skill("debugging-assistant")
+
 Args:
-    skill_name: Name of the skill to activate (e.g., "python-tutorial", "code-review")
+    skill_name: Exact name of the skill to activate (must match one from the list above)
 
 Returns:
-    The skill's guidance content that you should follow
+    Expert guidance and methodology you MUST follow in your response
 """
+
+    # Register the tool with dynamic description
+    @agent.tool_plain(description=tool_description)
+    def use_skill(skill_name: str) -> str:
         # Get the skill
         skill = skills.get_skill(skill_name)
 
