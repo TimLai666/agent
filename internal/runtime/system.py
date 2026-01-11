@@ -302,7 +302,7 @@ async def run_cli(prompt_once: str | None = None, single_turn: bool = False) -> 
                     chat_history = None
 
             def read_input_once() -> str | None:
-                user_input = input("codex> ").strip()
+                user_input = input("輸入文字或按Enter啟動語音辨識> ").strip()
                 if not user_input:
                     user_input = voice_manager.recognize_speech()
                     if not user_input:

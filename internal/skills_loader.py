@@ -200,7 +200,7 @@ class SkillRegistry:
 
         # Use LLM scoring if available and requested
         if use_llm and self._llm_scorer:
-            return self._llm_scorer.score_skills(prompt, list(self._skills.values()), max_skills, min_score)
+            return self._llm_scorer.score_skills_sync(prompt, list(self._skills.values()), max_skills, min_score)
 
         # Fall back to keyword-based matching
         return self._keyword_based_matching(prompt, max_skills, min_score)
