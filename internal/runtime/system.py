@@ -1,5 +1,3 @@
-import asyncio
-from collections import deque
 import os
 import warnings
 from contextlib import AsyncExitStack
