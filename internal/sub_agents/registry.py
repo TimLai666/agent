@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import re
 from pathlib import Path
-from typing import Awaitable, Callable
+from typing import Awaitable, Callable, Optional, Any
 
 from httpx import AsyncClient
 from pydantic_ai import Agent
@@ -116,6 +116,7 @@ def load_sub_agent_registry(
     http_client: AsyncClient,
     root_dir: Path | None = None,
     philosopher: PhilosopherCoAgent | None = None,
+    skills: Optional[Any] = None,
 ) -> SubAgentRegistry:
     specs = load_sub_agent_specs(root_dir or SUB_AGENTS_DIR)
     if not specs:
@@ -158,7 +159,7 @@ def load_sub_agent_registry(
         if philosopher:
             _register_philosopher_tools(agent, philosopher)
         spec_map[key] = spec
-        agents[key] = SubAgent(agent, philosopher=philosopher)
+        agents[key] = SubAgent(agent, philosopher=philosopher, skills=skills)
 
     return SubAgentRegistry(spec_map, agents)
 

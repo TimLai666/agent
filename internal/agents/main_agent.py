@@ -58,24 +58,26 @@ class MainAgent:
         sub_agents: SubAgentRegistry | None = None,
         skills: SkillRegistry | None = None,
     ) -> "MainAgent":
-        if sub_agents is None:
-            try:
-                sub_agents = cast(
-                    SubAgentRegistry,
-                    load_sub_agent_registry(
-                        base_config, env, http_client, philosopher=philosopher
-                    ),
-                )
-            except Exception:
-                logger.exception("Failed to load sub-agents; continuing without them")
-                sub_agents = SubAgentRegistry({}, {})
-
+        # Load skills first (so sub-agents can use them)
         if skills is None:
             try:
                 skills = load_skill_registry()
             except Exception:
                 logger.exception("Failed to load skills; continuing without them")
-                skills = SkillRegistry({})
+                skills = SkillRegistry({}, None)
+
+        # Load sub-agents with skills
+        if sub_agents is None:
+            try:
+                sub_agents = cast(
+                    SubAgentRegistry,
+                    load_sub_agent_registry(
+                        base_config, env, http_client, philosopher=philosopher, skills=skills
+                    ),
+                )
+            except Exception:
+                logger.exception("Failed to load sub-agents; continuing without them")
+                sub_agents = SubAgentRegistry({}, {})
 
         config = load_agent_config_chain([cls.ENV_PREFIX], base_config, env)
         model = create_openai_model(config, http_client)
