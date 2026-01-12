@@ -1,3 +1,5 @@
+# FIXME: 要找個更好的瀏覽器mcp
+
 from internal.mcp.client_builder import McpClient
 import shutil
 import os
@@ -32,7 +34,7 @@ if not chrome_path:
 
 browser = McpClient(
     command="npx",
-    args=["pptr-mcp","--viewport=1280x720"],
-    env={"CHROME_PATH": chrome_path} if chrome_path else None,
+    args=["puppeteer-real-browser-mcp-server@latest"],
+    # env={"CHROME_PATH": chrome_path} if chrome_path else None,
     tool_prefix="browser",
 )

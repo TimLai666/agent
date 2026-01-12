@@ -107,7 +107,8 @@ def run_terminal_command(command: str) -> str:
             message=f"Agent wants to execute terminal command: `{command}`. Allow?",
             default_choice="N",
         ):
-            return "Command execution cancelled by user."
+            logger.info(f"User denied command execution: {command}")
+            return "❌ User denied permission to execute this command. The operation was cancelled."
 
         process = _run_command(command)
 
