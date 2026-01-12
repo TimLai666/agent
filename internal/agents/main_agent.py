@@ -544,8 +544,8 @@ class MainAgent:
         error: str,
         note: str | None,
     ) -> dict[str, Any] | None:
-        tools_text = self._format_tools_context().strip()
-
+        tools_text: str = self._format_tools_context().strip()
+        print(tools_text)
         sub_agents_text = self._format_sub_agents_context().strip()
         note_text = f"Note: {note}\n" if note else ""
         prompt = (
@@ -1016,7 +1016,6 @@ class MainAgent:
             "重要：如果需求涉及時事/最新/新聞/趨勢，必須列出瀏覽器/MCP 工具或請求 trend-researcher；不可憑空編造。\n"
             "若無法取得可靠來源，工具請求應為 none，並在 INTENT 指出需要使用者指定具體事件。\n\n"
             "常見需求對應工具（若符合就直接用）：\n"
-            "- 詢問現在時間：get_now\n"
             "- 查某日期是星期幾：get_weekday，參數 date_str\n"
             "- 擲骰子：roll_dice\n"
             "- 從清單隨機挑一個：random_pick，參數 items\n"

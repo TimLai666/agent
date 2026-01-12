@@ -3,7 +3,7 @@ import re
 import string
 import sys
 
-from PySide6.QtCore import Qt, QTimer, QVariantAnimation
+from PySide6.QtCore import Qt, QTimer, QVariantAnimation, QPropertyAnimation, QEasingCurve, Property
 from PySide6.QtGui import QColor, QPainter, QPen, QRadialGradient
 from PySide6.QtWidgets import (
     QApplication,
@@ -144,6 +144,8 @@ class CollapsibleSection(QWidget):
         super().__init__(parent)
         self.base_title = title
         self.is_active = is_active
+        self._content_height = 0
+        self._animation = None
 
         # Title button + spinner on the left
         head = QWidget()
@@ -224,38 +226,122 @@ class CollapsibleSection(QWidget):
         layout.addWidget(head)
         layout.addWidget(self.content)
 
-    def set_active(self, active: bool):
+    def get_content_height(self):
+        """獲取內容區域的高度（用於動畫）"""
+        return self._content_height
+
+    def set_content_height(self, height):
+        """設置內容區域的高度（用於動畫）"""
+        self._content_height = height
+        self.content.setFixedHeight(int(height))
+
+    contentHeight = Property(int, get_content_height, set_content_height)
+
+    def update_content(self, new_content: str):
+        """更新區塊內容並重新計算高度"""
+        if not new_content.strip() and self.is_active:
+            self.content.setHtml("<i>Waiting for output...</i>")
+        else:
+            self.content.setMarkdown(new_content)
+        
+        # 強制重新計算高度
+        QTimer.singleShot(0, self._recalculate_height)
+        QTimer.singleShot(50, self._recalculate_height)  # 再次確認
+    
+    def _recalculate_height(self):
+        """重新計算內容高度"""
+        try:
+            if self.content is None:
+                return
+            self.content.document().adjustSize()
+            h = self.content.document().size().height()
+            min_h = 28 if self.is_active else 10
+            new_height = max(int(h) + 16, min_h)
+            self._content_height = new_height
+            self.content.setFixedHeight(new_height)
+            if self.layout():
+                self.layout().activate()
+            # 通知父容器更新
+            if self.parent():
+                self.parent().updateGeometry()
+        except RuntimeError:
+            pass
+
+    def set_active(self, active: bool, animate: bool = True):
+        """設置區塊的活動狀態，可選擇是否使用動畫"""
+        if self.is_active == active:
+            return
+        
         self.is_active = active
+        
         if active:
             self.spinner.start()
             self.button.setChecked(True)
             self.button.setArrowType(Qt.DownArrow)
-            # If the content was empty, restore placeholder so the block remains visible
             if not self.content.toPlainText().strip():
                 self.content.setHtml("<i>Waiting for output...</i>")
-            self.content.setVisible(True)
-            QTimer.singleShot(
-                0,
-                lambda: self.content.setFixedHeight(
-                    max(self.content.document().size().height() + 16, 28)
-                ),
-            )
+            
+            self.content.document().adjustSize()
+            target_height = max(int(self.content.document().size().height()) + 16, 28)
+            
+            if animate and self._content_height == 0:
+                self.content.setVisible(True)
+                self._animate_height(0, target_height)
+            else:
+                self._content_height = target_height
+                self.content.setFixedHeight(target_height)
+                self.content.setVisible(True)
         else:
             self.spinner.stop()
-            # 如果內容為空或只是placeholder，則收起區塊
             content_text = self.content.toPlainText().strip()
             has_real_content = content_text and "Waiting for" not in content_text
+            
             if not has_real_content:
-                self.button.setChecked(False)
-                self.button.setArrowType(Qt.RightArrow)
-                self.content.setVisible(False)
-            # 如果有真實內容，保持展開但停止spinner
-            # 不做任何操作，讓toggle由用戶手動控制
+                if animate and self._content_height > 0:
+                    self._animate_height(self._content_height, 0, on_finish=lambda: self._finish_collapse())
+                else:
+                    self._finish_collapse()
+            else:
+                self._recalculate_height()
 
     def toggle(self):
+        """切換區塊展開/收起狀態（用戶手動點擊）"""
         expanded = self.button.isChecked()
         self.button.setArrowType(Qt.DownArrow if expanded else Qt.RightArrow)
-        self.content.setVisible(expanded)
+        
+        if expanded:
+            # 展開
+            self.content.document().adjustSize()
+            target_height = max(int(self.content.document().size().height()) + 16, 28)
+            self._animate_height(0, target_height)
+            self.content.setVisible(True)
+        else:
+            # 收起
+            current_height = self._content_height if self._content_height > 0 else self.content.height()
+            self._animate_height(current_height, 0, on_finish=lambda: self.content.setVisible(False))
+
+    def _animate_height(self, start_height: int, end_height: int, on_finish=None):
+        """創建高度變化的動畫"""
+        if self._animation and self._animation.state() == QPropertyAnimation.Running:
+            self._animation.stop()
+        
+        self._animation = QPropertyAnimation(self, b"contentHeight")
+        self._animation.setDuration(250)
+        self._animation.setStartValue(start_height)
+        self._animation.setEndValue(end_height)
+        self._animation.setEasingCurve(QEasingCurve.OutCubic)
+        
+        if on_finish:
+            self._animation.finished.connect(on_finish)
+        
+        self._animation.start()
+
+    def _finish_collapse(self):
+        """完成收起動作"""
+        self.button.setChecked(False)
+        self.button.setArrowType(Qt.RightArrow)
+        self.content.setVisible(False)
+        self._content_height = 0
 
 
 class OutputBubble(QWidget):
@@ -480,16 +566,31 @@ class SiriResponseBubble(QWidget):
         return int(max(container_hint, layout_hint))
 
     def set_content(self, text: str):
-        # Clear existing widgets
+        # Check if we should update existing sections instead of recreating
+        existing_sections = {}
+        for i in range(self.layout.count()):
+            item = self.layout.itemAt(i)
+            widget = item.widget() if item else None
+            if isinstance(widget, CollapsibleSection):
+                title = widget.base_title
+                existing_sections[title] = widget
+        
+        # Parse new segments
+        segments = self._parse_segments(text or "")
+        
+        # Track which sections we've seen in this update
+        seen_sections = set()
+        
+        # Clear ALL widgets to rebuild cleanly
         for i in reversed(range(self.layout.count())):
             item = self.layout.takeAt(i)
             widget = item.widget()
-            if widget is not None:
+            if widget is not None and not isinstance(widget, CollapsibleSection):
+                widget.setParent(None)
                 widget.deleteLater()
 
-        segments = self._parse_segments(text or "")
+        # Process segments
         for kind, content, is_active in segments:
-            # If there's no content and it's not an active block, skip
             if kind == "normal":
                 sub_segments = self._split_normal_segments(content)
                 if not sub_segments:
@@ -577,17 +678,35 @@ class SiriResponseBubble(QWidget):
                             pass
                         QTimer.singleShot(0, update_browser_height)
                         self.layout.addWidget(browser)
-                continue
-            else:
+            elif kind in ("tool", "discussion"):
                 title = "🛠️ Tool execution" if kind == "tool" else "💭 Discussion"
-                # ensure active-but-empty blocks display a placeholder and show spinner
-                content_for_section = content
-                if is_active and not content.strip():
-                    content_for_section = "<i>Waiting for results...</i>"
-                section = CollapsibleSection(
-                    title, content_for_section, is_active=is_active
-                )
-                self.layout.addWidget(section)
+                seen_sections.add(title)
+                
+                # 如果section已存在，更新其內容
+                if title in existing_sections:
+                    section = existing_sections[title]
+                    # 更新內容
+                    content_for_section = content if content.strip() else "<i>Waiting for results...</i>"
+                    section.update_content(content_for_section)
+                    section.set_active(is_active)
+                    # 確保section在layout中
+                    self.layout.addWidget(section)
+                else:
+                    # 創建新的section
+                    content_for_section = content
+                    if is_active and not content.strip():
+                        content_for_section = "<i>Waiting for results...</i>"
+                    section = CollapsibleSection(
+                        title, content_for_section, is_active=is_active
+                    )
+                    self.layout.addWidget(section)
+                    existing_sections[title] = section
+        
+        # 移除不再需要的sections
+        for title, section in list(existing_sections.items()):
+            if title not in seen_sections:
+                section.setParent(None)
+                section.deleteLater()
 
         self.layout.addStretch(1)
 
