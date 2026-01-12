@@ -1,20 +1,24 @@
-import sys
-import string
 import random
+import string
+import sys
 
-
+from PySide6.QtCore import Qt, QVariantAnimation
+from PySide6.QtGui import QColor, QPainter, QPen, QRadialGradient
 from PySide6.QtWidgets import (
-    QMainWindow,
-    QPushButton,
-    QVBoxLayout,
     QApplication,
-    QWidget,
+    QFrame,
+    QHBoxLayout,
     QLabel,
     QLineEdit,
-    QHBoxLayout,
+    QMainWindow,
+    QPushButton,
+    QScrollArea,
+    QSizePolicy,
+    QTextBrowser,
+    QToolButton,
+    QVBoxLayout,
+    QWidget,
 )
-from PySide6.QtCore import Qt, QVariantAnimation
-from PySide6.QtGui import QPen, QPainter, QColor, QRadialGradient
 
 
 class Arc:
@@ -122,6 +126,149 @@ class Circle:
         return QColor(r, g, b).name()
 
 
+class CollapsibleSection(QWidget):
+    def __init__(self, title: str, content: str, parent=None):
+        super().__init__(parent)
+        self.button = QToolButton()
+        self.button.setText(title)
+        self.button.setCheckable(True)
+        self.button.setChecked(False)
+        self.button.setArrowType(Qt.RightArrow)
+        self.button.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self.button.clicked.connect(self.toggle)
+
+        self.content = QTextBrowser()
+        self.content.setMarkdown(content)
+        self.content.setOpenExternalLinks(True)
+        self.content.setFrameShape(QFrame.NoFrame)
+        self.content.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.content.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.content.setTextInteractionFlags(
+            Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard
+        )
+        self.content.setVisible(False)
+        self.content.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+        layout.addWidget(self.button)
+        layout.addWidget(self.content)
+
+    def toggle(self):
+        expanded = self.button.isChecked()
+        self.button.setArrowType(Qt.DownArrow if expanded else Qt.RightArrow)
+        self.content.setVisible(expanded)
+
+
+class OutputBubble(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.max_height = 320
+        self.preferred_width = 360
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        self.setStyleSheet(
+            "background-color: white; "
+            "color: black; "
+            "border: 2px solid #2E8B57; "
+            "border-radius: 15px;"
+        )
+
+        self.scroll = QScrollArea(self)
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setFrameShape(QFrame.NoFrame)
+        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.scroll.setStyleSheet("background: transparent;")
+
+        self.container = QWidget()
+        self.container.setStyleSheet("background: transparent;")
+        self.layout = QVBoxLayout(self.container)
+        self.layout.setContentsMargins(10, 10, 10, 10)
+        self.layout.setSpacing(8)
+        self.scroll.setWidget(self.container)
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(self.scroll)
+
+    def content_height(self) -> int:
+        return int(self.container.sizeHint().height())
+
+    def set_content(self, text: str):
+        for i in reversed(range(self.layout.count())):
+            item = self.layout.takeAt(i)
+            widget = item.widget()
+            if widget is not None:
+                widget.setParent(None)
+
+        segments = self._parse_segments(text or "")
+        for kind, content in segments:
+            if not content.strip():
+                continue
+            if kind == "normal":
+                browser = QTextBrowser()
+                browser.setMarkdown(content)
+                browser.setOpenExternalLinks(True)
+                browser.setFrameShape(QFrame.NoFrame)
+                browser.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+                browser.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+                browser.setTextInteractionFlags(
+                    Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard
+                )
+                browser.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+                self.layout.addWidget(browser)
+            else:
+                title = "Tool execution" if kind == "tool" else "Discussion"
+                section = CollapsibleSection(title, content)
+                self.layout.addWidget(section)
+
+        self.layout.addStretch(1)
+
+    def _parse_segments(self, text: str):
+        tags = {
+            "<tool-execution>": "tool",
+            "</tool-execution>": "tool",
+            "<discussion>": "discussion",
+            "</discussion>": "discussion",
+        }
+        open_tags = {"<tool-execution>", "<discussion>"}
+        close_tags = {"</tool-execution>", "</discussion>"}
+        segments = []
+        stack = ["normal"]
+        pos = 0
+
+        def add_segment(kind, chunk):
+            if not chunk:
+                return
+            if segments and segments[-1][0] == kind:
+                segments[-1] = (kind, segments[-1][1] + chunk)
+            else:
+                segments.append((kind, chunk))
+
+        while pos < len(text):
+            next_pos = -1
+            next_tag = ""
+            for tag in tags:
+                idx = text.find(tag, pos)
+                if idx == -1:
+                    continue
+                if next_pos == -1 or idx < next_pos:
+                    next_pos = idx
+                    next_tag = tag
+            if next_pos == -1:
+                add_segment(stack[-1], text[pos:])
+                break
+            if next_pos > pos:
+                add_segment(stack[-1], text[pos:next_pos])
+            if next_tag in open_tags:
+                stack.append(tags[next_tag])
+            elif next_tag in close_tags and len(stack) > 1:
+                stack.pop()
+            pos = next_pos + len(next_tag)
+
+        return segments
+
+
 class ArcWidget(QWidget):
     def __init__(self):
         super().__init__()
@@ -184,7 +331,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("AI Assistant")
-        self.setGeometry(100, 100, 400, 400)  # 初始較小的尺寸
+        self.setGeometry(100, 100, 460, 800)  # 初始較小的尺寸
         self.arcWidget = ArcWidget()
         # Essential for translucency and frameless
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
@@ -201,21 +348,10 @@ class MainWindow(QMainWindow):
             "QPushButton:hover { background-color: #d32f2f; }"
         )
 
-        # 創建講話框 - 改用 QLabel
-        self.speech_bubble = QLabel("初始化中...")
+        # 創建講話框 - 改用 OutputBubble
+        self.speech_bubble = OutputBubble()
         self.speech_bubble.setParent(self)
         self.speech_bubble.setFixedSize(200, 50)
-        self.speech_bubble.setStyleSheet(
-            "QLabel { "
-            "background-color: white; "
-            "color: black; "
-            "border: 2px solid #2E8B57; "
-            "border-radius: 15px; "
-            "padding: 10px; "
-            "}"
-        )
-        self.speech_bubble.setWordWrap(True)  # QLabel 支援自動換行
-        self.speech_bubble.setAlignment(Qt.AlignCenter)  # 文字置中
         self.speech_bubble.show()  # 初始顯示
 
         # 創建輸入區域
@@ -325,32 +461,15 @@ class MainWindow(QMainWindow):
 
     def update_speech_bubble(self, text):
         """更新對話框內容並動態調整大小和視窗大小"""
-        self.speech_bubble.setText(text)
+        self.speech_bubble.set_content(text)
 
-        # 獲取文字的大小
-        font_metrics = self.speech_bubble.fontMetrics()
-        text_rect = font_metrics.boundingRect(0, 0, 400, 0, Qt.TextWordWrap, text)
-
-        # 計算所需的寬度和高度（加上一些padding）
-        padding = 20
-        bubble_width = min(
-            max(text_rect.width() + padding, 150), 400
-        )  # 最小150，最大400
-        bubble_height = max(text_rect.height() + padding, 50)  # 最小50
-
-        # 設置對話框新的大小
-        self.speech_bubble.setFixedSize(bubble_width, bubble_height)
-
-        # 更新樣式以支援文字換行
-        self.speech_bubble.setStyleSheet(
-            "QLabel { "
-            "background-color: white; "
-            "color: black; "
-            "border: 2px solid #2E8B57; "
-            "border-radius: 15px; "
-            "padding: 10px; "
-            "}"
+        padding = 10
+        bubble_width = min(max(self.speech_bubble.preferred_width, 200), 400)
+        bubble_height = min(
+            max(self.speech_bubble.content_height() + padding, 50),
+            self.speech_bubble.max_height,
         )
+        self.speech_bubble.setFixedSize(bubble_width, bubble_height)
 
         # 計算球球的有效範圍（包含旋轉圓弧）
         circle_radius = self.arcWidget.circle.diameter // 2  # 實心圓半徑 = 50

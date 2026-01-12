@@ -3,6 +3,7 @@ import asyncio
 import os
 import sys
 import warnings
+from collections import deque
 from contextlib import AsyncExitStack
 
 from dotenv import load_dotenv
@@ -21,6 +22,7 @@ except ImportError:
 from internal.agents import MainAgent
 from internal.co_agents import PhilosopherCoAgent
 from internal.logger import logger
+from internal.runtime.stream_printer import BACKLOG_SCALE, BASE_DELAY, MIN_FACTOR
 from internal.runtime.system import run_cli
 from internal.services.agent_factory import load_base_config
 from internal.services.circle_ui import MainWindow
@@ -191,8 +193,21 @@ class GUIAgentApp:
         self.chat_history: list[ModelRequest | ModelResponse] | None = None
         self.runtime_ready = False
         self._active_request_id = 0
+        self._display_text = ""
+        self._pending = deque()
         self._stream_buffer = ""
-        self._stream_pending = False
+        self._stream_mode = "normal"
+        self._typewriter_active = False
+        self._typewriter_timer = QTimer()
+        self._typewriter_timer.setSingleShot(True)
+        self._typewriter_timer.timeout.connect(self._typewriter_tick)
+        self._tags = (
+            "<tool-execution>",
+            "</tool-execution>",
+            "<discussion>",
+            "</discussion>",
+        )
+        self._max_tag_len = max(len(tag) for tag in self._tags)
         self.runtime = AgentRuntime(self.base_config, self.env)
         self.runtime.ready.connect(self.handle_runtime_ready)
         self.runtime.result_ready.connect(self.handle_result)
@@ -204,7 +219,7 @@ class GUIAgentApp:
         self.main_window.set_input_callback(self.process_input)
         self.main_window.show()
 
-        self.main_window.speech_bubble.setText("Initializing...")
+        self.main_window.update_speech_bubble("Initializing...")
         self.main_window.speech_bubble.show()
 
     def handle_runtime_ready(self):
@@ -218,9 +233,14 @@ class GUIAgentApp:
         logger.info(
             f"handle_result called with output: {output[:100] if output else 'None'}..."
         )
-        self._stream_buffer = output or ""
-        self._stream_pending = False
-        self.main_window.update_speech_bubble(f"AI: {self._stream_buffer}")
+        if output and output not in self._display_text:
+            self._display_text = f"AI: {output}"
+            self._pending.clear()
+            self._stream_buffer = ""
+            self._stream_mode = "normal"
+            self._typewriter_active = False
+            self._typewriter_timer.stop()
+            self.main_window.update_speech_bubble(self._display_text)
         logger.info(f"AI Response: {output[:100]}...")
         if updated_history:
             self.chat_history = updated_history
@@ -228,23 +248,95 @@ class GUIAgentApp:
     def handle_chunk(self, request_id, chunk):
         if request_id != self._active_request_id:
             return
-        if not chunk:
-            return
-        self._stream_buffer += chunk
-        if not self._stream_pending:
-            self._stream_pending = True
-            QTimer.singleShot(50, self.flush_stream)
-
-    def flush_stream(self):
-        self._stream_pending = False
-        if self._stream_buffer:
-            self.main_window.update_speech_bubble(f"AI: {self._stream_buffer}")
+        if chunk:
+            self._process_stream_chunk(chunk)
 
     def handle_error(self, request_id, error_message):
         if request_id not in (0, self._active_request_id):
             return
         self.main_window.update_speech_bubble(f"Error: {error_message}")
         logger.error(error_message)
+
+    def _next_tag(self, text: str):
+        earliest_idx = -1
+        earliest_tag = ""
+        for tag in self._tags:
+            idx = text.find(tag)
+            if idx == -1:
+                continue
+            if earliest_idx == -1 or idx < earliest_idx:
+                earliest_idx = idx
+                earliest_tag = tag
+        if earliest_idx == -1:
+            return None
+        return earliest_idx, earliest_tag
+
+    def _process_stream_chunk(self, chunk: str):
+        self._stream_buffer += chunk
+        updated = False
+        while self._stream_buffer:
+            found = self._next_tag(self._stream_buffer)
+            if not found:
+                if len(self._stream_buffer) > self._max_tag_len - 1:
+                    emit = self._stream_buffer[: -(self._max_tag_len - 1)]
+                    self._stream_buffer = self._stream_buffer[
+                        -(self._max_tag_len - 1) :
+                    ]
+                else:
+                    emit = ""
+                if emit:
+                    if self._stream_mode == "normal":
+                        self._pending.append(emit)
+                    else:
+                        self._display_text += emit
+                        updated = True
+                if not emit:
+                    break
+                continue
+
+            idx, tag = found
+            if idx > 0:
+                prefix = self._stream_buffer[:idx]
+                if self._stream_mode == "normal":
+                    self._pending.append(prefix)
+                else:
+                    self._display_text += prefix
+                    updated = True
+
+            self._display_text += tag
+            updated = True
+            if tag in ("<tool-execution>", "<discussion>"):
+                self._stream_mode = "fast"
+            else:
+                self._stream_mode = "normal"
+            self._stream_buffer = self._stream_buffer[idx + len(tag) :]
+
+        if updated:
+            self.main_window.update_speech_bubble(self._display_text)
+
+        if self._pending and not self._typewriter_active:
+            self._typewriter_active = True
+            self._typewriter_tick()
+
+    def _typewriter_tick(self):
+        if not self._pending:
+            self._typewriter_active = False
+            return
+
+        backlog_len = sum(len(s) for s in self._pending)
+        left = self._pending[0]
+        ch, rest = left[0], left[1:]
+        if rest:
+            self._pending[0] = rest
+        else:
+            self._pending.popleft()
+
+        self._display_text += ch
+        self.main_window.update_speech_bubble(self._display_text)
+
+        speed_factor = 1.0 / (1.0 + (backlog_len / BACKLOG_SCALE))
+        delay = max(BASE_DELAY * MIN_FACTOR, BASE_DELAY * speed_factor)
+        self._typewriter_timer.start(int(delay * 1000))
 
     def show_input_container(self):
         """Show input container."""
@@ -282,8 +374,12 @@ class GUIAgentApp:
             QTimer.singleShot(
                 500, lambda: self.main_window.update_speech_bubble("Thinking...")
             )
+            self._display_text = "AI: "
+            self._pending.clear()
             self._stream_buffer = ""
-            self._stream_pending = False
+            self._stream_mode = "normal"
+            self._typewriter_active = False
+            self._typewriter_timer.stop()
             request_id = self.runtime.submit(user_input, self.chat_history)
             if request_id:
                 self._active_request_id = request_id
