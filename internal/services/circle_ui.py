@@ -378,8 +378,8 @@ class OutputBubble(QWidget):
 
 
 class SiriResponseBubble(QWidget):
-    THINKING_PATTERN = re.compile(
-        r"^\s*(?:[-*>\u2022]\s*)?(?:still\s+|currently\s+)?thinking(?:\s*(?:\.{3,}|…))?\s*$",
+    SPINNER_PATTERN = re.compile(
+        r"^\s*(?:[-*>\u2022]\s*)?(?:still\s+|currently\s+)?(?P<status>thinking|listening)(?:\s*(?:\.{3,}|…))?\s*$",
         re.IGNORECASE,
     )
 
@@ -440,7 +440,8 @@ class SiriResponseBubble(QWidget):
         total = len(lines)
         for idx, line in enumerate(lines):
             stripped = line.strip()
-            if self.THINKING_PATTERN.match(stripped):
+            match = self.SPINNER_PATTERN.match(stripped)
+            if match:
                 remaining = "".join(lines[idx + 1 :]).strip()
                 if remaining:
                     buffer.append(line)
@@ -449,7 +450,13 @@ class SiriResponseBubble(QWidget):
                 if chunk.strip():
                     segments.append(("text", chunk.rstrip("\n")))
                 buffer = []
-                segments.append(("spinner", stripped or "Thinking..."))
+                status = match.group("status")
+                fallback_text = stripped
+                if not fallback_text:
+                    fallback_text = (
+                        f"{status.capitalize()}..." if status else "Thinking..."
+                    )
+                segments.append(("spinner", fallback_text))
             else:
                 buffer.append(line)
         if buffer:
