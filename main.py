@@ -234,7 +234,7 @@ class GUIAgentApp:
             f"handle_result called with output: {output[:100] if output else 'None'}..."
         )
         if output and output not in self._display_text:
-            self._display_text = f"AI: {output}"
+            self._display_text = f"{output}"
             self._pending.clear()
             self._stream_buffer = ""
             self._stream_mode = "normal"
@@ -372,9 +372,12 @@ class GUIAgentApp:
             logger.info(f"Processing input: {user_input}")
             self.main_window.update_speech_bubble(f"You: {user_input}")
             QTimer.singleShot(
-                500, lambda: self.main_window.update_speech_bubble("Thinking...")
+                500,
+                lambda: self.main_window.update_speech_bubble(
+                    f"You: {user_input}\n\nThinking..."
+                ),
             )
-            self._display_text = "AI: "
+            self._display_text = ""
             self._pending.clear()
             self._stream_buffer = ""
             self._stream_mode = "normal"
