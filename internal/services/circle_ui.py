@@ -373,12 +373,13 @@ class SpinnerLabel(QLabel):
 
 
 class CollapsibleSection(QWidget):
-    def __init__(self, title: str, content: str, parent=None, is_active=False):
+    def __init__(self, title: str, content: str, parent=None, is_active=False, on_toggle_callback=None):
         super().__init__(parent)
         self.base_title = title
         self.is_active = is_active
         self._content_height = 0
         self._animation = None
+        self.on_toggle_callback = on_toggle_callback  # Callback to notify parent of height changes
 
         # Title button + spinner on the left
         head = QWidget()
@@ -553,12 +554,25 @@ class CollapsibleSection(QWidget):
             # 展開
             self.content.document().adjustSize()
             target_height = max(int(self.content.document().size().height()) + 16, 28)
-            self._animate_height(0, target_height)
-            self.content.setVisible(True)
+            
+            def on_expand_finish():
+                self.content.setVisible(True)
+                # Notify parent to recalculate bubble height
+                if self.on_toggle_callback:
+                    QTimer.singleShot(50, self.on_toggle_callback)
+            
+            self._animate_height(0, target_height, on_finish=on_expand_finish)
         else:
             # 收起
             current_height = self._content_height if self._content_height > 0 else self.content.height()
-            self._animate_height(current_height, 0, on_finish=lambda: self.content.setVisible(False))
+            
+            def on_collapse_finish():
+                self.content.setVisible(False)
+                # Notify parent to recalculate bubble height
+                if self.on_toggle_callback:
+                    QTimer.singleShot(50, self.on_toggle_callback)
+            
+            self._animate_height(current_height, 0, on_finish=on_collapse_finish)
 
     def _animate_height(self, start_height: int, end_height: int, on_finish=None):
         """創建高度變化的動畫"""
@@ -763,6 +777,57 @@ class SiriResponseBubble(QWidget):
                 QApplication.processEvents()
         except Exception:
             pass
+    
+    def _request_parent_update(self):
+        """Request parent (MainWindow) to update speech bubble size after section toggle."""
+        try:
+            # Force layout recalculation first
+            self._refresh_layout_metrics()
+            
+            # Trigger size recalculation by getting current height
+            QTimer.singleShot(0, lambda: self._refresh_layout_metrics(process_events=True))
+            
+            # Find the speech bubble widget and force it to recalculate
+            parent_widget = self.parent()
+            while parent_widget:
+                # Look for MainWindow that contains this bubble
+                if hasattr(parent_widget, 'speech_bubble') and parent_widget.speech_bubble == self.parent():
+                    # Found MainWindow - trigger its update by re-measuring bubble content
+                    QTimer.singleShot(100, lambda p=parent_widget: self._trigger_bubble_resize(p))
+                    break
+                parent_widget = parent_widget.parent()
+        except Exception as e:
+            logger.debug(f"Failed to request parent update: {e}")
+    
+    def _trigger_bubble_resize(self, main_window):
+        """Helper to trigger bubble resize in MainWindow."""
+        try:
+            bubble = main_window.speech_bubble
+            # Force layout refresh
+            bubble.layout.activate()
+            bubble.container.adjustSize()
+            QApplication.processEvents()
+            
+            # Recalculate and apply size
+            padding = 60
+            bubble_width = min(max(bubble.preferred_width, 240), main_window.FIXED_WIDTH - 40)
+            needed_height = bubble.content_height() + padding
+            max_bubble_height = main_window.FIXED_HEIGHT - 200
+            bubble_height = min(max(needed_height, 80), max_bubble_height)
+            
+            bubble.setFixedSize(bubble_width, bubble_height)
+            
+            # Recalculate position
+            window_center_x = main_window.FIXED_WIDTH // 2
+            ball_center_y = main_window.FIXED_HEIGHT - main_window.BALL_CENTER_FROM_BOTTOM
+            bubble_x = window_center_x - bubble_width // 2
+            bubble_y = ball_center_y - bubble_height
+            bubble_x = max(10, min(bubble_x, main_window.FIXED_WIDTH - bubble_width - 10))
+            bubble_y = max(20, min(bubble_y, main_window.FIXED_HEIGHT - bubble_height - 80))
+            
+            bubble.move(bubble_x, bubble_y)
+        except Exception as e:
+            logger.debug(f"Failed to trigger bubble resize: {e}")
 
     def _split_normal_segments(self, content: str):
         segments = []
@@ -979,7 +1044,8 @@ class SiriResponseBubble(QWidget):
                     if is_active and not content.strip():
                         content_for_section = "<i>Waiting for results...</i>"
                     section = CollapsibleSection(
-                        title, content_for_section, is_active=is_active
+                        title, content_for_section, is_active=is_active,
+                        on_toggle_callback=self._request_parent_update
                     )
                     self.layout.addWidget(section)
                     existing_sections[title] = section
