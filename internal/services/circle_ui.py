@@ -48,6 +48,106 @@ from PySide6.QtWidgets import (
 from internal.logger import logger
 
 
+class CodeBlockWidget(QWidget):
+    """Custom widget for displaying code blocks with copy button."""
+    
+    def __init__(self, code: str, language: str = "", parent=None):
+        super().__init__(parent)
+        self.code = code
+        self.language = language
+        
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        
+        # Header with language and copy button
+        header = QWidget()
+        header.setStyleSheet(
+            "background-color: rgba(45, 45, 45, 220); "
+            "border-top-left-radius: 8px; "
+            "border-top-right-radius: 8px; "
+            "padding: 4px 8px;"
+        )
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(8, 4, 8, 4)
+        header_layout.setSpacing(8)
+        
+        lang_label = QLabel(language if language else "code")
+        lang_label.setStyleSheet("color: rgba(255, 255, 255, 160); font-size: 11px; background: transparent;")
+        
+        copy_btn = QPushButton("📋 Copy")
+        copy_btn.setFixedHeight(20)
+        copy_btn.setStyleSheet(
+            "QPushButton { "
+            "  background-color: rgba(0, 122, 255, 140); "
+            "  color: white; "
+            "  border: none; "
+            "  border-radius: 4px; "
+            "  padding: 2px 8px; "
+            "  font-size: 11px; "
+            "} "
+            "QPushButton:hover { background-color: rgba(0, 122, 255, 200); } "
+            "QPushButton:pressed { background-color: rgba(0, 100, 200, 220); }"
+        )
+        copy_btn.clicked.connect(self._copy_code)
+        
+        header_layout.addWidget(lang_label)
+        header_layout.addStretch()
+        header_layout.addWidget(copy_btn)
+        
+        # Code content
+        code_browser = QTextBrowser()
+        code_browser.setPlainText(code)
+        code_browser.setStyleSheet(
+            "QTextBrowser { "
+            "  background-color: rgba(30, 30, 30, 240); "
+            "  color: #D4D4D4; "
+            "  font-family: 'Consolas', 'Courier New', monospace; "
+            "  font-size: 13px; "
+            "  border: none; "
+            "  border-bottom-left-radius: 8px; "
+            "  border-bottom-right-radius: 8px; "
+            "  padding: 8px; "
+            "  line-height: 1.4; "
+            "}"
+        )
+        code_browser.setFrameShape(QFrame.NoFrame)
+        code_browser.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        code_browser.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        code_browser.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard)
+        code_browser.document().setDocumentMargin(0)
+        code_browser.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        
+        def adjust_height():
+            try:
+                code_browser.document().adjustSize()
+                h = code_browser.document().size().height()
+                code_browser.setFixedHeight(max(int(h) + 16, 40))
+            except RuntimeError:
+                pass
+        
+        try:
+            code_browser.document().contentsChanged.connect(adjust_height)
+        except Exception:
+            pass
+        QTimer.singleShot(0, adjust_height)
+        
+        layout.addWidget(header)
+        layout.addWidget(code_browser)
+        
+        self.setStyleSheet("background: transparent;")
+    
+    def _copy_code(self):
+        clipboard = QApplication.clipboard()
+        clipboard.setText(self.code)
+        # Brief visual feedback
+        sender = self.sender()
+        if sender:
+            original_text = sender.text()
+            sender.setText("✓ Copied")
+            QTimer.singleShot(1000, lambda: sender.setText(original_text) if sender else None)
+
+
 class CommandLineEdit(QLineEdit):
     """支援指令補全和歷史記錄的輸入框"""
     
@@ -645,8 +745,8 @@ class SiriResponseBubble(QWidget):
         self.container = QWidget()
         self.container.setObjectName("container")
         self.layout = QVBoxLayout(self.container)
-        self.layout.setContentsMargins(22, 22, 22, 22)
-        self.layout.setSpacing(15)
+        self.layout.setContentsMargins(12, 12, 12, 12)
+        self.layout.setSpacing(8)
         self.scroll.setWidget(self.container)
 
         outer = QVBoxLayout(self)
@@ -704,6 +804,40 @@ class SiriResponseBubble(QWidget):
         layout_hint = self.layout.sizeHint().height()
         return int(max(container_hint, layout_hint))
 
+    def _extract_code_blocks(self, text: str) -> list[tuple[str, str, str]]:
+        """Extract code blocks from markdown text.
+        Returns list of (type, content, language) where type is 'text' or 'code'."""
+        segments = []
+        pos = 0
+        
+        # Pattern for fenced code blocks
+        pattern = re.compile(r'^```(\w*)\n(.*?)^```', re.MULTILINE | re.DOTALL)
+        
+        for match in pattern.finditer(text):
+            # Add text before code block
+            if match.start() > pos:
+                text_before = text[pos:match.start()]
+                if text_before.strip():
+                    segments.append(('text', text_before, ''))
+            
+            # Add code block
+            language = match.group(1) or ''
+            code = match.group(2).rstrip('\\n')
+            segments.append(('code', code, language))
+            pos = match.end()
+        
+        # Add remaining text
+        if pos < len(text):
+            text_after = text[pos:]
+            if text_after.strip():
+                segments.append(('text', text_after, ''))
+        
+        # If no code blocks found, return entire text as text segment
+        if not segments and text.strip():
+            segments.append(('text', text, ''))
+        
+        return segments
+
     def set_content(self, text: str):
         # Check if we should update existing sections instead of recreating
         existing_sections = {}
@@ -750,7 +884,7 @@ class SiriResponseBubble(QWidget):
                         label.setMarkdown(_autolink_markdown(sub_content))
                         label.setOpenExternalLinks(True)
                         label.setStyleSheet(
-                            "background: transparent; border: none; color: #FFFFFF; font-family: 'Segoe UI', 'Microsoft JhengHei', sans-serif; font-size: 16px; line-height: 1.6;"
+                            "background: transparent; border: none; color: #FFFFFF; font-family: 'Segoe UI', 'Microsoft JhengHei', sans-serif; font-size: 14px; line-height: 1.5;"
                         )
                         label.setFrameShape(QFrame.NoFrame)
                         label.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -764,7 +898,7 @@ class SiriResponseBubble(QWidget):
                                 # 強制更新文件布局
                                 b.document().adjustSize()
                                 height = b.document().size().height()
-                                min_height = max(int(height) + 20, 40)
+                                min_height = max(int(height) + 16, 32)
                                 b.setMinimumHeight(min_height)
                                 b.setMaximumHeight(min_height)
                             except RuntimeError:
@@ -784,42 +918,48 @@ class SiriResponseBubble(QWidget):
                     else:
                         if not sub_content.strip():
                             continue
-                        browser = QTextBrowser()
-                        browser.setMarkdown(_autolink_markdown(sub_content))
-                        browser.setOpenExternalLinks(True)
-                        browser.setLineWrapMode(QTextEdit.WidgetWidth)
-                        browser.setStyleSheet(
-                            "QTextBrowser { color: #FFFFFF; font-family: 'Segoe UI', 'Microsoft JhengHei', sans-serif; font-size: 16px; line-height: 1.6; }"
-                        )
-                        browser.setFrameShape(QFrame.NoFrame)
-                        browser.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-                        browser.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-                        # Allow clicking links inside sub-sections
-                        browser.setTextInteractionFlags(Qt.TextBrowserInteraction)
-                        browser.document().setDocumentMargin(0)
-                        browser.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+                        # Process code blocks in text segments
+                        code_segments = self._extract_code_blocks(sub_content)
+                        for seg_type, seg_content, seg_lang in code_segments:
+                            if seg_type == 'code':
+                                # Add code block widget
+                                code_widget = CodeBlockWidget(seg_content, seg_lang)
+                                self.layout.addWidget(code_widget)
+                            else:
+                                # Add normal text browser
+                                browser = QTextBrowser()
+                                browser.setMarkdown(_autolink_markdown(seg_content))
+                                browser.setOpenExternalLinks(True)
+                                browser.setLineWrapMode(QTextEdit.WidgetWidth)
+                                browser.setStyleSheet(
+                                    "QTextBrowser { color: #FFFFFF; font-family: 'Segoe UI', 'Microsoft JhengHei', sans-serif; font-size: 14px; line-height: 1.5; }"
+                                )
+                                browser.setFrameShape(QFrame.NoFrame)
+                                browser.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+                                browser.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+                                # Allow clicking links inside sub-sections
+                                browser.setTextInteractionFlags(Qt.TextBrowserInteraction)
+                                browser.document().setDocumentMargin(0)
+                                browser.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
 
-                        def update_browser_height(b=browser):
-                            try:
-                                # 強制更新文件布局
-                                b.document().adjustSize()
-                                # 獲取文檔實際高度
-                                doc_size = b.document().size()
-                                h2 = doc_size.height()
-                                # 設置最小高度並添加額外的padding
-                                min_height = max(int(h2) + 20, 40)
-                                b.setMinimumHeight(min_height)
-                                b.setMaximumHeight(min_height)
-                            except RuntimeError:
-                                pass
+                                def update_browser_height(b=browser):
+                                    try:
+                                        b.document().adjustSize()
+                                        doc_size = b.document().size()
+                                        h2 = doc_size.height()
+                                        min_height = max(int(h2) + 16, 32)
+                                        b.setMinimumHeight(min_height)
+                                        b.setMaximumHeight(min_height)
+                                    except RuntimeError:
+                                        pass
 
-                        try:
-                            browser.textChanged.connect(update_browser_height)
-                            browser.document().contentsChanged.connect(update_browser_height)
-                        except Exception:
-                            pass
-                        QTimer.singleShot(0, update_browser_height)
-                        self.layout.addWidget(browser)
+                                try:
+                                    browser.textChanged.connect(update_browser_height)
+                                    browser.document().contentsChanged.connect(update_browser_height)
+                                except Exception:
+                                    pass
+                                QTimer.singleShot(0, update_browser_height)
+                                self.layout.addWidget(browser)
             elif kind in ("tool", "discussion"):
                 title = "🛠️ Tool execution" if kind == "tool" else "💭 Discussion"
                 seen_sections.add(title)
