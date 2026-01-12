@@ -25,8 +25,9 @@ from internal.logger import logger
 from internal.runtime.stream_printer import BACKLOG_SCALE, BASE_DELAY, MIN_FACTOR
 from internal.runtime.system import run_cli
 from internal.services.agent_factory import load_base_config
-from internal.services.circle_ui import MainWindow
+from internal.services.circle_ui import MainWindow, ConfirmDialog
 from internal.services.voice_manager import VoiceManager
+from internal.cli import set_gui_confirm_handler
 
 HISTORY_LIMIT = 30
 
@@ -208,6 +209,10 @@ class GUIAgentApp:
             "</discussion>",
         )
         self._max_tag_len = max(len(tag) for tag in self._tags)
+        
+        # 設置 GUI 確認處理器
+        set_gui_confirm_handler(self._gui_confirm_handler)
+        
         self.runtime = AgentRuntime(self.base_config, self.env)
         self.runtime.ready.connect(self.handle_runtime_ready)
         self.runtime.result_ready.connect(self.handle_result)
@@ -221,6 +226,17 @@ class GUIAgentApp:
 
         self.main_window.update_speech_bubble("Initializing...")
         self.main_window.speech_bubble.show()
+
+    def _gui_confirm_handler(self, message: str, default_choice: str) -> bool:
+        """
+        GUI 模式下的確認處理器（線程安全）
+        這個方法會在 AgentRuntime 線程中被調用，
+        但對話框會在主 GUI 線程中顯示
+        """
+        logger.info(f"_gui_confirm_handler called: {message[:50]}...")
+        result = self.main_window.show_confirm_dialog(message, default_choice)
+        logger.info(f"_gui_confirm_handler returning: {result}")
+        return result
 
     def handle_runtime_ready(self):
         self.runtime_ready = True
@@ -389,9 +405,13 @@ class GUIAgentApp:
 
     def run(self):
         """Run GUI application."""
-        result = self.app.exec()
-        self.runtime.stop()
-        self.runtime.wait(3000)
+        try:
+            result = self.app.exec()
+        finally:
+            # 清理 GUI 確認處理器
+            set_gui_confirm_handler(None)
+            self.runtime.stop()
+            self.runtime.wait(3000)
         return result
 
 

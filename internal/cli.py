@@ -1,5 +1,8 @@
-from typing import Literal
+from typing import Literal, Callable, Optional
 import io
+import threading
+
+from internal.logger import logger
 
 
 class TeeStdout(io.StringIO):
@@ -22,9 +25,31 @@ class TeeStdout(io.StringIO):
         super().flush()
 
 
+# Global confirmation handler for GUI mode
+_gui_confirm_handler: Optional[Callable[[str, str], bool]] = None
+_confirm_lock = threading.Lock()
+
+
+def set_gui_confirm_handler(handler: Optional[Callable[[str, str], bool]]) -> None:
+    """
+    Set the GUI confirmation handler for tool execution confirmation.
+    
+    Args:
+        handler: A function that takes (message, default_choice) and returns bool.
+                 Set to None to use CLI mode.
+    """
+    global _gui_confirm_handler
+    with _confirm_lock:
+        _gui_confirm_handler = handler
+        logger.info(f"GUI confirm handler {'set' if handler else 'cleared'}")
+
+
 def confirm(message: str, default_choice: str = '') -> bool:
     """
     Display a confirmation message to the user.
+    
+    In CLI mode, this uses terminal input().
+    In GUI mode (if handler is set), this calls the GUI dialog.
 
     Args:
         message (str): The confirmation message to display.
@@ -34,6 +59,21 @@ def confirm(message: str, default_choice: str = '') -> bool:
     if default_choice not in ['Y', 'N', '']:
         raise ValueError(
             "default_choice must be 'Y', 'N', or an empty string.")
+    
+    # Check if we have a GUI handler
+    with _confirm_lock:
+        handler = _gui_confirm_handler
+    logger.info(f"confirm() called: message='{message[:50]}...', GUI_mode={handler is not None}")
+    
+    if handler is not None:
+        # Use GUI mode
+        logger.info("Calling GUI confirm handler...")
+        result = handler(message, default_choice)
+        logger.info(f"GUI confirm result: {result}")
+        return result
+        return handler(message, default_choice)
+    
+    # Use CLI mode
     yes_no_str: Literal['[y/n]'] | Literal['[Y/n]'] | Literal['[y/N]'] = "[y/n]" if not default_choice else "[Y/n]" if default_choice == 'Y' else "[y/N]"
     response: str = r if (r := input(
         f"<Confirmation> {message} {yes_no_str}: ")) else default_choice

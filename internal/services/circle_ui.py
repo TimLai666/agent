@@ -3,10 +3,12 @@ import re
 import string
 import sys
 
-from PySide6.QtCore import Qt, QTimer, QVariantAnimation, QPropertyAnimation, QEasingCurve, Property
+from PySide6.QtCore import Qt, QTimer, QVariantAnimation, QPropertyAnimation, QEasingCurve, Property, QMetaObject, Signal, Slot, QEventLoop
 from PySide6.QtGui import QColor, QPainter, QPen, QRadialGradient
 from PySide6.QtWidgets import (
     QApplication,
+    QDialog,
+    QDialogButtonBox,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -21,6 +23,8 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+from internal.logger import logger
 
 
 class Arc:
@@ -914,6 +918,9 @@ class ArcWidget(QWidget):
 
 
 class MainWindow(QMainWindow):
+    # 信号：请求显示确认对话框
+    confirm_requested = Signal(str, str, object)  # message, default_choice, result_container
+    
     def __init__(self):
         super().__init__()
         self.setWindowTitle("AI Assistant")
@@ -1016,10 +1023,59 @@ class MainWindow(QMainWindow):
         self.input_container.hide()  # 初始隱藏
 
         self._pending_geometry_refresh = False
+        
+        # 连接确认信号到槽
+        self.confirm_requested.connect(self._handle_confirm_request)
 
     def set_input_callback(self, callback):
         """設置輸入回調函數"""
         self.input_callback = callback
+
+    @Slot(str, str, object)
+    def _handle_confirm_request(self, message: str, default_choice: str, result_container: object):
+        """
+        槽函数：在主线程中处理确认请求
+        """
+        try:
+            logger.info(f"[主线程] Creating ConfirmDialog for: {message[:50]}...")
+            dialog = ConfirmDialog(message, default_choice, parent=self)
+            result_container.result = dialog.get_result()
+            logger.info(f"[主线程] Dialog result: {result_container.result}")
+        except Exception as e:
+            logger.error(f"[主线程] Error in _handle_confirm_request: {e}", exc_info=True)
+        finally:
+            # 退出事件循环
+            if hasattr(result_container, 'loop'):
+                result_container.loop.quit()
+    
+    def show_confirm_dialog(self, message: str, default_choice: str = '') -> bool:
+        """
+        顯示確認對話框（線程安全）
+        使用信号-槽机制和 QEventLoop 确保对话框在主线程中创建和显示
+        """
+        logger.info(f"[工作线程] show_confirm_dialog called: {message[:50]}...")
+        
+        # 使用简单的对象来存储结果和事件循环
+        class ResultContainer:
+            def __init__(self):
+                self.result = False
+                self.loop = None
+        
+        result_container = ResultContainer()
+        
+        # 创建事件循环用于等待
+        result_container.loop = QEventLoop()
+        
+        # 发送信号（Qt 会自动调度到主线程）
+        logger.info("[工作线程] Emitting confirm_requested signal...")
+        self.confirm_requested.emit(message, default_choice, result_container)
+        
+        # 运行事件循环，直到槽函数调用 loop.quit()
+        logger.info("[工作线程] Starting event loop...")
+        result_container.loop.exec()
+        
+        logger.info(f"[工作线程] Dialog closed, returning: {result_container.result}")
+        return result_container.result
 
     def on_input_submitted(self):
         """處理文字輸入提交"""
@@ -1138,6 +1194,89 @@ class MainWindow(QMainWindow):
                 self.INPUT_HEIGHT,
             )
             self.input_container.show()
+
+
+class ConfirmDialog(QDialog):
+    """確認對話框，用於工具執行確認"""
+    
+    def __init__(self, message: str, default_choice: str = '', parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("工具執行確認")
+        self.setModal(True)
+        self.setMinimumWidth(400)
+        
+        # 設置樣式
+        self.setStyleSheet("""
+            QDialog {
+                background-color: #2b2b2b;
+                color: #ffffff;
+                border-radius: 10px;
+            }
+            QLabel {
+                color: #ffffff;
+                font-size: 14px;
+                padding: 10px;
+            }
+            QPushButton {
+                background-color: #007AFF;
+                color: white;
+                border: none;
+                border-radius: 5px;
+                padding: 8px 16px;
+                font-size: 13px;
+                min-width: 80px;
+            }
+            QPushButton:hover {
+                background-color: #329DFF;
+            }
+            QPushButton:pressed {
+                background-color: #0051D5;
+            }
+            QPushButton#cancelButton {
+                background-color: #5a5a5a;
+            }
+            QPushButton#cancelButton:hover {
+                background-color: #6a6a6a;
+            }
+        """)
+        
+        # 創建佈局
+        layout = QVBoxLayout(self)
+        layout.setSpacing(20)
+        layout.setContentsMargins(20, 20, 20, 20)
+        
+        # 訊息標籤
+        message_label = QLabel(message)
+        message_label.setWordWrap(True)
+        message_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        layout.addWidget(message_label)
+        
+        # 按鈕區域
+        button_box = QDialogButtonBox()
+        
+        yes_button = button_box.addButton("允許", QDialogButtonBox.AcceptRole)
+        no_button = button_box.addButton("拒絕", QDialogButtonBox.RejectRole)
+        no_button.setObjectName("cancelButton")
+        
+        # 根據默認選擇設置默認按鈕
+        if default_choice.upper() == 'Y':
+            yes_button.setDefault(True)
+            yes_button.setFocus()
+        elif default_choice.upper() == 'N':
+            no_button.setDefault(True)
+            no_button.setFocus()
+        
+        button_box.accepted.connect(self.accept)
+        button_box.rejected.connect(self.reject)
+        
+        layout.addWidget(button_box)
+        
+        self.result_value = False
+    
+    def get_result(self) -> bool:
+        """顯示對話框並返回結果"""
+        result = self.exec()
+        return result == QDialog.Accepted
 
 
 if __name__ == "__main__":
