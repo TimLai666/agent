@@ -1039,9 +1039,9 @@ class MainWindow(QMainWindow):
         self.setGeometry(100, 100, self.FIXED_WIDTH, self.FIXED_HEIGHT)
         self.setFixedSize(self.FIXED_WIDTH, self.FIXED_HEIGHT)
         self.arcWidget = ArcWidget()
-        # Essential for translucency and frameless
+        # Essential for translucency and frameless, and always on top
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self.setWindowFlags(Qt.WindowType.FramelessWindowHint)
+        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
         self.setCentralWidget(self.arcWidget)
 
         self.old_pos = None  # 初始化拖拽位置
