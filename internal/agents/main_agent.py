@@ -433,12 +433,14 @@ class MainAgent:
                 elif current_tool not in allowed_names:
                     # 檢查是否為 MCP 工具
                     if isinstance(current_tool, str) and self._is_mcp_tool(current_tool):
-                        # MCP 工具必須由 agent.run() 直接調用，不能在 plan execution 中執行
-                        current_error = (
-                            f"Tool '{current_tool}' is an MCP tool that must be called by the agent runtime directly. "
-                            "MCP tools cannot be executed in plan mode. Consider using skip_plan_execution=True or "
-                            "let the LLM call this tool in its normal execution flow."
+                        # MCP 工具的錯誤：記錄後跳出，不進入 recovery
+                        # 這樣錯誤資訊會被傳遞給 LLM，由 LLM 生成友好的回應
+                        step_meta["error"] = (
+                            f"MCP tool '{current_tool}' cannot be executed in plan mode. "
+                            "This tool requires agent runtime context."
                         )
+                        results.append(f"  -> MCP tool error: {step_meta['error']}")
+                        break  # 跳出 while True 循環，不進入 recovery
                     else:
                         current_error = f"Tool '{current_tool}' is not registered."
                 
@@ -1533,7 +1535,7 @@ class MainAgent:
         self,
         prompt: str,
         message_history: list[ModelRequest | ModelResponse] | None = None,
-        skip_plan_execution: bool = True,  # 默認跳過 plan execution，讓 agent 自己調用工具
+        skip_plan_execution: bool = False,  # 默認跳過 plan execution，讓 agent 自己調用工具
     ) -> str:
         self._previous_user_prompt = self._last_user_prompt
         self._last_user_prompt = prompt
@@ -1561,14 +1563,52 @@ class MainAgent:
                         exec_text = "\n".join(parallel_results)
                         prompt = f"{prompt}\n\nSub-agent results:\n{exec_text}"
             
-            # 直接調用 agent.run()，讓它自己決定工具調用
-            result = await self.agent.run(prompt, message_history=message_history)
+            # 直接調用 agent.run()，捕獲 MCP 工具錯誤
             try:
-                self._last_messages = result.all_messages()
-            except Exception:
-                self._last_messages = None
-            self._last_assistant_reply = self._extract_user_reply(result.output or "")
-            return result.output or ""
+                result = await self.agent.run(prompt, message_history=message_history)
+                try:
+                    self._last_messages = result.all_messages()
+                except Exception:
+                    self._last_messages = None
+                self._last_assistant_reply = self._extract_user_reply(result.output or "")
+                return result.output or ""
+            except Exception as e:
+                # 捕獲 MCP 工具錯誤，將錯誤資訊附加到 prompt 中，讓 LLM 生成友好的回應
+                error_msg = str(e)
+                logger.warning(f"Tool execution error in agent.run(): {error_msg}")
+                
+                # 將錯誤作為執行結果附加到 prompt
+                error_context = (
+                    f"\n\nTool execution error:\n{error_msg}\n\n"
+                    "Please provide a helpful response to the user explaining that the external service "
+                    "is temporarily unavailable and suggest alternatives if possible."
+                )
+                
+                # 重新調用 agent.run()，這次不呼叫工具，只是讓 LLM 看到錯誤並生成回應
+                try:
+                    result = await self.agent.run(prompt + error_context, message_history=message_history)
+                    try:
+                        self._last_messages = result.all_messages()
+                    except Exception:
+                        self._last_messages = None
+                    self._last_assistant_reply = self._extract_user_reply(result.output or "")
+                    return result.output or ""
+                except Exception as final_error:
+                    # 最後的 fallback - 建立簡單的錯誤說明讓 agent 理解
+                    logger.error(f"All retry attempts failed: {final_error}")
+                    final_prompt = (
+                        f"The user asked: {self._last_user_prompt}\n\n"
+                        f"A tool execution error occurred: {error_msg}\n"
+                        "The external service is currently unavailable. "
+                        "Please provide a helpful and friendly response to the user."
+                    )
+                    # 最後一次嘗試，不帶歷史記錄，簡單調用
+                    try:
+                        result = await self.agent.run(final_prompt)
+                        return result.output or "抱歉，目前無法連接到外部服務。請稍後再試。"
+                    except Exception:
+                        # 真的完全失敗了，返回基本訊息
+                        return "抱歉，系統暫時無法處理您的請求。請稍後再試。"
 
         # 舊的 plan execution 模式（保留以備需要）
         # Skills are now tool-based (use_skill tool) - no automatic injection
@@ -1628,6 +1668,7 @@ class MainAgent:
         self,
         prompt: str,
         message_history: list[ModelRequest | ModelResponse] | None = None,
+        skip_plan_execution: bool = False,  # 默認使用 plan execution
     ):
         """Streamed version of run(): yields chunks from philosopher/subagents/main agent as they produce output."""
         self._previous_user_prompt = self._last_user_prompt
@@ -1635,6 +1676,108 @@ class MainAgent:
         prompt, explicit_subagents = self._prepare_prompt(prompt)
         prompt, trigger_state = self._apply_keyword_triggers(prompt)
 
+        # 如果啟用 skip_plan_execution，直接讓 agent.run_stream() 自己調用工具
+        if skip_plan_execution:
+            # 只處理 sub-agents（如果需要）
+            auto_subagents = (
+                []
+                if explicit_subagents
+                else await self._decide_sub_agents(prompt, message_history=message_history)
+            )
+            parallel_subagents = explicit_subagents or auto_subagents
+            
+            if parallel_subagents:
+                order, tasks = self._start_subagent_tasks(parallel_subagents, prompt)
+                if order and tasks:
+                    parallel_results, parallel_meta = await self._collect_subagent_results(
+                        order, tasks, prompt
+                    )
+                    self._last_execution_steps = parallel_meta
+                    if parallel_results:
+                        exec_text = "\n".join(parallel_results)
+                        prompt = f"{prompt}\n\nSub-agent results:\n{exec_text}"
+            
+            # 直接調用 agent.run_stream()，捕獲 MCP 工具錯誤
+            try:
+                async with self.agent.run_stream(
+                    user_prompt=prompt, message_history=message_history
+                ) as result:
+                    collected = ""
+                    try:
+                        async for chunk in result.stream_text(delta=True):
+                            if not chunk:
+                                continue
+                            collected += chunk
+                            yield chunk
+                    except Exception as stream_error:
+                        # 捕獲 stream 過程中的錯誤（例如 MCP 工具錯誤）
+                        error_msg = str(stream_error)
+                        logger.warning(f"Tool execution error during streaming: {error_msg}")
+                        
+                        # yield 錯誤提示給 LLM，讓它生成友好回應
+                        error_prompt = (
+                            f"\n\n[System Note: A tool execution error occurred: {error_msg}. "
+                            "Please provide a helpful response explaining the service is temporarily unavailable.]"
+                        )
+                        yield error_prompt
+                        
+                    try:
+                        self._last_messages = result.all_messages()
+                    except Exception:
+                        self._last_messages = None
+                    self._last_assistant_reply = self._extract_user_reply(collected)
+                return
+            except Exception as e:
+                # 捕獲 context manager 層級的錯誤
+                error_msg = str(e)
+                logger.warning(f"Tool execution error in agent.run_stream(): {error_msg}")
+                
+                # 將錯誤作為執行結果附加到 prompt
+                error_context = (
+                    f"\n\nTool execution error:\n{error_msg}\n\n"
+                    "Please provide a helpful response to the user explaining that the external service "
+                    "is temporarily unavailable and suggest alternatives if possible."
+                )
+                
+                # 重新調用 agent.run_stream()，這次不呼叫工具，只是讓 LLM 看到錯誤並生成回應
+                try:
+                    async with self.agent.run_stream(
+                        user_prompt=prompt + error_context, message_history=message_history
+                    ) as result:
+                        collected = ""
+                        async for chunk in result.stream_text(delta=True):
+                            if not chunk:
+                                continue
+                            collected += chunk
+                            yield chunk
+                        try:
+                            self._last_messages = result.all_messages()
+                        except Exception:
+                            self._last_messages = None
+                        self._last_assistant_reply = self._extract_user_reply(collected)
+                    return
+                except Exception as final_error:
+                    # 最後的 fallback - 建立簡單的錯誤說明讓 agent 理解
+                    logger.error(f"All retry attempts failed: {final_error}")
+                    final_prompt = (
+                        f"The user asked: {self._last_user_prompt}\n\n"
+                        f"A tool execution error occurred: {error_msg}\n"
+                        "The external service is currently unavailable. "
+                        "Please provide a helpful and friendly response to the user."
+                    )
+                    # 最後一次嘗試
+                    try:
+                        async with self.agent.run_stream(user_prompt=final_prompt) as result:
+                            async for chunk in result.stream_text(delta=True):
+                                if chunk:
+                                    yield chunk
+                        return
+                    except Exception:
+                        # 真的完全失敗了
+                        yield "抱歉，系統暫時無法處理您的請求。請稍後再試。"
+                        return
+
+        # 舊的 plan execution 模式（保留以備需要）
         # Skills are now tool-based (use_skill tool) - no automatic injection
         plan_list = await self._build_plan_list(prompt, message_history=message_history)
         if explicit_subagents:
@@ -1762,12 +1905,17 @@ class MainAgent:
                     elif current_tool not in allowed_names:
                         # 檢查是否為 MCP 工具
                         if isinstance(current_tool, str) and self._is_mcp_tool(current_tool):
-                            # MCP 工具必須由 agent.run() 直接調用，不能在 plan execution 中執行
-                            current_error = (
-                                f"Tool '{current_tool}' is an MCP tool that must be called by the agent runtime directly. "
-                                "MCP tools cannot be executed in plan mode. Consider using skip_plan_execution=True or "
-                                "let the LLM call this tool in its normal execution flow."
+                            # MCP 工具的錯誤：記錄後跳出，不進入 recovery
+                            # 這樣錯誤資訊會被傳遞給 LLM，由 LLM 生成友好的回應
+                            error_msg = (
+                                f"MCP tool '{current_tool}' cannot be executed in plan mode. "
+                                "This tool requires agent runtime context."
                             )
+                            step_meta["error"] = error_msg
+                            line = f"  -> MCP tool error: {error_msg}"
+                            yield line + "\n"
+                            exec_results.append(line)
+                            break  # 跳出 while True 循環，不進入 recovery
                         else:
                             current_error = f"Tool '{current_tool}' is not registered."
                     
@@ -1934,17 +2082,53 @@ class MainAgent:
             prompt = f"{prompt}\n\nTool execution results:\n{exec_text}"
         if current_time:
             prompt = f"Current time: {current_time}\n\n{prompt}"
-        async with self.agent.run_stream(
-            user_prompt=prompt, message_history=message_history
-        ) as result:
-            collected = ""
-            async for chunk in result.stream_text(delta=True):
-                if not chunk:
-                    continue
-                collected += chunk
-                yield chunk
+        
+        # 捕獲最終 agent.run_stream() 的錯誤（包括 MCP 工具錯誤）
+        try:
+            async with self.agent.run_stream(
+                user_prompt=prompt, message_history=message_history
+            ) as result:
+                collected = ""
+                try:
+                    async for chunk in result.stream_text(delta=True):
+                        if not chunk:
+                            continue
+                        collected += chunk
+                        yield chunk
+                except Exception as stream_error:
+                    # 捕獲 stream 過程中的錯誤（例如 MCP 工具錯誤）
+                    error_msg = str(stream_error)
+                    logger.warning(f"Tool execution error during streaming: {error_msg}")
+                    
+                    # 建立錯誤上下文給 agent
+                    error_context = (
+                        f"\n\n[System Note: A tool execution error occurred: {error_msg}. "
+                        "Please provide a helpful response to the user explaining the situation "
+                        "and suggesting alternatives if applicable.]"
+                    )
+                    yield error_context
+                    
+                try:
+                    self._last_messages = result.all_messages()
+                except Exception:
+                    self._last_messages = None
+                self._last_assistant_reply = self._extract_user_reply(collected)
+        except Exception as e:
+            # 捕獲 context manager 層級的錯誤
+            error_msg = str(e)
+            logger.warning(f"Error in agent.run_stream(): {error_msg}")
+            
+            # 讓 agent 看到錯誤並生成回應
+            error_prompt = (
+                f"The user asked: {self._last_user_prompt}\n\n"
+                f"A tool execution error occurred: {error_msg}\n"
+                "Please provide a helpful and friendly response explaining the situation."
+            )
             try:
-                self._last_messages = result.all_messages()
+                async with self.agent.run_stream(user_prompt=error_prompt) as result:
+                    async for chunk in result.stream_text(delta=True):
+                        if chunk:
+                            yield chunk
             except Exception:
-                self._last_messages = None
-            self._last_assistant_reply = self._extract_user_reply(collected)
+                # 真的完全失敗了
+                yield "抱歉，系統暫時無法處理您的請求。請稍後再試。"
