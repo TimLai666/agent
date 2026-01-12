@@ -23,7 +23,15 @@ class PhilosopherCoAgent(CoAgent):
     def create(
         cls, base_config: AgentConfig, env: dict[str, str], http_client: AsyncClient
     ) -> "PhilosopherCoAgent":
-        config = load_agent_config_chain(["MAIN", cls.ENV_PREFIX], base_config, env)
+        # Philosopher should use PHILOSOPHER_* values only and not inherit MAIN_* settings.
+        philosopher_defaults = AgentConfig(
+            name="philosopher",
+            base_url=base_config.base_url,
+            api_key=base_config.api_key,
+            model_name=base_config.model_name,
+            temperature=0.2,
+        )
+        config = load_agent_config_chain([cls.ENV_PREFIX], philosopher_defaults, env)
         model = create_openai_model(config, http_client)
         agent: Agent[None, str] = Agent(
             model=model,

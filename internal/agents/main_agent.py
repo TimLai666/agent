@@ -85,7 +85,15 @@ class MainAgent:
                 logger.exception("Failed to load sub-agents; continuing without them")
                 sub_agents = SubAgentRegistry({}, {})
 
-        config = load_agent_config_chain([cls.ENV_PREFIX], base_config, env)
+        # Apply MAIN-specific default temperature of 0.5 when MAIN_MODEL_TEMPERATURE is not set.
+        main_defaults = AgentConfig(
+            name="main",
+            base_url=base_config.base_url,
+            api_key=base_config.api_key,
+            model_name=base_config.model_name,
+            temperature=0.5,
+        )
+        config = load_agent_config_chain([cls.ENV_PREFIX], main_defaults, env)
         model = create_openai_model(config, http_client)
         instructions = build_runtime_instructions(get_prompt(cls.PROMPT_KEY))
         if sub_agents and not sub_agents.is_empty():

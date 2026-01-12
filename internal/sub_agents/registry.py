@@ -123,7 +123,17 @@ def load_sub_agent_registry(
     if not specs:
         return SubAgentRegistry({}, {})
 
-    config = load_agent_config_chain(["MAIN", "SUB"], base_config, env)
+    # Sub-agents should use SUB_* values only and not inherit MAIN_* settings.
+    config = load_agent_config_chain(["SUB"], base_config, env)
+    # If SUB_MODEL_TEMPERATURE is not specified, default sub-agents to temperature 1.0
+    if not env.get("SUB_MODEL_TEMPERATURE"):
+        config = AgentConfig(
+            name=config.name,
+            base_url=config.base_url,
+            api_key=config.api_key,
+            model_name=config.model_name,
+            temperature=1.0,
+        )
     model = create_openai_model(config, http_client)
 
     spec_map: dict[str, SubAgentSpec] = {}
