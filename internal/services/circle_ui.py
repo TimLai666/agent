@@ -972,38 +972,40 @@ class ArcWidget(QWidget):
             int(self.circle.diameter),
         )
 
-        # 第二層：中等擴散
+        # 第二層：中等擴散（縮小範圍，降低強度）
         mid_grad = QRadialGradient(
-            ball_center_x, ball_center_y, self.circle.diameter / 1.2
+            ball_center_x, ball_center_y, self.circle.diameter / 1.5
         )
         c_mid = QColor(circle_color)
-        c_mid.setAlpha(100)
+        c_mid.setAlpha(80)
         mid_grad.setColorAt(0, c_mid)
         mid_grad.setColorAt(1, Qt.transparent)
 
         painter.setBrush(mid_grad)
+        # 縮小中層的繪製範圍以配合較小的漸層半徑
+        painter.drawEllipse(
+            int(ball_center_x - self.circle.diameter * (4.0 / 3.0) / 2),
+            int(ball_center_y - self.circle.diameter * (4.0 / 3.0) / 2),
+            int(self.circle.diameter * 4.0 / 3.0),
+            int(self.circle.diameter * 4.0 / 3.0),
+        )
+
+        # 第三層：廣域外溢（大幅縮小外溢範圍，並降低透明度）
+        outer_grad = QRadialGradient(
+            ball_center_x, ball_center_y, self.circle.diameter * 1.0
+        )
+        c_outer = QColor(circle_color)
+        c_outer.setAlpha(20)
+        outer_grad.setColorAt(0, c_outer)
+        outer_grad.setColorAt(1, Qt.transparent)
+
+        painter.setBrush(outer_grad)
+        # outer 使用 2x radius 的繪製範圍
         painter.drawEllipse(
             int(ball_center_x - self.circle.diameter),
             int(ball_center_y - self.circle.diameter),
             int(self.circle.diameter * 2),
             int(self.circle.diameter * 2),
-        )
-
-        # 第三層：廣域外溢
-        outer_grad = QRadialGradient(
-            ball_center_x, ball_center_y, self.circle.diameter * 1.5
-        )
-        c_outer = QColor(circle_color)
-        c_outer.setAlpha(40)
-        outer_grad.setColorAt(0, c_outer)
-        outer_grad.setColorAt(1, Qt.transparent)
-
-        painter.setBrush(outer_grad)
-        painter.drawEllipse(
-            int(ball_center_x - self.circle.diameter * 1.5),
-            int(ball_center_y - self.circle.diameter * 1.5),
-            int(self.circle.diameter * 3),
-            int(self.circle.diameter * 3),
         )
 
         # 繪製旋轉的圓弧
@@ -1047,28 +1049,13 @@ class MainWindow(QMainWindow):
         self.old_pos = None  # 初始化拖拽位置
         self.input_callback = None  # 回調函數，用於處理用戶輸入
         
-        # 固定球的位置參數（球心在底部往上150px）
-        self.BALL_CENTER_FROM_BOTTOM = 150
-        # 固定輸入框的位置（距離底部20px）
-        self.INPUT_FROM_BOTTOM = 20
+        # 固定球的位置參數（球心在底部往上130px，縮小與輸入框的距離）
+        self.BALL_CENTER_FROM_BOTTOM = 130
+        # 固定輸入框的位置（距離底部40px，使輸入框上移，與球更接近）
+        self.INPUT_FROM_BOTTOM = 40
         self.INPUT_HEIGHT = 45
 
-        self.close_button = QPushButton("×", self)
-        self.close_button.setFixedSize(26, 26)
-        self.close_button.setStyleSheet(
-            "QPushButton { "
-            "background-color: rgba(255, 69, 58, 180); "
-            "color: white; "
-            "border-radius: 13px; "
-            "font-size: 18px; "
-            "font-weight: bold; "
-            "border: none; "
-            "line-height: 22px; "
-            "}"
-            "QPushButton:hover { background-color: rgba(255, 69, 58, 255); }"
-        )
-        self.close_button.clicked.connect(self.close)
-        self.close_button.raise_()
+        # 移除右上角關閉按鈕以簡化 UI（由視窗系統或快捷鍵關閉）
 
         # 創建講話框 - 改用新設計的 SiriResponseBubble
         self.speech_bubble = SiriResponseBubble()
@@ -1266,8 +1253,7 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
-        # 定位關閉按鈕到右上角（視窗固定，位置不變）
-        self.close_button.move(self.FIXED_WIDTH - self.close_button.width() - 10, 10)
+
 
         # 計算氣泡位置：疊到球的一半
         window_center_x = self.FIXED_WIDTH // 2
