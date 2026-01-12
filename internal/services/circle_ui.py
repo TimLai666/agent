@@ -1237,7 +1237,7 @@ class MainWindow(QMainWindow):
         event.accept()
 
     def update_speech_bubble(self, text):
-        """更新對話框內容，輸出框從底部往上生長，球和輸入框保持固定"""
+        """更新對話框內容，輸出框疊到球的上方一半"""
         self.speech_bubble.set_content(text)
 
         # Process events to allow layout updates before measuring
@@ -1249,8 +1249,8 @@ class MainWindow(QMainWindow):
         
         # 計算內容需要的高度
         needed_height = self.speech_bubble.content_height() + padding
-        # 初始大小較小（80px），最大可達到球的位置上方
-        max_bubble_height = self.FIXED_HEIGHT - self.BALL_CENTER_FROM_BOTTOM - 100
+        # 氣泡最大高度限制
+        max_bubble_height = self.FIXED_HEIGHT - 200
         bubble_height = min(
             max(needed_height, 80),  # 最小高度改為80
             max_bubble_height,
@@ -1269,29 +1269,18 @@ class MainWindow(QMainWindow):
         # 定位關閉按鈕到右上角（視窗固定，位置不變）
         self.close_button.move(self.FIXED_WIDTH - self.close_button.width() - 10, 10)
 
-        # 計算氣泡位置：從球的上方往上生長
+        # 計算氣泡位置：疊到球的一半
         window_center_x = self.FIXED_WIDTH // 2
         # 球心位於底部往上BALL_CENTER_FROM_BOTTOM的位置
         ball_center_y = self.FIXED_HEIGHT - self.BALL_CENTER_FROM_BOTTOM
         
-        # 圓弧的有效半徑
-        circle_radius = self.arcWidget.circle.diameter // 2
-        max_arc_radius = 50
-        effective_radius = circle_radius + max_arc_radius
-        
-        # 球的頂部位置
-        ball_top_y = ball_center_y - effective_radius
-        
-        # 氣泡底部與球頂部有一個小的重疊
-        overlap_offset = 30
+        # 氣泡只疊到球的一半（氣泡下邊緣對齊球心）
         bubble_x = window_center_x - bubble_width // 2
-        bubble_y = ball_top_y - bubble_height + overlap_offset
+        bubble_y = ball_center_y - bubble_height
         
-        # 確保氣泡不會超出頂部
-        bubble_y = max(20, bubble_y)
-        
-        # 確保對話框不會超出視窗左右邊界
+        # 確保氣泡不會超出視窗邊界
         bubble_x = max(10, min(bubble_x, self.FIXED_WIDTH - bubble_width - 10))
+        bubble_y = max(20, min(bubble_y, self.FIXED_HEIGHT - bubble_height - 80))
 
         # 設置講話框位置
         self.speech_bubble.move(bubble_x, bubble_y)
