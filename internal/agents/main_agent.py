@@ -257,6 +257,7 @@ class MainAgent:
         self._last_user_prompt: str | None = None
         self._previous_user_prompt: str | None = None
         self._last_assistant_reply: str | None = None
+        self._mcp_tool_names: set[str] | None = None  # 緩存 MCP 工具名稱列表
         # tools are registered via add_all_tools during create()
 
     async def _extract_execution_plan(self, text: str) -> dict | None:
@@ -430,8 +431,19 @@ class MainAgent:
                 if not current_tool:
                     current_error = "Missing 'tool' field."
                 elif current_tool not in allowed_names:
-                    current_error = f"Tool '{current_tool}' is not registered."
-                else:
+                    # 檢查是否為 MCP 工具
+                    if isinstance(current_tool, str) and self._is_mcp_tool(current_tool):
+                        # MCP 工具必須由 agent.run() 直接調用，不能在 plan execution 中執行
+                        current_error = (
+                            f"Tool '{current_tool}' is an MCP tool that must be called by the agent runtime directly. "
+                            "MCP tools cannot be executed in plan mode. Consider using skip_plan_execution=True or "
+                            "let the LLM call this tool in its normal execution flow."
+                        )
+                    else:
+                        current_error = f"Tool '{current_tool}' is not registered."
+                
+                if not current_error and current_tool in allowed_names:
+                    
                     if current_args:
                         current_args = self._resolve_args(current_args, step_outputs)
                     if current_args is None:
@@ -545,7 +557,6 @@ class MainAgent:
         note: str | None,
     ) -> dict[str, Any] | None:
         tools_text: str = self._format_tools_context().strip()
-        print(tools_text)
         sub_agents_text = self._format_sub_agents_context().strip()
         note_text = f"Note: {note}\n" if note else ""
         prompt = (
@@ -772,9 +783,13 @@ class MainAgent:
         return "\n".join(lines) + "\n\n"
 
     def _format_tools_context(self) -> str:
+        """格式化所有可用工具的說明，包含直接註冊的工具和 MCP Server。"""
+        lines = []
+        
+        # 1. 直接註冊的工具
         tools_meta = self._get_function_tools()
         if tools_meta:
-            tools_lines = ["Available tools:"]
+            lines.append("Available tools:")
             for name, tool in tools_meta.items():
                 doc = tool.description.splitlines()[0] if tool.description else ""
                 params = []
@@ -785,20 +800,109 @@ class MainAgent:
                     params = []
                 sig = f"({', '.join(params)})" if params else "()"
                 if doc:
-                    tools_lines.append(f"- {name}{sig}: {doc}")
+                    lines.append(f"- {name}{sig}: {doc}")
                 else:
-                    tools_lines.append(f"- {name}{sig}")
-            return "\n".join(tools_lines) + "\n\n"
-        return "Available tools: (none)\n\n"
+                    lines.append(f"- {name}{sig}")
+        else:
+            lines.append("Available tools: (none)")
+        
+        # 2. MCP Servers（在運行時由 pydantic-ai 動態處理）
+        mcp_servers = self._get_mcp_servers()
+        if mcp_servers:
+            lines.append("\nMCP Servers (tools available at runtime):")
+            for server in mcp_servers:
+                prefix = getattr(server, 'tool_prefix', None) or 'no-prefix'
+                command = getattr(server, 'command', 'unknown')
+                args = getattr(server, 'args', [])
+                server_name = f"{command} {' '.join(args) if args else ''}".strip()
+                if prefix != 'no-prefix':
+                    lines.append(f"- {prefix}_* (from {server_name})")
+                else:
+                    lines.append(f"- MCP Server: {server_name}")
+        
+        return "\n".join(lines) + "\n\n"
 
     def _get_function_tools(self) -> dict[str, Any]:
+        """取得所有可用工具，包含直接註冊的工具和 MCP 工具。
+        
+        注意：這個方法返回的是已經註冊到 agent 的工具。
+        MCP 工具只有在 run_mcp_servers() context 內且 LLM 實際調用時才會被動態解析。
+        """
+        all_tools = {}
+        
+        # 1. 取得直接註冊的工具
         tools_meta = getattr(self.agent, "_function_tools", None)
         if tools_meta:
-            return tools_meta
+            all_tools.update(tools_meta)
+        
+        # 2. 取得 toolset 中的工具
         toolset = getattr(self.agent, "_function_toolset", None)
         if toolset and getattr(toolset, "tools", None):
-            return toolset.tools
-        return {}
+            all_tools.update(toolset.tools)
+        
+        return all_tools
+    
+    def _get_mcp_servers(self) -> list:
+        """取得所有 MCP Server 實例。"""
+        user_toolsets = getattr(self.agent, "_user_toolsets", [])
+        from pydantic_ai.mcp import MCPServerStdio
+        return [ts for ts in user_toolsets if isinstance(ts, MCPServerStdio)]
+    
+    def _try_get_mcp_tool_names(self) -> set[str] | None:
+        """嘗試獲取所有 MCP 工具的名稱列表。
+        
+        注意：只有在 MCP Server 已經啟動並初始化後才能獲取工具列表。
+        如果無法獲取（例如 server 未啟動），返回 None。
+        """
+        mcp_servers = self._get_mcp_servers()
+        if not mcp_servers:
+            return None
+        
+        tool_names = set()
+        for server in mcp_servers:
+            # 檢查 server 是否已經運行
+            is_running = getattr(server, 'is_running', False)
+            if not is_running:
+                # Server 未運行，無法獲取工具列表
+                continue
+            
+            try:
+                # pydantic-ai 的 MCPServerStdio 有 _cached_tools 屬性
+                # 在 server 連接後會緩存工具列表
+                cached_tools = getattr(server, '_cached_tools', None)
+                if cached_tools and isinstance(cached_tools, list):
+                    # 從緩存的工具列表中提取名稱
+                    for tool in cached_tools:
+                        # 工具可能是 dict 或對象
+                        if isinstance(tool, dict):
+                            name = tool.get('name')
+                        else:
+                            name = getattr(tool, 'name', None)
+                        if name:
+                            tool_names.add(name)
+            except Exception:
+                # 忽略錯誤，繼續處理下一個 server
+                pass
+        
+        return tool_names if tool_names else None
+    
+    def _is_mcp_tool(self, tool_name: str) -> bool:
+        """檢查是否為 MCP 工具。
+        
+        從 MCP Server 的 _cached_tools 獲取實際的工具列表進行比對。
+        """
+        # 如果有緩存，直接使用
+        if self._mcp_tool_names is not None:
+            return tool_name in self._mcp_tool_names
+        
+        # 嘗試從 MCP Server 獲取工具列表
+        mcp_tool_names = self._try_get_mcp_tool_names()
+        if mcp_tool_names:
+            self._mcp_tool_names = mcp_tool_names
+            return tool_name in mcp_tool_names
+        
+        # 無法獲取工具列表
+        return False
 
     def _get_recent_tool_output(self) -> str | None:
         for step in reversed(self._last_execution_steps):
@@ -1429,12 +1533,44 @@ class MainAgent:
         self,
         prompt: str,
         message_history: list[ModelRequest | ModelResponse] | None = None,
+        skip_plan_execution: bool = True,  # 默認跳過 plan execution，讓 agent 自己調用工具
     ) -> str:
         self._previous_user_prompt = self._last_user_prompt
         self._last_user_prompt = prompt
         prompt, explicit_subagents = self._prepare_prompt(prompt)
         prompt, trigger_state = self._apply_keyword_triggers(prompt)
 
+        # 如果啟用 skip_plan_execution，直接讓 agent.run() 自己調用工具
+        if skip_plan_execution:
+            # 只處理 sub-agents（如果需要）
+            auto_subagents = (
+                []
+                if explicit_subagents
+                else await self._decide_sub_agents(prompt, message_history=message_history)
+            )
+            parallel_subagents = explicit_subagents or auto_subagents
+            
+            if parallel_subagents:
+                order, tasks = self._start_subagent_tasks(parallel_subagents, prompt)
+                if order and tasks:
+                    parallel_results, parallel_meta = await self._collect_subagent_results(
+                        order, tasks, prompt
+                    )
+                    self._last_execution_steps = parallel_meta
+                    if parallel_results:
+                        exec_text = "\n".join(parallel_results)
+                        prompt = f"{prompt}\n\nSub-agent results:\n{exec_text}"
+            
+            # 直接調用 agent.run()，讓它自己決定工具調用
+            result = await self.agent.run(prompt, message_history=message_history)
+            try:
+                self._last_messages = result.all_messages()
+            except Exception:
+                self._last_messages = None
+            self._last_assistant_reply = self._extract_user_reply(result.output or "")
+            return result.output or ""
+
+        # 舊的 plan execution 模式（保留以備需要）
         # Skills are now tool-based (use_skill tool) - no automatic injection
         plan_list = await self._build_plan_list(prompt, message_history=message_history)
         if explicit_subagents:
@@ -1624,8 +1760,19 @@ class MainAgent:
                     if not current_tool:
                         current_error = "Missing 'tool' field."
                     elif current_tool not in allowed_names:
-                        current_error = f"Tool '{current_tool}' is not registered."
-                    else:
+                        # 檢查是否為 MCP 工具
+                        if isinstance(current_tool, str) and self._is_mcp_tool(current_tool):
+                            # MCP 工具必須由 agent.run() 直接調用，不能在 plan execution 中執行
+                            current_error = (
+                                f"Tool '{current_tool}' is an MCP tool that must be called by the agent runtime directly. "
+                                "MCP tools cannot be executed in plan mode. Consider using skip_plan_execution=True or "
+                                "let the LLM call this tool in its normal execution flow."
+                            )
+                        else:
+                            current_error = f"Tool '{current_tool}' is not registered."
+                    
+                    if not current_error and current_tool in allowed_names:
+                        
                         if current_args:
                             current_args = self._resolve_args(
                                 current_args, step_outputs
