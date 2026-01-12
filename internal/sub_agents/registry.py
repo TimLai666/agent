@@ -152,9 +152,6 @@ def load_sub_agent_registry(
         )
         add_all_tools(
             agent,
-            config.model_name,
-            config.base_url,
-            config.api_key,
         )
         if philosopher:
             _register_philosopher_tools(agent, philosopher)

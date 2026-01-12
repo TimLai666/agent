@@ -12,9 +12,6 @@ from .tools.website_tools import add_website_tools
 
 def add_all_tools(
     agent: Agent,
-    model: str,
-    base_url: str | None = None,
-    api_key: str | None = None,
     extra_tools: list[Callable] | None = None,
 ) -> None:
     """Add tools to the agent."""

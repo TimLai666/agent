@@ -242,9 +242,15 @@ class CollapsibleSection(QWidget):
             )
         else:
             self.spinner.stop()
-            self.button.setChecked(False)
-            self.button.setArrowType(Qt.RightArrow)
-            self.content.setVisible(False)
+            # 如果內容為空或只是placeholder，則收起區塊
+            content_text = self.content.toPlainText().strip()
+            has_real_content = content_text and "Waiting for" not in content_text
+            if not has_real_content:
+                self.button.setChecked(False)
+                self.button.setArrowType(Qt.RightArrow)
+                self.content.setVisible(False)
+            # 如果有真實內容，保持展開但停止spinner
+            # 不做任何操作，讓toggle由用戶手動控制
 
     def toggle(self):
         expanded = self.button.isChecked()
@@ -499,7 +505,7 @@ class SiriResponseBubble(QWidget):
                         spinner.start()
                         label = QTextBrowser(container)
                         label.setLineWrapMode(QTextEdit.WidgetWidth)
-                        label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+                        label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
                         label.setMarkdown(sub_content)
                         label.setOpenExternalLinks(True)
                         label.setStyleSheet(
@@ -513,16 +519,21 @@ class SiriResponseBubble(QWidget):
 
                         def update_spinner_label_height(b=label):
                             try:
+                                # 強制更新文件布局
+                                b.document().adjustSize()
                                 height = b.document().size().height()
-                                b.setFixedHeight(max(int(height) + 10, 24))
+                                min_height = max(int(height) + 20, 40)
+                                b.setMinimumHeight(min_height)
+                                b.setMaximumHeight(min_height)
                             except RuntimeError:
                                 pass
 
                         try:
                             label.textChanged.connect(update_spinner_label_height)
+                            label.document().contentsChanged.connect(update_spinner_label_height)
                         except Exception:
                             pass
-                        update_spinner_label_height()
+                        QTimer.singleShot(0, update_spinner_label_height)
                         h.addWidget(spinner)
                         h.setAlignment(spinner, Qt.AlignTop)
                         h.addWidget(label, 1)
@@ -534,27 +545,37 @@ class SiriResponseBubble(QWidget):
                         browser = QTextBrowser()
                         browser.setMarkdown(sub_content)
                         browser.setOpenExternalLinks(True)
+                        browser.setLineWrapMode(QTextEdit.WidgetWidth)
                         browser.setStyleSheet(
-                            "QTextBrowser { color: #FFFFFF; font-family: 'Segoe UI', 'Microsoft JhengHei', sans-serif; font-size: 16px; }"
+                            "QTextBrowser { color: #FFFFFF; font-family: 'Segoe UI', 'Microsoft JhengHei', sans-serif; font-size: 16px; line-height: 1.6; }"
                         )
                         browser.setFrameShape(QFrame.NoFrame)
                         browser.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
                         browser.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
                         browser.setTextInteractionFlags(Qt.TextSelectableByMouse)
                         browser.document().setDocumentMargin(0)
+                        browser.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
 
                         def update_browser_height(b=browser):
                             try:
-                                h2 = b.document().size().height()
-                                b.setFixedHeight(max(int(h2) + 10, 24))
+                                # 強制更新文件布局
+                                b.document().adjustSize()
+                                # 獲取文檔實際高度
+                                doc_size = b.document().size()
+                                h2 = doc_size.height()
+                                # 設置最小高度並添加額外的padding
+                                min_height = max(int(h2) + 20, 40)
+                                b.setMinimumHeight(min_height)
+                                b.setMaximumHeight(min_height)
                             except RuntimeError:
                                 pass
 
                         try:
                             browser.textChanged.connect(update_browser_height)
+                            browser.document().contentsChanged.connect(update_browser_height)
                         except Exception:
                             pass
-                        update_browser_height()
+                        QTimer.singleShot(0, update_browser_height)
                         self.layout.addWidget(browser)
                 continue
             else:
@@ -683,9 +704,14 @@ class ArcWidget(QWidget):
         # 取得圓圈顏色
         circle_color = self.circle.get_color(self.anim.currentValue())
 
-        # 計算球球位置 - 位於視窗高度80%的地方
+        # 計算球球位置 - 固定在底部往上150px的位置
         ball_center_x = self.width() / 2
-        ball_center_y = self.height() * 0.8  # 從頂部算起80%的位置
+        # 從父視窗獲取固定位置參數，如果沒有則使用預設值
+        parent = self.parent()
+        if parent and hasattr(parent, 'BALL_CENTER_FROM_BOTTOM'):
+            ball_center_y = self.height() - parent.BALL_CENTER_FROM_BOTTOM
+        else:
+            ball_center_y = self.height() - 150  # 預設值
 
         # 繪製多層底層發光圓 (Siri 般的層次感發光效果)
         # 第一層：核心高亮
@@ -764,7 +790,11 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("AI Assistant")
-        self.setGeometry(100, 100, 460, 800)  # 初始較小的尺寸
+        # 固定視窗大小
+        self.FIXED_WIDTH = 460
+        self.FIXED_HEIGHT = 800
+        self.setGeometry(100, 100, self.FIXED_WIDTH, self.FIXED_HEIGHT)
+        self.setFixedSize(self.FIXED_WIDTH, self.FIXED_HEIGHT)
         self.arcWidget = ArcWidget()
         # Essential for translucency and frameless
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
@@ -773,6 +803,12 @@ class MainWindow(QMainWindow):
 
         self.old_pos = None  # 初始化拖拽位置
         self.input_callback = None  # 回調函數，用於處理用戶輸入
+        
+        # 固定球的位置參數（球心在底部往上150px）
+        self.BALL_CENTER_FROM_BOTTOM = 150
+        # 固定輸入框的位置（距離底部20px）
+        self.INPUT_FROM_BOTTOM = 20
+        self.INPUT_HEIGHT = 45
 
         self.close_button = QPushButton("×", self)
         self.close_button.setFixedSize(26, 26)
@@ -893,36 +929,40 @@ class MainWindow(QMainWindow):
         if self.input_container.isVisible():
             self.input_container.hide()
         else:
-            # 設置輸入框位置（在視窗底部）
-            input_width = min(self.width() - 40, 500)
-            input_height = 45
+            # 設置輸入框位置（固定在視窗底部）
+            input_width = min(self.FIXED_WIDTH - 40, 500)
             self.input_container.setGeometry(
-                (self.width() - input_width) // 2,
-                self.height() - input_height - 20,
+                (self.FIXED_WIDTH - input_width) // 2,
+                self.FIXED_HEIGHT - self.INPUT_HEIGHT - self.INPUT_FROM_BOTTOM,
                 input_width,
-                input_height,
+                self.INPUT_HEIGHT,
             )
             self.input_container.show()
         event.accept()
 
     def update_speech_bubble(self, text):
-        """更新對話框內容並動態調整大小和視窗大小"""
+        """更新對話框內容，輸出框從底部往上生長，球和輸入框保持固定"""
         self.speech_bubble.set_content(text)
 
         # Process events to allow layout updates before measuring
         QApplication.processEvents()
 
+        # 計算氣泡大小
         padding = 60
-        bubble_width = min(max(self.speech_bubble.preferred_width, 240), 440)
-
-        # Get actual content height and apply growing logic
+        bubble_width = min(max(self.speech_bubble.preferred_width, 240), self.FIXED_WIDTH - 40)
+        
+        # 計算內容需要的高度
         needed_height = self.speech_bubble.content_height() + padding
+        # 初始大小較小（80px），最大可達到球的位置上方
+        max_bubble_height = self.FIXED_HEIGHT - self.BALL_CENTER_FROM_BOTTOM - 100
         bubble_height = min(
-            max(needed_height, 180),
-            self.speech_bubble.max_height,
+            max(needed_height, 80),  # 最小高度改為80
+            max_bubble_height,
         )
+        
         self.speech_bubble.setFixedSize(bubble_width, bubble_height)
-        # Force synchronous layout updates so parent measurement sees the new sizes immediately.
+        
+        # Force synchronous layout updates
         try:
             self.speech_bubble.layout.activate()
             self.speech_bubble.container.adjustSize()
@@ -930,79 +970,45 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
-        # 計算球球的有效範圍（包含旋轉圓弧）
-        circle_radius = self.arcWidget.circle.diameter // 2  # 實心圓半徑 = 50
-        max_arc_diameter = 100  # Arc 的最大直徑
-        max_arc_radius = max_arc_diameter // 2  # Arc 的最大半徑 = 50
+        # 定位關閉按鈕到右上角（視窗固定，位置不變）
+        self.close_button.move(self.FIXED_WIDTH - self.close_button.width() - 10, 10)
 
-        # 有效半徑應該是實心圓半徑加上最大圓弧半徑
-        effective_radius = circle_radius + max_arc_radius  # 50 + 50 = 100
-
-        # 計算球球區域的高度（球球位於視窗80%的位置）
-        ball_area_height = effective_radius * 2  # 球球需要的高度
-        ball_center_ratio = 0.8  # 球球中心位於視窗高度的80%
-
-        # 計算理想的視窗寬度和高度
-        min_side_margin = 20  # 定義最小側邊距
-        min_top_margin = 20  # 定義最小頂部邊距
-        overlap_offset = 40  # 對話框底部與球體頂部的重疊深度
-        ideal_width = max(
-            bubble_width + min_side_margin * 2,
-            effective_radius * 2 + min_side_margin * 2,
-        )
-        # 確保球體中心維持在 80% 的位置，由上方所需空間倒推總高度
-        # 扣除重疊部分，讓視窗高度計算更精確
-        required_height_above_center = (
-            min_top_margin + bubble_height - overlap_offset + effective_radius
-        )
-        ideal_height = required_height_above_center / ball_center_ratio
-
-        # 取得當前視窗尺寸和位置
-        current_width = self.width()
-        current_height = self.height()
-
-        # 計算當前視窗底部位置（在螢幕座標系中）
-        current_bottom_y = self.y() + current_height
-
-        # 計算新的視窗位置（保持視窗底部不變，讓內容從底部向上伸展）
-        new_y = current_bottom_y - ideal_height  # 鎖定底部位置，從底部推算新視窗Y座標
-        new_x = self.x() + (current_width - ideal_width) // 2  # X方向置中調整
-
-        # 調整視窗大小和位置 - 使用 fixed geometry 確保球心不變
-        # 為了避免"漂移感"，我們明確地設置視窗，並呼叫 raise_ 確保氣泡在最上層
-        self.setGeometry(int(new_x), int(new_y), int(ideal_width), int(ideal_height))
-        self.speech_bubble.raise_()
-
-        # 定位關閉按鈕到右上角
-        self.close_button.move(self.width() - self.close_button.width() - 10, 10)
-
-        # 重新計算對話框位置
-        window_center_x = self.width() // 2
-        ball_center_y = self.height() * ball_center_ratio  # 球球中心位置
+        # 計算氣泡位置：從球的上方往上生長
+        window_center_x = self.FIXED_WIDTH // 2
+        # 球心位於底部往上BALL_CENTER_FROM_BOTTOM的位置
+        ball_center_y = self.FIXED_HEIGHT - self.BALL_CENTER_FROM_BOTTOM
+        
+        # 圓弧的有效半徑
+        circle_radius = self.arcWidget.circle.diameter // 2
+        max_arc_radius = 50
+        effective_radius = circle_radius + max_arc_radius
+        
+        # 球的頂部位置
         ball_top_y = ball_center_y - effective_radius
-
-        # 計算氣泡框位置：讓氣泡底部「沉入」球體區域產生重疊感，並始終往上生長
+        
+        # 氣泡底部與球頂部有一個小的重疊
+        overlap_offset = 30
         bubble_x = window_center_x - bubble_width // 2
         bubble_y = ball_top_y - bubble_height + overlap_offset
+        
         # 確保氣泡不會超出頂部
-        bubble_y = max(min_top_margin, bubble_y)
-
+        bubble_y = max(20, bubble_y)
+        
         # 確保對話框不會超出視窗左右邊界
-        bubble_x = max(10, min(bubble_x, self.width() - bubble_width - 10))
+        bubble_x = max(10, min(bubble_x, self.FIXED_WIDTH - bubble_width - 10))
 
         # 設置講話框位置
         self.speech_bubble.move(bubble_x, bubble_y)
         self.speech_bubble.show()
 
-        # 更新輸入容器位置（在視窗底部）
+        # 更新輸入容器位置（固定在視窗底部）
         if self.input_container.isVisible():
-            input_width = min(self.width() - 40, 500)
-            input_height = 45
+            input_width = min(self.FIXED_WIDTH - 40, 500)
             self.input_container.setGeometry(
-                (self.width() - input_width) // 2,
-                self.height() - input_height - 20,
+                (self.FIXED_WIDTH - input_width) // 2,
+                self.FIXED_HEIGHT - self.INPUT_HEIGHT - self.INPUT_FROM_BOTTOM,
                 input_width,
-                input_height,
+                self.INPUT_HEIGHT,
             )
             self.input_container.show()
 

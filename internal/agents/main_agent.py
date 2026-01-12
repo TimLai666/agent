@@ -8,7 +8,6 @@ from typing import Any, cast
 
 from httpx import AsyncClient
 from pydantic_ai import Agent
-from pydantic_ai.mcp import MCPServerStdio
 from pydantic_ai.messages import ModelRequest, ModelResponse
 
 from internal.co_agents.philosopher import PhilosopherCoAgent
@@ -28,6 +27,8 @@ from internal.services.agent_factory import (
 from internal.set_tools import add_all_tools
 from internal.skills_loader import SkillRegistry, load_skill_registry
 from internal.sub_agents import SubAgentRegistry, load_sub_agent_registry
+
+from internal.mcp_server_list import all_mcp_servers
 
 PROMPT_KEY = "MAIN_AGENT_PROMPT"
 ENV_PREFIX = "MAIN"
@@ -89,34 +90,8 @@ class MainAgent:
         instructions = build_runtime_instructions(get_prompt(cls.PROMPT_KEY))
         if sub_agents and not sub_agents.is_empty():
             instructions += "\n\nSub-agents are available via tools: list_sub_agents, ask_sub_agent."
-        # build MCP servers for browser tools
-        mcp_env = env.copy()
-        if config.api_key:
-            mcp_env["OPENAI_API_KEY"] = config.api_key
-        if config.base_url:
-            mcp_env["OPENAI_BASE_URL"] = config.base_url
-        if config.model_name:
-            mcp_env["BROWSER_USE_LLM_MODEL"] = config.model_name
-
-        headed_env = mcp_env.copy()
-        headed_env["BROWSER_USE_HEADLESS"] = "false"
-        browser_use_headed = MCPServerStdio(
-            command=sys.executable,
-            args=["-m", "browser_use.mcp.server"],
-            env=headed_env,
-            tool_prefix="browser_headed",
-        )
-
-        headless_env = mcp_env.copy()
-        headless_env["BROWSER_USE_HEADLESS"] = "true"
-        browser_use_headless = MCPServerStdio(
-            command=sys.executable,
-            args=["-m", "browser_use.mcp.server"],
-            env=headless_env,
-            tool_prefix="browser_headless",
-        )
-
-        mcp_servers = [browser_use_headed, browser_use_headless]
+   
+        mcp_servers = all_mcp_servers
 
         agent: Agent[None, str] = Agent(
             model=model,
@@ -241,9 +216,6 @@ class MainAgent:
         try:
             add_all_tools(
                 agent,
-                config.model_name,
-                config.base_url,
-                config.api_key,
                 extra_tools=[
                     main_agent.ask_philosopher,
                     main_agent.list_sub_agents,
