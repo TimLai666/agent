@@ -12,12 +12,7 @@ from pydantic_ai.messages import ModelRequest, ModelResponse
 from PySide6.QtCore import QThread, QTimer, Signal
 from PySide6.QtWidgets import QApplication
 
-try:
-    from opencc import OpenCC
-except ImportError:
-    from opencc import OpenCC as OpenCCImpl
 
-    OpenCC = OpenCCImpl
 
 from internal.agents import MainAgent
 from internal.co_agents import PhilosopherCoAgent
@@ -25,11 +20,13 @@ from internal.logger import logger
 from internal.runtime.stream_printer import BACKLOG_SCALE, BASE_DELAY, MIN_FACTOR
 from internal.runtime.system import run_cli
 from internal.services.agent_factory import load_base_config
-from internal.services.circle_ui import MainWindow, ConfirmDialog
+from internal.services.circle_ui import MainWindow, ConfirmDialog, CommandLineEdit
 from internal.services.voice_manager import VoiceManager
 from internal.cli import set_gui_confirm_handler
+from internal.command_handler import CommandHandler
 
 HISTORY_LIMIT = 30
+COMMAND_PREFIX = "/"
 
 
 class AgentRuntime(QThread):
@@ -209,6 +206,12 @@ class GUIAgentApp:
             "</discussion>",
         )
         self._max_tag_len = max(len(tag) for tag in self._tags)
+        self._last_user_input = ""  # 記錄最後的用戶輸入（用於 /retry）
+        self._last_assistant_reply = ""  # 記錄最後的助手回覆（用於 /last）
+        self._gui_history: list[tuple[str, str]] = []  # GUI 對話歷史
+        
+        # 創建指令處理器（GUI 專用的輸出回調）
+        self.command_handler: CommandHandler | None = None
         
         # 設置 GUI 確認處理器
         set_gui_confirm_handler(self._gui_confirm_handler)
@@ -240,6 +243,16 @@ class GUIAgentApp:
 
     def handle_runtime_ready(self):
         self.runtime_ready = True
+        
+        # 初始化指令處理器
+        if self.runtime and self.runtime.main_agent:
+            self.command_handler = CommandHandler(
+                main_agent=self.runtime.main_agent,
+                history=self._gui_history,
+                output_callback=self._gui_output_callback,
+                exit_callback=self.main_window.close,
+            )
+        
         self.main_window.update_speech_bubble("AI ready. Double-click to show input.")
         QTimer.singleShot(500, self.show_input_container)
 
@@ -251,6 +264,9 @@ class GUIAgentApp:
         )
         if output and output not in self._display_text:
             self._display_text = f"{output}"
+            self._last_assistant_reply = output  # 記錄助手回覆
+            if self.command_handler:
+                self.command_handler.update_last_reply(output)
             self._pending.clear()
             self._stream_buffer = ""
             self._stream_mode = "normal"
@@ -260,6 +276,11 @@ class GUIAgentApp:
         logger.info(f"AI Response: {output[:100]}...")
         if updated_history:
             self.chat_history = updated_history
+            # 更新 GUI 歷史
+            if self._last_user_input:
+                self._gui_history.append((self._last_user_input, output or ""))
+                if len(self._gui_history) > HISTORY_LIMIT:
+                    self._gui_history = self._gui_history[-HISTORY_LIMIT:]
 
     def handle_chunk(self, request_id, chunk):
         if request_id != self._active_request_id:
@@ -354,6 +375,21 @@ class GUIAgentApp:
         delay = max(BASE_DELAY * MIN_FACTOR, BASE_DELAY * speed_factor)
         self._typewriter_timer.start(int(delay * 1000))
 
+    def _gui_output_callback(self, text: str):
+        """GUI 輸出回調函數，用於指令處理器"""
+        # 特殊指令：清空
+        if text == "__clear__":
+            self.main_window.update_speech_bubble("對話已清空")
+            QTimer.singleShot(1000, lambda: self.main_window.update_speech_bubble(""))
+        else:
+            # Markdown 格式化輸出
+            if not text.startswith("**"):
+                # 如果不是 Markdown，轉換為 Markdown
+                formatted = text.replace("\n", "\n\n")
+            else:
+                formatted = text
+            self.main_window.update_speech_bubble(formatted)
+
     def show_input_container(self):
         """Show input container."""
         input_width = min(self.main_window.width() - 40, 500)
@@ -385,6 +421,25 @@ class GUIAgentApp:
                 return
 
         if user_input:
+            # 檢查是否為指令
+            if user_input.startswith(COMMAND_PREFIX):
+                if not self.command_handler:
+                    self.main_window.update_speech_bubble("指令處理器尚未就緒")
+                    return
+                # 處理指令
+                result = self.command_handler.handle(user_input)
+                if result:
+                    # 指令返回了要執行的提示（如 /retry）
+                    user_input = result
+                else:
+                    # 指令已處理完畢
+                    return
+            
+            # 記錄用戶輸入
+            self._last_user_input = user_input
+            if self.command_handler:
+                self.command_handler.update_last_prompt(user_input)
+            
             logger.info(f"Processing input: {user_input}")
             self.main_window.update_speech_bubble(f"You: {user_input}")
             QTimer.singleShot(

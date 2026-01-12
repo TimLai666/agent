@@ -13,6 +13,7 @@ from internal.co_agents import PhilosopherCoAgent
 from internal.logger import logger
 from internal.services.agent_factory import load_base_config
 from internal.services.voice_manager import VoiceManager
+from internal.command_handler import CommandHandler
 
 HISTORY_LIMIT = 30
 TYPEWRITER_DELAY = 0.04
@@ -264,6 +265,13 @@ async def run_cli(prompt_once: str | None = None, single_turn: bool = False) -> 
 
         chat_history: list[ModelRequest | ModelResponse] | None = None
         history: list[tuple[str, str]] = []
+        
+        # 創建共用的指令處理器
+        command_handler = CommandHandler(
+            main_agent=main_agent,
+            history=history,
+            output_callback=print,
+        )
 
         async with AsyncExitStack() as stack:
             # MCP servers are run by the main agent (contains browser tools)
@@ -315,7 +323,7 @@ async def run_cli(prompt_once: str | None = None, single_turn: bool = False) -> 
                 if not user_input:
                     return
                 if user_input.startswith(COMMAND_PREFIX):
-                    action = _handle_command(user_input, main_agent, history)
+                    action = command_handler.handle(user_input)
                     if action == "__exit__":
                         return
                     if action:
@@ -324,9 +332,12 @@ async def run_cli(prompt_once: str | None = None, single_turn: bool = False) -> 
                         return
                 if user_input.lower() in ["exit", "quit"]:
                     return
+                command_handler.update_last_prompt(user_input)
                 await stream_print(main_agent.run_stream(user_input, message_history=chat_history))
                 update_history()
-                history.append((user_input, main_agent._last_assistant_reply or ""))
+                reply = main_agent._last_assistant_reply or ""
+                command_handler.update_last_reply(reply)
+                history.append((user_input, reply))
                 return
 
             while True:
@@ -335,7 +346,7 @@ async def run_cli(prompt_once: str | None = None, single_turn: bool = False) -> 
                     if not user_input:
                         continue
                     if user_input.startswith(COMMAND_PREFIX):
-                        action = _handle_command(user_input, main_agent, history)
+                        action = command_handler.handle(user_input)
                         if action == "__exit__":
                             break
                         if action:
@@ -344,9 +355,12 @@ async def run_cli(prompt_once: str | None = None, single_turn: bool = False) -> 
                             continue
                     if user_input.lower() in ["exit", "quit"]:
                         break
+                    command_handler.update_last_prompt(user_input)
                     await stream_print(main_agent.run_stream(user_input, message_history=chat_history))
                     update_history()
-                    history.append((user_input, main_agent._last_assistant_reply or ""))
+                    reply = main_agent._last_assistant_reply or ""
+                    command_handler.update_last_reply(reply)
+                    history.append((user_input, reply))
                 except KeyboardInterrupt:
                     break
                 except Exception as exc:

@@ -4,9 +4,10 @@ import string
 import sys
 
 from PySide6.QtCore import Qt, QTimer, QVariantAnimation, QPropertyAnimation, QEasingCurve, Property, QMetaObject, Signal, Slot, QEventLoop
-from PySide6.QtGui import QColor, QPainter, QPen, QRadialGradient
+from PySide6.QtGui import QColor, QPainter, QPen, QRadialGradient, QKeyEvent
 from PySide6.QtWidgets import (
     QApplication,
+    QCompleter,
     QDialog,
     QDialogButtonBox,
     QFrame,
@@ -25,6 +26,114 @@ from PySide6.QtWidgets import (
 )
 
 from internal.logger import logger
+
+
+class CommandLineEdit(QLineEdit):
+    """支援指令補全和歷史記錄的輸入框"""
+    
+    # 所有可用的指令
+    COMMANDS = [
+        "/help",
+        "/exit",
+        "/quit",
+        "/clear",
+        "/history",
+        "/history 5",
+        "/history 10",
+        "/last",
+        "/retry",
+        "/tools",
+        "/subagents",
+        "/skills",
+        "/skills list",
+        "/skills info ",
+        "/skills test ",
+        "/skills reload",
+    ]
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.history = []  # 指令歷史
+        self.history_index = -1  # 當前歷史索引
+        
+        # 設置自動補全
+        self.completer = QCompleter(self.COMMANDS, self)
+        self.completer.setCaseSensitivity(Qt.CaseInsensitive)
+        self.completer.setCompletionMode(QCompleter.PopupCompletion)
+        self.completer.setMaxVisibleItems(8)
+        
+        # 自定義補全器樣式
+        popup = self.completer.popup()
+        popup.setStyleSheet(
+            "QListView {"
+            "  background-color: rgba(40, 40, 40, 240);"
+            "  color: white;"
+            "  border: 1px solid rgba(255, 255, 255, 60);"
+            "  border-radius: 8px;"
+            "  padding: 4px;"
+            "  selection-background-color: rgba(0, 122, 255, 180);"
+            "}"
+            "QListView::item {"
+            "  padding: 4px 8px;"
+            "  border-radius: 4px;"
+            "}"
+            "QListView::item:hover {"
+            "  background-color: rgba(255, 255, 255, 30);"
+            "}"
+        )
+        
+        self.setCompleter(self.completer)
+    
+    def keyPressEvent(self, event: QKeyEvent):
+        """處理特殊按鍵"""
+        # 上箭頭：顯示上一條歷史記錄
+        if event.key() == Qt.Key_Up:
+            if self.history and self.history_index < len(self.history) - 1:
+                self.history_index += 1
+                self.setText(self.history[-(self.history_index + 1)])
+            event.accept()
+            return
+        
+        # 下箭頭：顯示下一條歷史記錄
+        elif event.key() == Qt.Key_Down:
+            if self.history_index > 0:
+                self.history_index -= 1
+                self.setText(self.history[-(self.history_index + 1)])
+            elif self.history_index == 0:
+                self.history_index = -1
+                self.clear()
+            event.accept()
+            return
+        
+        # Tab 鍵：觸發補全（如果補全器有建議）
+        elif event.key() == Qt.Key_Tab:
+            if self.completer.completionCount() > 0:
+                # 如果有補全建議，選擇第一個
+                self.completer.setCurrentRow(0)
+                self.setText(self.completer.currentCompletion())
+                # 如果是需要參數的指令，將游標移到末尾
+                if self.text().endswith(" "):
+                    self.setCursorPosition(len(self.text()))
+            event.accept()
+            return
+        
+        # 其他按鍵：重置歷史索引
+        if event.key() not in (Qt.Key_Up, Qt.Key_Down, Qt.Key_Tab):
+            self.history_index = -1
+        
+        # 調用父類處理
+        super().keyPressEvent(event)
+    
+    def add_to_history(self, text: str):
+        """添加到歷史記錄"""
+        if text and text.strip():
+            # 避免重複
+            if not self.history or self.history[-1] != text:
+                self.history.append(text)
+                # 限制歷史記錄數量
+                if len(self.history) > 100:
+                    self.history = self.history[-100:]
+            self.history_index = -1
 
 
 class Arc:
@@ -975,8 +1084,9 @@ class MainWindow(QMainWindow):
         self.input_layout.setContentsMargins(0, 0, 0, 0)
         self.input_layout.setSpacing(5)
 
-        self.input_field = QLineEdit()
-        self.input_field.setPlaceholderText("輸入文字或按啟動語音...")
+        # 使用自定義的 CommandLineEdit 替代 QLineEdit
+        self.input_field = CommandLineEdit()
+        self.input_field.setPlaceholderText("輸入文字、指令或按🎤啟動語音...")
         self.input_field.setStyleSheet(
             "QLineEdit { "
             "background-color: rgba(50, 50, 50, 220); "
@@ -1081,8 +1191,11 @@ class MainWindow(QMainWindow):
         """處理文字輸入提交"""
         text = self.input_field.text().strip()
         if text and self.input_callback:
+            # 添加到歷史記錄
+            if isinstance(self.input_field, CommandLineEdit):
+                self.input_field.add_to_history(text)
             self.input_field.clear()
-            self.input_field.setPlaceholderText("輸入文字或按啟動語音...")
+            self.input_field.setPlaceholderText("輸入文字、指令或按🎤啟動語音...")
             self.input_callback(text)
 
     def on_voice_requested(self):
