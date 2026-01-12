@@ -23,11 +23,21 @@ uv run playwright install
 ```
 
 ### 啟動
+
+**CLI 模式（默認）**：
 ```sh
 uv run main.py
 ```
 
-啟動後可使用：
+**GUI 模式**：
+```sh
+uv run python main.py --gui
+```
+
+啟動後可使用（CLI 模式）：
 - `/help` 查看指令
 - `/subagents` 列出 subagents
 - `/tools` 列出工具
+
+GUI 模式詳細說明請參考 `GUI_README.md`。
+
