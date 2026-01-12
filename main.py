@@ -4,12 +4,12 @@ import os
 import sys
 import warnings
 from contextlib import AsyncExitStack
-from httpx import AsyncClient
 
 from dotenv import load_dotenv
+from httpx import AsyncClient
 from pydantic_ai.messages import ModelRequest, ModelResponse
+from PySide6.QtCore import QThread, QTimer, Signal
 from PySide6.QtWidgets import QApplication
-from PySide6.QtCore import QThread, Signal, QTimer
 
 try:
     from opencc import OpenCC
@@ -18,21 +18,22 @@ except ImportError:
 
     OpenCC = OpenCCImpl
 
-from internal.runtime.system import run_cli
 from internal.agents import MainAgent
 from internal.co_agents import PhilosopherCoAgent
 from internal.logger import logger
+from internal.runtime.system import run_cli
 from internal.services.agent_factory import load_base_config
-from internal.services.voice_manager import VoiceManager
 from internal.services.circle_ui import MainWindow
+from internal.services.voice_manager import VoiceManager
 
 HISTORY_LIMIT = 30
 
 
 class AgentRuntime(QThread):
     ready = Signal()
-    result_ready = Signal(str, list)
-    error_occurred = Signal(str)
+    chunk_ready = Signal(int, str)
+    result_ready = Signal(int, str, list)
+    error_occurred = Signal(int, str)
 
     def __init__(self, base_config, env: dict[str, str]):
         super().__init__()
@@ -45,6 +46,7 @@ class AgentRuntime(QThread):
         self.mcp_stack: AsyncExitStack | None = None
         self._ready_event: asyncio.Event | None = None
         self._current_future = None
+        self._request_id = 0
 
     def run(self):
         loop = asyncio.new_event_loop()
@@ -91,7 +93,7 @@ class AgentRuntime(QThread):
             logger.error(f"AgentRuntime init failed: {e}", exc_info=e)
             if self._ready_event:
                 self._ready_event.set()
-            self.error_occurred.emit("Initialization failed. Check logs.")
+            self.error_occurred.emit(0, "Initialization failed. Check logs.")
 
     async def _shutdown(self):
         if self.mcp_stack is not None:
@@ -113,6 +115,7 @@ class AgentRuntime(QThread):
 
     async def _run_prompt(
         self,
+        request_id: int,
         user_input: str,
         chat_history: list[ModelRequest | ModelResponse] | None,
     ):
@@ -122,11 +125,15 @@ class AgentRuntime(QThread):
             raise RuntimeError("Main agent not initialized")
 
         chunks: list[str] = []
+
         async def collect():
             async for chunk in self.main_agent.run_stream(
                 user_input, message_history=chat_history
             ):
+                if not chunk:
+                    continue
                 chunks.append(chunk)
+                self.chunk_ready.emit(request_id, chunk)
                 logger.debug(f"Received chunk: {len(chunk)} chars")
 
         await asyncio.wait_for(collect(), timeout=120)
@@ -146,26 +153,29 @@ class AgentRuntime(QThread):
         chat_history: list[ModelRequest | ModelResponse] | None,
     ):
         if not self.loop:
-            self.error_occurred.emit("Initialization failed. Check logs.")
-            return
+            self.error_occurred.emit(0, "Initialization failed. Check logs.")
+            return None
         if self._current_future and not self._current_future.done():
             self._current_future.cancel()
+        self._request_id += 1
+        request_id = self._request_id
         future = asyncio.run_coroutine_threadsafe(
-            self._run_prompt(user_input, chat_history), self.loop
+            self._run_prompt(request_id, user_input, chat_history), self.loop
         )
         self._current_future = future
 
         def done_callback(fut):
             try:
                 result, updated_history = fut.result()
-                self.result_ready.emit(result, updated_history or [])
+                self.result_ready.emit(request_id, result, updated_history or [])
             except asyncio.CancelledError:
                 pass
             except Exception as e:
                 logger.error(f"AgentRuntime run error: {e}", exc_info=e)
-                self.error_occurred.emit(f"Error: {str(e)}")
+                self.error_occurred.emit(request_id, f"Error: {str(e)}")
 
         future.add_done_callback(done_callback)
+        return request_id
 
 
 class GUIAgentApp:
@@ -180,9 +190,13 @@ class GUIAgentApp:
         self.voice_manager = VoiceManager()
         self.chat_history: list[ModelRequest | ModelResponse] | None = None
         self.runtime_ready = False
+        self._active_request_id = 0
+        self._stream_buffer = ""
+        self._stream_pending = False
         self.runtime = AgentRuntime(self.base_config, self.env)
         self.runtime.ready.connect(self.handle_runtime_ready)
         self.runtime.result_ready.connect(self.handle_result)
+        self.runtime.chunk_ready.connect(self.handle_chunk)
         self.runtime.error_occurred.connect(self.handle_error)
         self.runtime.start()
 
@@ -195,21 +209,40 @@ class GUIAgentApp:
 
     def handle_runtime_ready(self):
         self.runtime_ready = True
-        self.main_window.update_speech_bubble(
-            "AI ready. Double-click to show input."
-        )
+        self.main_window.update_speech_bubble("AI ready. Double-click to show input.")
         QTimer.singleShot(500, self.show_input_container)
 
-    def handle_result(self, output, updated_history):
+    def handle_result(self, request_id, output, updated_history):
+        if request_id != self._active_request_id:
+            return
         logger.info(
             f"handle_result called with output: {output[:100] if output else 'None'}..."
         )
-        self.main_window.update_speech_bubble(f"AI: {output}")
+        self._stream_buffer = output or ""
+        self._stream_pending = False
+        self.main_window.update_speech_bubble(f"AI: {self._stream_buffer}")
         logger.info(f"AI Response: {output[:100]}...")
         if updated_history:
             self.chat_history = updated_history
 
-    def handle_error(self, error_message):
+    def handle_chunk(self, request_id, chunk):
+        if request_id != self._active_request_id:
+            return
+        if not chunk:
+            return
+        self._stream_buffer += chunk
+        if not self._stream_pending:
+            self._stream_pending = True
+            QTimer.singleShot(50, self.flush_stream)
+
+    def flush_stream(self):
+        self._stream_pending = False
+        if self._stream_buffer:
+            self.main_window.update_speech_bubble(f"AI: {self._stream_buffer}")
+
+    def handle_error(self, request_id, error_message):
+        if request_id not in (0, self._active_request_id):
+            return
         self.main_window.update_speech_bubble(f"Error: {error_message}")
         logger.error(error_message)
 
@@ -238,7 +271,9 @@ class GUIAgentApp:
             if user_input:
                 logger.info(f"Speech recognized: {user_input}")
             else:
-                self.main_window.update_speech_bubble("No speech recognized. Try again.")
+                self.main_window.update_speech_bubble(
+                    "No speech recognized. Try again."
+                )
                 return
 
         if user_input:
@@ -247,7 +282,11 @@ class GUIAgentApp:
             QTimer.singleShot(
                 500, lambda: self.main_window.update_speech_bubble("Thinking...")
             )
-            self.runtime.submit(user_input, self.chat_history)
+            self._stream_buffer = ""
+            self._stream_pending = False
+            request_id = self.runtime.submit(user_input, self.chat_history)
+            if request_id:
+                self._active_request_id = request_id
 
     def run(self):
         """Run GUI application."""
