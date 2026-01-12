@@ -23,15 +23,25 @@ class PhilosopherCoAgent(CoAgent):
     def create(
         cls, base_config: AgentConfig, env: dict[str, str], http_client: AsyncClient
     ) -> "PhilosopherCoAgent":
-        # Philosopher should use PHILOSOPHER_* values only and not inherit MAIN_* settings.
-        philosopher_defaults = AgentConfig(
-            name="philosopher",
-            base_url=base_config.base_url,
-            api_key=base_config.api_key,
-            model_name=base_config.model_name,
-            temperature=0.2,
+        # Philosopher inherits MAIN_* for base settings, but MODEL_TEMPERATURE is per-PHILOSOPHER only.
+        config = load_agent_config_chain(["MAIN", cls.ENV_PREFIX], base_config, env)
+        # Temperature: if PHILOSOPHER_MODEL_TEMPERATURE is specified, use it; otherwise default to 0.2 (do not use MAIN_MODEL_TEMPERATURE).
+        phil_temp_raw = env.get("PHILOSOPHER_MODEL_TEMPERATURE")
+        if phil_temp_raw and phil_temp_raw.strip() != "":
+            try:
+                phil_temp = float(phil_temp_raw)
+            except ValueError:
+                logger.warning(f"Invalid PHILOSOPHER_MODEL_TEMPERATURE '{phil_temp_raw}', using default 0.2.")
+                phil_temp = 0.2
+        else:
+            phil_temp = 0.2
+        config = AgentConfig(
+            name=config.name,
+            base_url=config.base_url,
+            api_key=config.api_key,
+            model_name=config.model_name,
+            temperature=phil_temp,
         )
-        config = load_agent_config_chain([cls.ENV_PREFIX], philosopher_defaults, env)
         model = create_openai_model(config, http_client)
         agent: Agent[None, str] = Agent(
             model=model,
