@@ -18,6 +18,7 @@ from internal.services.agent_factory import (
 from internal.set_tools import add_all_tools
 from internal.co_agents.philosopher import PhilosopherCoAgent
 from internal.sub_agents.base import SubAgent
+from internal.mcp_server_list import all_mcp_servers
 
 SUB_AGENTS_DIR = Path(__file__).resolve().parent
 _MENTION_RE = re.compile(r"(?<![\\w`])@(\.?[^\s`,.]*(?:\.[^\s`,.]+)*)")
@@ -149,6 +150,7 @@ def load_sub_agent_registry(
             instructions=build_runtime_instructions(prompt_text),
             tools=[],
             model_settings={"temperature": config.temperature},
+            toolsets=all_mcp_servers,
         )
         add_all_tools(
             agent,
