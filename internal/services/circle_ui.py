@@ -5,6 +5,26 @@ import sys
 
 from PySide6.QtCore import Qt, QTimer, QVariantAnimation, QPropertyAnimation, QEasingCurve, Property, QMetaObject, Signal, Slot, QEventLoop
 from PySide6.QtGui import QColor, QPainter, QPen, QRadialGradient, QKeyEvent
+
+# Convert bare URLs in markdown/plain text into markdown links so QTextBrowser renders them as clickable
+import re
+
+def _autolink_markdown(text: str) -> str:
+    if not text:
+        return text
+
+    # Replace http(s)://... occurrences with [url](url) except when already inside brackets/parentheses/angle brackets
+    def repl(m):
+        url = m.group(0)
+        start = m.start()
+        # If immediately preceded by characters that indicate it's already part of a link or HTML, skip
+        if start > 0:
+            prev = text[start - 1]
+            if prev in "([<\"'=":
+                return url
+        return f'[{url}]({url})'
+
+    return re.sub(r'https?://[^\s<)]+', repl, text)
 from PySide6.QtWidgets import (
     QApplication,
     QCompleter,
@@ -292,7 +312,7 @@ class CollapsibleSection(QWidget):
         if is_active and not content.strip():
             self.content.setHtml("<i>Waiting for output...</i>")
         else:
-            self.content.setMarkdown(content)
+            self.content.setMarkdown(_autolink_markdown(content))
         self.content.setOpenExternalLinks(True)
         self.content.setStyleSheet(
             "background: transparent; color: #F0F0F0; font-size: 13px; border-radius: 10px; padding: 8px; border: none;"
@@ -327,9 +347,8 @@ class CollapsibleSection(QWidget):
         except Exception:
             pass
         QTimer.singleShot(0, adjust)
-        self.content.setTextInteractionFlags(
-            Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard
-        )
+        # Allow clicking links as well as text selection
+        self.content.setTextInteractionFlags(Qt.TextBrowserInteraction)
         self.content.setVisible(is_active)
         self.content.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
 
@@ -355,7 +374,7 @@ class CollapsibleSection(QWidget):
         if not new_content.strip() and self.is_active:
             self.content.setHtml("<i>Waiting for output...</i>")
         else:
-            self.content.setMarkdown(new_content)
+            self.content.setMarkdown(_autolink_markdown(new_content))
         
         # 強制重新計算高度
         QTimer.singleShot(0, self._recalculate_height)
@@ -518,7 +537,7 @@ class OutputBubble(QWidget):
                 continue
             if kind == "normal":
                 browser = QTextBrowser()
-                browser.setMarkdown(content)
+                browser.setMarkdown(_autolink_markdown(content))
                 browser.setOpenExternalLinks(True)
                 browser.setStyleSheet(
                     "background: transparent; color: white; font-size: 14px;"
@@ -526,9 +545,8 @@ class OutputBubble(QWidget):
                 browser.setFrameShape(QFrame.NoFrame)
                 browser.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
                 browser.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-                browser.setTextInteractionFlags(
-                    Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard
-                )
+                # Allow clicking links as well as text selection
+                browser.setTextInteractionFlags(Qt.TextBrowserInteraction)
                 browser.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
                 self.layout.addWidget(browser)
             else:
@@ -718,6 +736,7 @@ class SiriResponseBubble(QWidget):
                     continue
                 for sub_kind, sub_content in sub_segments:
                     if sub_kind == "spinner":
+                        sub_content = _autolink_markdown(sub_content)
                         container = QWidget()
                         h = QHBoxLayout(container)
                         h.setContentsMargins(0, 0, 0, 0)
@@ -728,7 +747,7 @@ class SiriResponseBubble(QWidget):
                         label = QTextBrowser(container)
                         label.setLineWrapMode(QTextEdit.WidgetWidth)
                         label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-                        label.setMarkdown(sub_content)
+                        label.setMarkdown(_autolink_markdown(sub_content))
                         label.setOpenExternalLinks(True)
                         label.setStyleSheet(
                             "background: transparent; border: none; color: #FFFFFF; font-family: 'Segoe UI', 'Microsoft JhengHei', sans-serif; font-size: 16px; line-height: 1.6;"
@@ -736,7 +755,8 @@ class SiriResponseBubble(QWidget):
                         label.setFrameShape(QFrame.NoFrame)
                         label.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
                         label.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-                        label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+                        # Allow clicking links inside spinner labels
+                        label.setTextInteractionFlags(Qt.TextBrowserInteraction)
                         label.document().setDocumentMargin(0)
 
                         def update_spinner_label_height(b=label):
@@ -765,7 +785,7 @@ class SiriResponseBubble(QWidget):
                         if not sub_content.strip():
                             continue
                         browser = QTextBrowser()
-                        browser.setMarkdown(sub_content)
+                        browser.setMarkdown(_autolink_markdown(sub_content))
                         browser.setOpenExternalLinks(True)
                         browser.setLineWrapMode(QTextEdit.WidgetWidth)
                         browser.setStyleSheet(
@@ -774,7 +794,8 @@ class SiriResponseBubble(QWidget):
                         browser.setFrameShape(QFrame.NoFrame)
                         browser.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
                         browser.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-                        browser.setTextInteractionFlags(Qt.TextSelectableByMouse)
+                        # Allow clicking links inside sub-sections
+                        browser.setTextInteractionFlags(Qt.TextBrowserInteraction)
                         browser.document().setDocumentMargin(0)
                         browser.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
 
