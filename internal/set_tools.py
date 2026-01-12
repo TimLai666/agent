@@ -21,7 +21,7 @@ def add_all_tools(
     add_python_tools(agent)
     add_terminal_tools(agent)
     # add_interactive_tools(agent)
-    add_website_tools(agent)
+    # add_website_tools(agent)
     add_stock_market_tools(agent)
     if extra_tools:
         for tool in extra_tools:

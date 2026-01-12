@@ -292,17 +292,25 @@ class CollapsibleSection(QWidget):
                 self.content.setFixedHeight(target_height)
                 self.content.setVisible(True)
         else:
+            # 當標籤關閉時，停止spinner並自動收合區塊
             self.spinner.stop()
             content_text = self.content.toPlainText().strip()
             has_real_content = content_text and "Waiting for" not in content_text
             
-            if not has_real_content:
+            # 無論是否有內容，都自動收合區塊
+            if has_real_content:
+                # 有內容時，使用動畫收合
+                current_height = self._content_height if self._content_height > 0 else self.content.height()
+                if animate and current_height > 0:
+                    self._animate_height(current_height, 0, on_finish=lambda: self._finish_collapse())
+                else:
+                    self._finish_collapse()
+            else:
+                # 沒有實際內容時，也要收合
                 if animate and self._content_height > 0:
                     self._animate_height(self._content_height, 0, on_finish=lambda: self._finish_collapse())
                 else:
                     self._finish_collapse()
-            else:
-                self._recalculate_height()
 
     def toggle(self):
         """切換區塊展開/收起狀態（用戶手動點擊）"""
