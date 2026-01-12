@@ -34,4 +34,5 @@ browser = McpClient(
     command="npx",
     args=["pptr-mcp","--viewport=1280x720"],
     env={"CHROME_PATH": chrome_path} if chrome_path else None,
+    tool_prefix="browser",
 )
