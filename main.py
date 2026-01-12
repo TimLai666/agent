@@ -314,6 +314,7 @@ class GUIAgentApp:
         while self._stream_buffer:
             found = self._next_tag(self._stream_buffer)
             if not found:
+                # If buffer is longer than tag lookahead, emit the bulk and keep tail to preserve tags
                 if len(self._stream_buffer) > self._max_tag_len - 1:
                     emit = self._stream_buffer[: -(self._max_tag_len - 1)]
                     self._stream_buffer = self._stream_buffer[
@@ -327,7 +328,15 @@ class GUIAgentApp:
                     else:
                         self._display_text += emit
                         updated = True
+                # If there is no emit because the buffer is still small, show a transient preview
                 if not emit:
+                    # Show partial preview (do not consume buffer) so UI doesn't appear stalled
+                    try:
+                        # Avoid committing preview if nothing to show
+                        if self._stream_buffer:
+                            self.main_window.update_speech_bubble(self._display_text + self._stream_buffer)
+                    except Exception:
+                        pass
                     break
                 continue
 
