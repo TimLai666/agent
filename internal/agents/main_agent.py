@@ -121,7 +121,7 @@ class MainAgent:
             instructions=instructions,
             tools=[],
             model_settings={"temperature": config.temperature},
-            mcp_servers=mcp_servers,
+            toolsets=mcp_servers,
         )
 
         planner_agent: Agent[None, str] = Agent(
@@ -143,6 +143,14 @@ class MainAgent:
                 "Provide a concise candidate answer for the user and respond to critique. "
                 "Do not call tools. Do not include self-validation."
             ),
+            tools=[],
+            model_settings={"temperature": config.temperature},
+        )
+        # Lightweight decider agent: same underlying model, but no system prompt, no tools, no MCP/toolsets
+        decider_agent: Agent[None, str] = Agent(
+            model=model,
+            system_prompt="",
+            instructions="",
             tools=[],
             model_settings={"temperature": config.temperature},
         )
@@ -192,7 +200,7 @@ class MainAgent:
 
             cast(Any, agent).tool_plain = logging_tool_plain
 
-        main_agent = cls(agent, philosopher, sub_agents, planner_agent, discussion_agent, skills)
+        main_agent = cls(agent, philosopher, sub_agents, planner_agent, discussion_agent, decider_agent, skills)
         try:
             add_all_tools(
                 agent,
@@ -223,6 +231,7 @@ class MainAgent:
         sub_agents: SubAgentRegistry | None = None,
         planner_agent: Agent[None, str] | None = None,
         discussion_agent: Agent[None, str] | None = None,
+        decider_agent: Agent[None, str] | None = None,
         skills: SkillRegistry | None = None,
     ) -> None:
         self.agent = agent
@@ -231,6 +240,7 @@ class MainAgent:
         self.skills = skills
         self._planner_agent = planner_agent or agent
         self._discussion_agent = discussion_agent
+        self._decider_agent = decider_agent or agent
         self._last_messages: list[ModelRequest | ModelResponse] | None = None
         self._last_execution_steps: list[dict[str, Any]] = []
         self._last_user_prompt: str | None = None
@@ -518,7 +528,7 @@ class MainAgent:
     ) -> bool:
         """以主 agent 模型決定是否需要與哲學家討論。
 
-        會向 `self.agent` 發出簡短判定請求（回傳 YES/NO 與簡短原因）。
+        會向 `decider` 發出簡短判定請求（回傳 YES/NO 與簡短原因）。
         若模型失敗或回應不明確，採保守策略：回傳 True 以確保討論。
         """
         # 使用嚴格 JSON 回應格式：{"consult": true|false, "reason": "..."}
@@ -534,7 +544,8 @@ class MainAgent:
         )
 
         try:
-            result = await self.agent.run(decider, message_history=message_history)
+            dec = getattr(self, "_decider_agent", self.agent)
+            result = await dec.run(decider, message_history=message_history)
             out = (result.output or "").strip()
             # 嘗試解析 JSON
             try:

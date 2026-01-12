@@ -78,18 +78,51 @@ Returns:
         # Log activation
         logger.info(f"[Tool] Activated skill: {skill.name}")
 
-        # Return skill content with priority reminder
+        # Build resources section if available
+        resources_section = ""
+        if skill.resources.has_resources():
+            resources_info = []
+
+            # Add scripts
+            if skill.resources.scripts:
+                resources_info.append("\n### Available Scripts")
+                resources_info.append("\nThese scripts are ready to execute. Use Read tool to examine them first, then run with Bash:\n")
+                for script_name, script_path in skill.resources.scripts.items():
+                    resources_info.append(f"- `{script_name}`: `{script_path}`")
+
+            # Add references
+            if skill.resources.references:
+                resources_info.append("\n### Reference Files")
+                resources_info.append("\nThese files contain detailed documentation. Use Read tool to access them:\n")
+                for ref_name, ref_path in skill.resources.references.items():
+                    resources_info.append(f"- `{ref_name}`: `{ref_path}`")
+
+            # Add assets
+            if skill.resources.assets:
+                resources_info.append("\n### Available Assets")
+                resources_info.append("\nThese are templates, images, or other resources:\n")
+                for asset_name, asset_path in skill.resources.assets.items():
+                    resources_info.append(f"- `{asset_name}`: `{asset_path}`")
+
+            if resources_info:
+                resources_section = "\n\n## Bundled Resources\n" + "\n".join(resources_info) + "\n"
+
+        # Return skill content with priority reminder and resources
         return f"""# Active Skill: {skill.name}
 
-**IMPORTANT**: Use the following guidance to inform your response.
-This skill provides expert knowledge and best practices for this domain.
+**IMPORTANT**: This skill provides expert guidance AND executable resources.
+Follow the instructions below and USE the provided scripts/references.
 
 ---
 
-{skill.content}
+{skill.content}{resources_section}
 
 ---
 
-**Remember**: Follow the skill's guidance and methodology above."""
+**Remember**:
+1. Follow the skill's methodology exactly
+2. Use Read tool to examine scripts before executing
+3. Execute scripts using Bash with the absolute paths provided above
+4. Read reference files completely when instructed (no offset/limit)"""
 
     logger.info(f"Registered use_skill tool with {len(skills.list_names())} available skill(s)")
