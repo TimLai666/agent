@@ -157,6 +157,8 @@ class CommandLineEdit(QLineEdit):
         "/exit",
         "/quit",
         "/clear",
+        "/config",
+        "/config-web",
         "/history",
         "/history 5",
         "/history 10",
@@ -602,7 +604,7 @@ class OutputBubble(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.max_height = 500
-        self.preferred_width = 400
+        self.preferred_width = 340
         self.setAttribute(Qt.WA_StyledBackground, True)
         self.setStyleSheet(
             "OutputBubble { "
@@ -809,7 +811,7 @@ class SiriResponseBubble(QWidget):
             QApplication.processEvents()
             
             # Recalculate and apply size
-            padding = 60
+            padding = 30
             bubble_width = min(max(bubble.preferred_width, 240), main_window.FIXED_WIDTH - 40)
             needed_height = bubble.content_height() + padding
             max_bubble_height = main_window.FIXED_HEIGHT - 200
@@ -1263,7 +1265,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("AI Assistant")
         # 固定視窗大小
-        self.FIXED_WIDTH = 460
+        self.FIXED_WIDTH = 380
         self.FIXED_HEIGHT = 800
         self.setGeometry(100, 100, self.FIXED_WIDTH, self.FIXED_HEIGHT)
         self.setFixedSize(self.FIXED_WIDTH, self.FIXED_HEIGHT)

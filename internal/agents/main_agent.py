@@ -1543,7 +1543,7 @@ class MainAgent:
         self,
         prompt: str,
         message_history: list[ModelRequest | ModelResponse] | None = None,
-        skip_plan_execution: bool = False,  # 默認跳過 plan execution，讓 agent 自己調用工具
+        skip_plan_execution: bool = True,  # 默認跳過 plan execution，讓 agent 自己調用工具
     ) -> str:
         self._previous_user_prompt = self._last_user_prompt
         self._last_user_prompt = prompt
@@ -1635,29 +1635,37 @@ class MainAgent:
         parallel_results: list[str] = []
         parallel_meta: list[dict[str, Any]] = []
         order, tasks = self._start_subagent_tasks(parallel_subagents, prompt)
-        if order and tasks and background_mode and plan_list:
-            exec_results.extend(await self.execute_plan({"plan": plan_list}))
-            plan_meta = list(self._last_execution_steps or [])
+        # Present plan as suggestions rather than forcing tool execution.
+        # This allows the LLM to consider the plan and choose whether to call tools itself.
+        if order and tasks:
             parallel_results, parallel_meta = await self._collect_subagent_results(
                 order, tasks, prompt
             )
-            exec_results.extend(parallel_results)
-            self._last_execution_steps = plan_meta + parallel_meta
-        else:
-            if order and tasks:
-                parallel_results, parallel_meta = await self._collect_subagent_results(
-                    order, tasks, prompt
-                )
-                if parallel_results:
-                    exec_results.extend(parallel_results)
-            if plan_list:
-                exec_results.extend(
-                    await self.execute_plan(
-                        {"plan": plan_list}, pre_steps_meta=parallel_meta
-                    )
-                )
-            else:
-                self._last_execution_steps = parallel_meta
+            if parallel_results:
+                exec_results.extend(parallel_results)
+        plan_meta: list[dict[str, Any]] = []
+        if plan_list:
+            suggested_lines: list[str] = []
+            for idx, step in enumerate(plan_list, start=1):
+                tool_name = step.get("tool") if isinstance(step, dict) else None
+                args = step.get("args", {}) if isinstance(step, dict) else {}
+                note = step.get("note") if isinstance(step, dict) else None
+                header = f"Suggested Step {idx}: {tool_name}"
+                if note:
+                    header += f"  ({note})"
+                args_text = ""
+                if args:
+                    try:
+                        args_text = f" args: {json.dumps(args, ensure_ascii=False)}"
+                    except Exception:
+                        args_text = f" args: {str(args)}"
+                line = header + args_text
+                suggested_lines.append(line)
+                plan_meta.append({"tool": tool_name, "args": args, "note": note, "suggested": True})
+            if suggested_lines:
+                exec_results.extend(suggested_lines)
+        # Record combined metadata (suggested plan steps + any parallel sub-agent meta)
+        self._last_execution_steps = list(plan_meta) + (parallel_meta if 'parallel_meta' in locals() else [])
         current_time = self._extract_current_time()
         if current_time:
             prompt = f"Current time: {current_time}\n\n{prompt}"
@@ -1676,7 +1684,7 @@ class MainAgent:
         self,
         prompt: str,
         message_history: list[ModelRequest | ModelResponse] | None = None,
-        skip_plan_execution: bool = False,  # 默認使用 plan execution
+        skip_plan_execution: bool = True,  # 默認跳過 plan execution，讓 agent 自己調用工具
     ):
         """Streamed version of run(): yields chunks from philosopher/subagents/main agent as they produce output."""
         self._previous_user_prompt = self._last_user_prompt
@@ -1814,280 +1822,49 @@ class MainAgent:
             exec_results.extend(parallel_results)
             pending_parallel = False
         if parallel_results or plan_list or pending_parallel:
-            yield "<tool-execution>\n"
-            open_block = True
-            registered = self._get_function_tools()
-            allowed_names = set(registered.keys())
+            # Present the plan as suggestions (do not execute tools in plan mode).
+            yield "<plan-suggestion>\n"
+            suggestion_lines: list[str] = []
+            steps_meta: list[dict[str, Any]] = []
+            # include parallel results first (no change)
             for line in parallel_results:
                 yield line + "\n"
+                suggestion_lines.append(line)
+            # present suggested plan steps
             for idx, step in enumerate(plan_list, start=1):
                 tool_name = step.get("tool") if isinstance(step, dict) else None
                 args = step.get("args", {}) if isinstance(step, dict) else {}
                 note = step.get("note") if isinstance(step, dict) else None
-                header = f"Step {idx}: {tool_name}"
+                header = f"Suggested Step {idx}: {tool_name}"
                 if note:
                     header += f"  ({note})"
-                yield header + "\n"
-                exec_results.append(header)
-                step_meta: dict[str, Any] = {
-                    "tool": tool_name,
-                    "args": args,
-                    "note": note,
-                }
+                args_text = ""
+                if args:
+                    try:
+                        args_text = f" args: {json.dumps(args, ensure_ascii=False)}"
+                    except Exception:
+                        args_text = f" args: {str(args)}"
+                line = header + args_text
+                yield line + "\n"
+                suggestion_lines.append(line)
+                steps_meta.append({"tool": tool_name, "args": args, "note": note, "suggested": True})
 
-                attempts = 0
-                current_tool = tool_name
-                current_args = args
-                current_error = ""
-                while True:
-                    if (
-                        isinstance(current_tool, str)
-                        and "ask_philosopher" in allowed_names
-                    ):
-                        if current_tool == "ask_philosopher":
-                            question = ""
-                            if isinstance(current_args, dict):
-                                question = str(
-                                    current_args.get("question")
-                                    or current_args.get("prompt")
-                                    or ""
-                                ).strip()
-                            if not question:
-                                question = self._build_sub_agent_prompt(
-                                    note, current_args, step_outputs
-                                )
-                            current_args = {
-                                "question": self._build_philosopher_prompt(
-                                    note, current_args, step_outputs, question
-                                )
-                            }
-                        elif current_tool in {"philosopher", "哲學家"}:
-                            question = self._build_sub_agent_prompt(
-                                note, current_args, step_outputs
-                            )
-                            current_tool = "ask_philosopher"
-                            current_args = {
-                                "question": self._build_philosopher_prompt(
-                                    note, current_args, step_outputs, question
-                                )
-                            }
-                        elif current_tool == "ask_sub_agent":
-                            name = ""
-                            if isinstance(current_args, dict):
-                                name = str(current_args.get("name", "")).strip().lower()
-                            if name in {
-                                "philosopher",
-                                "哲學家",
-                                "philosopher-co-agent",
-                            }:
-                                question = ""
-                                if isinstance(current_args, dict):
-                                    question = str(
-                                        current_args.get("prompt", "")
-                                    ).strip()
-                                if not question:
-                                    question = self._build_sub_agent_prompt(
-                                        note, current_args, step_outputs
-                                    )
-                                current_tool = "ask_philosopher"
-                                current_args = {
-                                    "question": self._build_philosopher_prompt(
-                                        note, current_args, step_outputs, question
-                                    )
-                                }
-
-                    if (
-                        self.sub_agents
-                        and isinstance(current_tool, str)
-                        and self.sub_agents.get_agent(current_tool)
-                        and "ask_sub_agent" in allowed_names
-                    ):
-                        prompt = self._build_sub_agent_prompt(
-                            note, current_args, step_outputs
-                        )
-                        current_args = {"name": current_tool, "prompt": prompt}
-                        current_tool = "ask_sub_agent"
-
-                    if not current_tool:
-                        current_error = "Missing 'tool' field."
-                    elif current_tool not in allowed_names:
-                        # 檢查是否為 MCP 工具
-                        if isinstance(current_tool, str) and self._is_mcp_tool(current_tool):
-                            # MCP 工具的錯誤：記錄後跳出，不進入 recovery
-                            # 這樣錯誤資訊會被傳遞給 LLM，由 LLM 生成友好的回應
-                            error_msg = (
-                                f"MCP tool '{current_tool}' cannot be executed in plan mode. "
-                                "This tool requires agent runtime context."
-                            )
-                            step_meta["error"] = error_msg
-                            line = f"  -> MCP tool error: {error_msg}"
-                            yield line + "\n"
-                            exec_results.append(line)
-                            break  # 跳出 while True 循環，不進入 recovery
-                        else:
-                            current_error = f"Tool '{current_tool}' is not registered."
-                    
-                    if not current_error and current_tool in allowed_names:
-                        
-                        if current_args:
-                            current_args = self._resolve_args(
-                                current_args, step_outputs
-                            )
-                        if current_args is None:
-                            current_args = {}
-                        elif not isinstance(current_args, dict):
-                            current_args = {"value": current_args}
-                        tool_def = (
-                            registered.get(str(current_tool))
-                            if isinstance(current_tool, str)
-                            else None
-                        )
-                        if tool_def is None:
-                            current_error = f"Tool '{current_tool}' declared but not found on agent runtime."
-                        elif getattr(tool_def, "takes_ctx", False):
-                            current_error = f"Tool '{current_tool}' requires context and cannot be called directly."
-                        else:
-                            callable_obj = tool_def.function
-                            try:
-                                try:
-                                    schema = tool_def.function_schema.json_schema or {}
-                                    expected_keys = list(
-                                        (schema.get("properties") or {}).keys()
-                                    )
-                                except Exception:
-                                    expected_keys = []
-                                if current_args and expected_keys:
-                                    expected_set = set(expected_keys)
-                                    if not set(current_args.keys()).issubset(
-                                        expected_set
-                                    ):
-                                        if (
-                                            len(expected_keys) == 1
-                                            and len(current_args) == 1
-                                        ):
-                                            current_args = {
-                                                expected_keys[0]: next(
-                                                    iter(current_args.values())
-                                                )
-                                            }
-                                if current_tool == "get_stock_history":
-                                    period = current_args.get("period")
-                                    if isinstance(period, str):
-                                        normalized = period.lower()
-                                        if normalized in {"month", "1m"}:
-                                            current_args["period"] = "1mo"
-                                        elif normalized in {"3m"}:
-                                            current_args["period"] = "3mo"
-
-                                if current_tool == "ask_philosopher":
-                                    question = str(current_args.get("question", ""))
-                                    yield "  -> result: (see discussion)\n"
-                                    if open_block:
-                                        yield "</tool-execution>\n"
-                                        open_block = False
-                                    yield "<discussion>\n"
-                                    transcript_lines: list[str] = []
-                                    async for (
-                                        line
-                                    ) in self._run_philosopher_discussion_stream(
-                                        question
-                                    ):
-                                        yield line + "\n"
-                                        transcript_lines.append(line)
-                                    yield "</discussion>\n"
-                                    transcript = "\n".join(transcript_lines)
-                                    exec_results.append(f"  -> result: {transcript}")
-                                    step_outputs.append(transcript)
-                                    step_meta["result"] = transcript
-                                    step_meta["tool"] = current_tool
-                                    if idx < len(plan_list):
-                                        yield "<tool-execution>\n"
-                                        open_block = True
-                                    break
-
-                                logger.info(
-                                    "Executing tool '%s' with args: %s",
-                                    current_tool,
-                                    current_args,
-                                )
-                                if inspect.iscoroutinefunction(callable_obj):
-                                    res = await callable_obj(**current_args)
-                                else:
-                                    maybe = (
-                                        callable_obj(**current_args)
-                                        if current_args
-                                        else callable_obj()
-                                    )
-                                    if asyncio.iscoroutine(maybe):
-                                        res = await maybe
-                                    else:
-                                        res = maybe
-                                logger.info(
-                                    "Tool '%s' execution result: %s", current_tool, res
-                                )
-                                line = f"  -> result: {res}"
-                                yield line + "\n"
-                                exec_results.append(line)
-                                step_outputs.append(str(res))
-                                step_meta["result"] = res
-                                step_meta["tool"] = current_tool
-                                break
-                            except Exception as e:
-                                logger.exception(
-                                    "Error executing tool %s", current_tool
-                                )
-                                current_error = f"Execution error: {e}"
-                                step_meta["error"] = current_error
-
-                    if attempts >= self.TOOL_RECOVERY_MAX_ATTEMPTS:
-                        if current_error:
-                            line = f"  -> execution error: {current_error}"
-                            yield line + "\n"
-                            exec_results.append(line)
-                            step_meta["error"] = current_error
-                        break
-
-                    attempts += 1
-                    line = f"  -> recovery attempt {attempts}: {current_error}"
-                    yield line + "\n"
-                    exec_results.append(line)
-                    recovery = await self._recover_tool_call(
-                        tool=current_tool,
-                        args=current_args,
-                        error=current_error,
-                        note=note,
-                    )
-                    if not recovery:
-                        line = "  -> recovery failed: no corrected tool call returned"
-                        yield line + "\n"
-                        exec_results.append(line)
-                        step_meta["error"] = (
-                            "recovery failed: no corrected tool call returned"
-                        )
-                        break
-                    current_tool = recovery.get("tool")
-                    current_args = recovery.get("args", {})
-
-                steps_meta.append(step_meta)
-
+            # if parallel tasks are still pending, collect their results
             if pending_parallel:
-                if not open_block:
-                    yield "<tool-execution>\n"
-                    open_block = True
                 parallel_results, parallel_meta = await self._collect_subagent_results(
                     order, tasks, prompt
                 )
                 steps_meta.extend(parallel_meta)
-                exec_results.extend(parallel_results)
+                suggestion_lines.extend(parallel_results)
                 for line in parallel_results:
                     yield line + "\n"
 
-            if open_block:
-                yield "</tool-execution>\n"
+            # finalize suggestion block
+            yield "</plan-suggestion>\n"
             self._last_execution_steps = steps_meta
             current_time = self._extract_current_time()
-            exec_text = "\n".join(exec_results)
-            prompt = f"{prompt}\n\nTool execution results:\n{exec_text}"
+            exec_text = "\n".join(exec_results + suggestion_lines)
+            prompt = f"{prompt}\n\nTool suggestion results:\n{exec_text}"
         if current_time:
             prompt = f"Current time: {current_time}\n\n{prompt}"
         

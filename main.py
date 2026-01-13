@@ -203,6 +203,8 @@ class GUIAgentApp:
         self._tags = (
             "<tool-execution>",
             "</tool-execution>",
+            "<plan-suggestion>",
+            "</plan-suggestion>",
             "<discussion>",
             "</discussion>",
         )
@@ -352,7 +354,7 @@ class GUIAgentApp:
 
             self._display_text += tag
             updated = True
-            if tag in ("<tool-execution>", "<discussion>"):
+            if tag in ("<tool-execution>", "<plan-suggestion>", "<discussion>"):
                 self._stream_mode = "fast"
             else:
                 self._stream_mode = "normal"
