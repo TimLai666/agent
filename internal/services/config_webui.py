@@ -7,6 +7,8 @@ from flask import Flask, render_template, request, jsonify
 from pathlib import Path
 import json
 from typing import Optional
+import threading
+import webbrowser
 
 from internal.services.config_db import (
     AgentModelConfig,
@@ -29,6 +31,13 @@ app = Flask(
     template_folder=str(Path(__file__).parent.parent.parent / "templates"),
     static_folder=str(Path(__file__).parent.parent.parent / "static"),
 )
+
+# Background web UI thread handles
+_webui_thread: threading.Thread | None = None
+_webui_url: str | None = None
+
+DEFAULT_WEBUI_HOST = "127.0.0.1"
+DEFAULT_WEBUI_PORT = 5000
 
 
 def get_available_models(provider_id: str) -> list[str]:
@@ -489,7 +498,41 @@ def start_webui(host: str = "127.0.0.1", port: int = 5000, debug: bool = False):
     print(f"   請在瀏覽器中打開此網址\n")
     print(f"   按 Ctrl+C 停止伺服器\n")
     
-    app.run(host=host, port=port, debug=debug)
+    # Blocking run (keeps existing behavior when called directly)
+    app.run(host=host, port=port, debug=debug, use_reloader=False)
+
+
+def _run_app(host: str, port: int, debug: bool) -> None:
+    try:
+        app.run(host=host, port=port, debug=debug, use_reloader=False)
+    except Exception:
+        # Suppress exceptions from threaded server shutdown
+        pass
+
+
+def ensure_webui_running(host: str = DEFAULT_WEBUI_HOST, port: int = DEFAULT_WEBUI_PORT, debug: bool = False) -> str:
+    """
+    Ensure the Web UI is running in a background thread. Returns the base URL.
+    This is idempotent and safe to call multiple times.
+    """
+    global _webui_thread, _webui_url
+    if _webui_thread and _webui_thread.is_alive():
+        return _webui_url or f"http://{host}:{port}"
+
+    _webui_url = f"http://{host}:{port}"
+    _webui_thread = threading.Thread(target=_run_app, args=(host, port, debug), daemon=True)
+    _webui_thread.start()
+    return _webui_url
+
+
+def open_config_in_browser(host: str = DEFAULT_WEBUI_HOST, port: int = DEFAULT_WEBUI_PORT, new: int = 2) -> bool:
+    """Ensure server running and open config page in default browser."""
+    url = ensure_webui_running(host=host, port=port)
+    try:
+        webbrowser.open(url, new=new)
+        return True
+    except Exception:
+        return False
 
 
 if __name__ == "__main__":

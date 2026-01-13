@@ -4,6 +4,11 @@ CLI 和 GUI 模式都使用此模組處理用戶指令
 """
 
 from typing import Callable, Optional
+import threading
+import webbrowser
+
+from internal.services import config_webui
+from internal.services import config_cli
 from internal.agents import MainAgent
 from internal.logger import logger
 
@@ -95,6 +100,36 @@ class CommandHandler:
         # /retry - 重新執行最後的輸入
         elif name == "/retry":
             return self._handle_retry()
+
+        # /config - 啟動設定 CLI 菜單（CLI 下同步，GUI 下非同步）
+        elif name == "/config":
+            try:
+                if self.output_callback == print:
+                    # CLI: run interactive menu synchronously
+                    config_cli.cmd_config_menu()
+                else:
+                    # GUI: run the CLI menu in a background thread so it doesn't block UI
+                    t = threading.Thread(target=config_cli.cmd_config_menu, daemon=True)
+                    t.start()
+                    self.output_callback("開啟設定選單（在終端中互動）...")
+            except Exception as e:
+                logger.error(f"Failed to open config menu: {e}")
+                self.output_callback(f"無法啟動設定選單: {e}")
+            return None
+
+        # /config-web - 開啟設定 Web UI 頁面（會確保伺服器正在執行）
+        elif name == "/config-web":
+            try:
+                url = config_webui.ensure_webui_running()
+                opened = webbrowser.open(url, new=2)
+                if opened:
+                    self.output_callback(f"已在瀏覽器開啟設定頁：{url}")
+                else:
+                    self.output_callback(f"設定頁位置：{url}（請手動打開）")
+            except Exception as e:
+                logger.error(f"Failed to open config web UI: {e}")
+                self.output_callback(f"無法開啟設定頁: {e}")
+            return None
         
         # 未知指令
         else:
@@ -109,6 +144,8 @@ class CommandHandler:
   /help              顯示此幫助訊息
   /exit, /quit       退出程式
   /clear             清空屏幕/對話框
+    /config            開啟文字式設定選單（CLI）或在終端中顯示（GUI）
+    /config-web        在瀏覽器中開啟設定頁（會啟動背景 Web UI）
 
 查詢指令：
   /tools             列出所有可用工具

@@ -14,6 +14,7 @@ from internal.logger import logger
 from internal.services.agent_factory import load_base_config
 from internal.services.voice_manager import VoiceManager
 from internal.command_handler import CommandHandler
+from internal.services import config_cli, config_webui
 
 HISTORY_LIMIT = 30
 TYPEWRITER_DELAY = 0.04
@@ -185,6 +186,8 @@ def _print_help() -> None:
                 "Commands:",
                 "/help              Show this help.",
                 "/exit, /quit       Exit the session.",
+                "/config            Open text configuration menu (CLI).",
+                "/config-web        Open configuration Web UI in browser.",
                 "/clear             Clear the screen.",
                 "/history [N]       Show last N turns (default 5).",
                 "/last              Show last assistant reply.",
@@ -213,6 +216,29 @@ def _handle_command(
         return "__exit__"
     if name == "/help":
         _print_help()
+        return None
+    if name == "/config":
+        # Launch CLI configuration menu (blocking in CLI)
+        try:
+            config_cli.cmd_config_menu()
+        except Exception as e:
+            print(f"Failed to open config menu: {e}")
+        return None
+    if name == "/config-web":
+        try:
+            url = config_webui.ensure_webui_running()
+            try:
+                import webbrowser
+
+                opened = webbrowser.open(url, new=2)
+                if opened:
+                    print(f"Opened config web UI in browser: {url}")
+                else:
+                    print(f"Config web UI available at: {url}")
+            except Exception:
+                print(f"Config web UI available at: {url}")
+        except Exception as e:
+            print(f"Failed to ensure config web UI running: {e}")
         return None
     if name == "/clear":
         print("\n" * 80)

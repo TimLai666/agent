@@ -24,6 +24,7 @@ from internal.services.circle_ui import MainWindow, ConfirmDialog, CommandLineEd
 from internal.services.voice_manager import VoiceManager
 from internal.cli import set_gui_confirm_handler
 from internal.command_handler import CommandHandler
+from internal.services import config_webui, config_cli
 
 HISTORY_LIMIT = 30
 COMMAND_PREFIX = "/"
@@ -509,14 +510,26 @@ def main() -> None:
     args = parser.parse_args()
 
     try:
+        # Ensure Web UI server is running in background (always on)
+        try:
+            config_webui.ensure_webui_running()
+        except Exception:
+            # best-effort; continue if web UI cannot start
+            pass
+
+        # Backwards-compatible flags: if user explicitly requested, run them.
         if args.config:
-            # Open configuration CLI menu
-            from internal.services.config_cli import cmd_config_menu
-            cmd_config_menu()
+            config_cli.cmd_config_menu()
         elif args.config_web:
-            # Open configuration Web UI
-            from internal.services.config_webui import start_webui
-            start_webui(host="127.0.0.1", port=5000, debug=False)
+            # Open browser to config page
+            try:
+                import webbrowser
+
+                url = config_webui.ensure_webui_running()
+                webbrowser.open(url, new=2)
+                print(f"Opened config web UI: {url}")
+            except Exception:
+                print("Config web UI available; open your browser to http://127.0.0.1:5000")
         elif args.gui:
             gui_app = GUIAgentApp()
             sys.exit(gui_app.run())
