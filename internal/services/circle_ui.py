@@ -780,6 +780,19 @@ class SiriResponseBubble(QWidget):
         except Exception:
             pass
     
+    def _delayed_layout_refresh(self):
+        """延遲批量處理布局刷新，減少重繪"""
+        try:
+            self._refresh_layout_metrics(process_events=False)
+            # 滾動到頂部（僅在需要時）
+            scrollbar = self.scroll.verticalScrollBar()
+            if scrollbar.value() > 50:  # 只有當用戶沒有向下滾動時才自動回頂
+                scrollbar.setValue(0)
+            # 延遲處理事件，避免阻塞
+            QTimer.singleShot(100, lambda: QApplication.processEvents())
+        except Exception as e:
+            logger.debug(f"Delayed layout refresh error: {e}")
+    
     def _request_parent_update(self):
         """Request parent (MainWindow) to update speech bubble size after section toggle."""
         try:
@@ -1060,12 +1073,8 @@ class SiriResponseBubble(QWidget):
 
         self.layout.addStretch(1)
 
-        self._refresh_layout_metrics()
-        try:
-            self.scroll.verticalScrollBar().setValue(0)
-        except Exception:
-            pass
-        QTimer.singleShot(0, lambda: self._refresh_layout_metrics())
+        # 延遲批量處理布局更新，減少重繪
+        QTimer.singleShot(0, self._delayed_layout_refresh)
 
     def _parse_segments(self, text: str):
         tags = {
@@ -1456,61 +1465,58 @@ class MainWindow(QMainWindow):
         """更新對話框內容，輸出框疊到球的上方一半"""
         self.speech_bubble.set_content(text)
 
-        # Process events to allow layout updates before measuring
-        QApplication.processEvents()
-
-        # 計算氣泡大小
-        padding = 60
-        bubble_width = min(max(self.speech_bubble.preferred_width, 240), self.FIXED_WIDTH - 40)
-        
-        # 計算內容需要的高度
-        needed_height = self.speech_bubble.content_height() + padding
-        # 氣泡最大高度限制
-        max_bubble_height = self.FIXED_HEIGHT - 200
-        bubble_height = min(
-            max(needed_height, 80),  # 最小高度改為80
-            max_bubble_height,
-        )
-        
-        self.speech_bubble.setFixedSize(bubble_width, bubble_height)
-        
-        # Force synchronous layout updates
+        # 延遲處理事件，避免阻塞主線程
+        QTimer.singleShot(0, self._update_bubble_geometry)
+    
+    def _update_bubble_geometry(self):
+        """更新氣泡幾何形狀（延遲調用以避免阻塞）"""
         try:
-            self.speech_bubble.layout.activate()
-            self.speech_bubble.container.adjustSize()
-            QApplication.processEvents()
-        except Exception:
-            pass
-
-
-
-        # 計算氣泡位置：疊到球的一半
-        window_center_x = self.FIXED_WIDTH // 2
-        # 球心位於底部往上BALL_CENTER_FROM_BOTTOM的位置
-        ball_center_y = self.FIXED_HEIGHT - self.BALL_CENTER_FROM_BOTTOM
-        
-        # 氣泡只疊到球的一半（氣泡下邊緣對齊球心）
-        bubble_x = window_center_x - bubble_width // 2
-        bubble_y = ball_center_y - bubble_height
-        
-        # 確保氣泡不會超出視窗邊界
-        bubble_x = max(10, min(bubble_x, self.FIXED_WIDTH - bubble_width - 10))
-        bubble_y = max(20, min(bubble_y, self.FIXED_HEIGHT - bubble_height - 80))
-
-        # 設置講話框位置
-        self.speech_bubble.move(bubble_x, bubble_y)
-        self.speech_bubble.show()
-
-        # 更新輸入容器位置（固定在視窗底部）
-        if self.input_container.isVisible():
-            input_width = min(self.FIXED_WIDTH - 40, 500)
-            self.input_container.setGeometry(
-                (self.FIXED_WIDTH - input_width) // 2,
-                self.FIXED_HEIGHT - self.INPUT_HEIGHT - self.INPUT_FROM_BOTTOM,
-                input_width,
-                self.INPUT_HEIGHT,
+            # 計算氣泡大小
+            padding = 60
+            bubble_width = min(max(self.speech_bubble.preferred_width, 240), self.FIXED_WIDTH - 40)
+            
+            # 計算內容需要的高度
+            needed_height = self.speech_bubble.content_height() + padding
+            # 氣泡最大高度限制
+            max_bubble_height = self.FIXED_HEIGHT - 200
+            bubble_height = min(
+                max(needed_height, 80),  # 最小高度改為80
+                max_bubble_height,
             )
-            self.input_container.show()
+            
+            self.speech_bubble.setFixedSize(bubble_width, bubble_height)
+
+
+
+            # 計算氣泡位置：疊到球的一半
+            window_center_x = self.FIXED_WIDTH // 2
+            # 球心位於底部往上BALL_CENTER_FROM_BOTTOM的位置
+            ball_center_y = self.FIXED_HEIGHT - self.BALL_CENTER_FROM_BOTTOM
+            
+            # 氣泡只疊到球的一半（氣泡下邊緣對齊球心）
+            bubble_x = window_center_x - bubble_width // 2
+            bubble_y = ball_center_y - bubble_height
+            
+            # 確保氣泡不會超出視窗邊界
+            bubble_x = max(10, min(bubble_x, self.FIXED_WIDTH - bubble_width - 10))
+            bubble_y = max(20, min(bubble_y, self.FIXED_HEIGHT - bubble_height - 80))
+
+            # 設置講話框位置
+            self.speech_bubble.move(bubble_x, bubble_y)
+            self.speech_bubble.show()
+
+            # 更新輸入容器位置（固定在視窗底部）
+            if self.input_container.isVisible():
+                input_width = min(self.FIXED_WIDTH - 40, 500)
+                self.input_container.setGeometry(
+                    (self.FIXED_WIDTH - input_width) // 2,
+                    self.FIXED_HEIGHT - self.INPUT_HEIGHT - self.INPUT_FROM_BOTTOM,
+                    input_width,
+                    self.INPUT_HEIGHT,
+                )
+                self.input_container.show()
+        except Exception as e:
+            logger.error(f"Bubble geometry update error: {e}")
 
 
 class ConfirmDialog(QDialog):

@@ -220,6 +220,7 @@ class MainAgent:
             discussion_agent,
             decider_agent,
             skills,
+            http_client,
         )
         try:
             add_all_tools(
@@ -252,6 +253,7 @@ class MainAgent:
         discussion_agent: Agent[None, str] | None = None,
         decider_agent: Agent[None, str] | None = None,
         skills: SkillRegistry | None = None,
+        http_client: AsyncClient | None = None,
     ) -> None:
         self.agent = agent
         self.philosopher = philosopher
@@ -266,7 +268,41 @@ class MainAgent:
         self._previous_user_prompt: str | None = None
         self._last_assistant_reply: str | None = None
         self._mcp_tool_names: set[str] | None = None  # 緩存 MCP 工具名稱列表
+        self._http_client = http_client  # 保存以便重載 model
         # tools are registered via add_all_tools during create()
+
+    def _reload_model_from_db(self) -> None:
+        """從資料庫重新載入配置並更新 model。
+        
+        每次 run() 或 run_stream() 時都會調用，確保使用最新的配置。
+        """
+        if not self._http_client:
+            logger.warning("無法重載 model：沒有 http_client")
+            return
+        
+        try:
+            # 從資料庫載入最新配置
+            config = AgentConfig(
+                name="main",
+                base_url=None,
+                api_key=None,
+                model_name="",
+                temperature=0.5,
+            )
+            new_model = create_openai_model(config, self._http_client)
+            
+            # 更新所有 agent 的 model
+            self.agent._model = new_model
+            if self._planner_agent and self._planner_agent is not self.agent:
+                self._planner_agent._model = new_model
+            if self._discussion_agent and self._discussion_agent is not self.agent:
+                self._discussion_agent._model = new_model
+            if self._decider_agent and self._decider_agent is not self.agent:
+                self._decider_agent._model = new_model
+            
+            logger.debug("已從資料庫重載 model 配置")
+        except Exception:
+            logger.exception("重載 model 配置失敗，繼續使用現有配置")
 
     async def _extract_execution_plan(self, text: str) -> dict | None:
         """Try to extract an execution plan JSON from free text.
@@ -1545,6 +1581,9 @@ class MainAgent:
         message_history: list[ModelRequest | ModelResponse] | None = None,
         skip_plan_execution: bool = True,  # 默認跳過 plan execution，讓 agent 自己調用工具
     ) -> str:
+        # 每次執行前從資料庫重載配置
+        self._reload_model_from_db()
+        
         self._previous_user_prompt = self._last_user_prompt
         self._last_user_prompt = prompt
         prompt, explicit_subagents = self._prepare_prompt(prompt)
@@ -1687,6 +1726,9 @@ class MainAgent:
         skip_plan_execution: bool = True,  # 默認跳過 plan execution，讓 agent 自己調用工具
     ):
         """Streamed version of run(): yields chunks from philosopher/subagents/main agent as they produce output."""
+        # 每次執行前從資料庫重載配置
+        self._reload_model_from_db()
+        
         self._previous_user_prompt = self._last_user_prompt
         self._last_user_prompt = prompt
         prompt, explicit_subagents = self._prepare_prompt(prompt)

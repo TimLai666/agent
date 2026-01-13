@@ -213,6 +213,13 @@ class GUIAgentApp:
         self._last_assistant_reply = ""  # 記錄最後的助手回覆（用於 /last）
         self._gui_history: list[tuple[str, str]] = []  # GUI 對話歷史
         
+        # UI 更新節流機制
+        self._update_throttle_timer = QTimer()
+        self._update_throttle_timer.setSingleShot(True)
+        self._update_throttle_timer.timeout.connect(self._flush_display_update)
+        self._pending_display_update = False
+        self._throttle_interval = 50  # 最小更新間隔（毫秒）
+        
         # 創建指令處理器（GUI 專用的輸出回調）
         self.command_handler: CommandHandler | None = None
         
@@ -361,7 +368,8 @@ class GUIAgentApp:
             self._stream_buffer = self._stream_buffer[idx + len(tag) :]
 
         if updated:
-            self.main_window.update_speech_bubble(self._display_text)
+            # 使用節流更新
+            self._request_display_update()
 
         if self._pending and not self._typewriter_active:
             self._typewriter_active = True
@@ -381,11 +389,28 @@ class GUIAgentApp:
             self._pending.popleft()
 
         self._display_text += ch
-        self.main_window.update_speech_bubble(self._display_text)
+        # 使用節流更新而非直接更新
+        self._request_display_update()
 
         speed_factor = 1.0 / (1.0 + (backlog_len / BACKLOG_SCALE))
         delay = max(BASE_DELAY * MIN_FACTOR, BASE_DELAY * speed_factor)
         self._typewriter_timer.start(int(delay * 1000))
+    
+    def _request_display_update(self):
+        """請求顯示更新（節流）"""
+        self._pending_display_update = True
+        if not self._update_throttle_timer.isActive():
+            self._flush_display_update()
+            self._update_throttle_timer.start(self._throttle_interval)
+    
+    def _flush_display_update(self):
+        """執行實際的顯示更新"""
+        if self._pending_display_update:
+            try:
+                self.main_window.update_speech_bubble(self._display_text)
+                self._pending_display_update = False
+            except Exception as e:
+                logger.error(f"Display update error: {e}")
 
     def _gui_output_callback(self, text: str):
         """GUI 輸出回調函數，用於指令處理器"""
