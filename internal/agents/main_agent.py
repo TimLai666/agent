@@ -664,9 +664,9 @@ class MainAgent:
 
     async def ask_philosopher(self, question: str) -> str:
         """Tool: forward question to philosopher co-agent."""
-        logger.info("Main agent -> philosopher")
-        print("[LOG] main -> philosopher")
-        return await self._run_philosopher_discussion(question)
+        if not self.philosopher:
+            raise RuntimeError("Philosopher co-agent is not available.")
+        return await self.philosopher.run(question)
 
     async def _run_philosopher_discussion(self, question: str) -> str:
         discussion: list[tuple[str, str]] = []
