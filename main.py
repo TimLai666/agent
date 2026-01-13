@@ -496,10 +496,28 @@ def main() -> None:
         action="store_true",
         help="Launch the GUI version.",
     )
+    parser.add_argument(
+        "--config",
+        action="store_true",
+        help="Open configuration menu (CLI) to manage providers and agent settings.",
+    )
+    parser.add_argument(
+        "--config-web",
+        action="store_true",
+        help="Open configuration Web UI to manage providers and agent settings.",
+    )
     args = parser.parse_args()
 
     try:
-        if args.gui:
+        if args.config:
+            # Open configuration CLI menu
+            from internal.services.config_cli import cmd_config_menu
+            cmd_config_menu()
+        elif args.config_web:
+            # Open configuration Web UI
+            from internal.services.config_webui import start_webui
+            start_webui(host="127.0.0.1", port=5000, debug=False)
+        elif args.gui:
             gui_app = GUIAgentApp()
             sys.exit(gui_app.run())
         else:

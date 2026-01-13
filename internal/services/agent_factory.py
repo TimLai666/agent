@@ -3,13 +3,17 @@ from typing import Any
 
 from httpx import AsyncClient
 from pydantic_ai.models.openai import OpenAIChatModel
-from pydantic_ai.providers.openai import OpenAIProvider
 
 from internal.logger import logger
+from internal.services.config_manager import create_model_for_agent
 
 
 @dataclass
 class AgentConfig:
+    """
+    Legacy config structure - kept for compatibility with existing code.
+    New code should use config_manager directly.
+    """
     name: str
     base_url: str | None
     api_key: str | None
@@ -17,69 +21,54 @@ class AgentConfig:
     temperature: float
 
 
-def normalize_base_url(base_url: str | None) -> str | None:
-    if not base_url:
-        return None
-    base_url = base_url.rstrip("/")
-    if base_url.endswith("/v1"):
-        base_url = base_url[:-3].rstrip("/")
-    return base_url
-
-
 def create_openai_model(config: AgentConfig, http_client: AsyncClient) -> OpenAIChatModel:
-    base_url = f"{config.base_url}/v1" if config.base_url else None
-    provider = OpenAIProvider(
-        base_url=base_url,
-        api_key=config.api_key,
-        http_client=http_client,
-    )
-    if not config.model_name:
-        logger.warning(f"{config.name} model name is empty.")
-    return OpenAIChatModel(model_name=config.model_name, provider=provider)
+    """
+    Create OpenAI model from AgentConfig.
+    Loads configuration from database only.
+    
+    Raises:
+        ValueError: If no configuration found for the agent.
+    """
+    model = create_model_for_agent(config.name, http_client)
+    if not model:
+        logger.error(
+            f"No configuration found for agent '{config.name}'. "
+            f"Please run 'python main.py --config' to set up the agent."
+        )
+        raise ValueError(
+            f"Agent '{config.name}' is not configured. "
+            f"Run 'python main.py --config' to configure it."
+        )
+    return model
 
 
-def load_agent_config(
-    prefix: str, defaults: AgentConfig, env: dict[str, str]
-) -> AgentConfig:
-    base_url = normalize_base_url(
-        _get_env_value(env, prefix, "OPENAI_BASE_URL", defaults.base_url)
-    )
-    api_key = _get_env_value(env, prefix, "OPENAI_API_KEY", defaults.api_key)
-    model_name = _get_env_value(env, prefix, "MODEL_NAME", defaults.model_name)
-    temperature = _get_env_float(env, prefix, "MODEL_TEMPERATURE", defaults.temperature)
+def load_agent_config_chain(prefixes: list[str], defaults: AgentConfig, env: dict[str, str]) -> AgentConfig:
+    """
+    Returns the default config - actual configuration is loaded from database.
+    This function is kept for API compatibility but env parameter is ignored.
+    """
+    # Return base config with the last prefix name
     return AgentConfig(
-        name=prefix.lower(),
-        base_url=base_url,
-        api_key=api_key,
-        model_name=model_name,
-        temperature=temperature,
+        name=prefixes[-1].lower() if prefixes else defaults.name,
+        base_url=defaults.base_url,
+        api_key=defaults.api_key,
+        model_name=defaults.model_name,
+        temperature=defaults.temperature,
     )
-
-
-def load_agent_config_chain(
-    prefixes: list[str], defaults: AgentConfig, env: dict[str, str]
-) -> AgentConfig:
-    config = defaults
-    for prefix in prefixes:
-        config = load_agent_config(prefix, config, env)
-    return config
 
 
 def load_base_config(env: dict[str, str]) -> AgentConfig:
-    base_temperature = 0.2
-    if env.get("MODEL_TEMPERATURE"):
-        try:
-            base_temperature = float(env["MODEL_TEMPERATURE"])
-        except ValueError:
-            logger.warning(
-                f"Invalid MODEL_TEMPERATURE '{env['MODEL_TEMPERATURE']}', using default {base_temperature}."
-            )
+    """
+    Returns a placeholder base config.
+    Actual configuration is loaded from database.
+    This function is kept for API compatibility but env parameter is ignored.
+    """
     return AgentConfig(
         name="base",
-        base_url=normalize_base_url(env.get("OPENAI_BASE_URL")),
-        api_key=env.get("OPENAI_API_KEY"),
-        model_name=env.get("MODEL_NAME") or "",
-        temperature=base_temperature,
+        base_url=None,
+        api_key=None,
+        model_name="",
+        temperature=0.2,
     )
 
 
