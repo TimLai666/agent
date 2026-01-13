@@ -25,4 +25,5 @@ dependencies = [
     "undetected-chromedriver>=3.5.5",
     "whisper>=1.1.10",
     "yfinance>=0.2.65",
+    "duckduckgo-search>=8.1.1",
 ]

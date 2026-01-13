@@ -22,6 +22,7 @@ class CommandHandler:
         history: list[tuple[str, str]],
         output_callback: Optional[Callable[[str], None]] = None,
         exit_callback: Optional[Callable[[], None]] = None,
+        gui_window = None,
     ):
         """
         初始化指令處理器
@@ -31,11 +32,13 @@ class CommandHandler:
             history: 對話歷史記錄（用戶輸入、助手回覆）列表
             output_callback: 輸出回調函數（用於 GUI 顯示），如果為 None 則使用 print
             exit_callback: 退出回調函數（用於 GUI 關閉視窗）
+            gui_window: GUI 主窗口實例（用於打開 webview）
         """
         self.main_agent = main_agent
         self.history = history
         self.output_callback = output_callback or print
         self.exit_callback = exit_callback
+        self.gui_window = gui_window
         self.last_user_prompt = ""
         self.last_assistant_reply = ""
     
@@ -117,15 +120,23 @@ class CommandHandler:
                 self.output_callback(f"無法啟動設定選單: {e}")
             return None
 
-        # /config-web - 開啟設定 Web UI 頁面（會確保伺服器正在執行）
+        # /config-web - 開啟設定 Web UI 頁面（GUI 模式下使用 webview，CLI 模式下使用瀏覽器）
         elif name == "/config-web":
             try:
                 url = config_webui.ensure_webui_running()
-                opened = webbrowser.open(url, new=2)
-                if opened:
-                    self.output_callback(f"已在瀏覽器開啟設定頁：{url}")
+                
+                # 檢查是否為 GUI 模式（有 gui_window 且非 None）
+                if self.gui_window is not None:
+                    # GUI 模式：使用內建 webview
+                    self.gui_window.open_config_webview()
+                    self.output_callback("已打開配置頁面")
                 else:
-                    self.output_callback(f"設定頁位置：{url}（請手動打開）")
+                    # CLI 模式：使用外部瀏覽器
+                    opened = webbrowser.open(url, new=2)
+                    if opened:
+                        self.output_callback(f"已在瀏覽器開啟設定頁：{url}")
+                    else:
+                        self.output_callback(f"設定頁位置：{url}（請手動打開）")
             except Exception as e:
                 logger.error(f"Failed to open config web UI: {e}")
                 self.output_callback(f"無法開啟設定頁: {e}")
@@ -145,7 +156,7 @@ class CommandHandler:
   /exit, /quit       退出程式
   /clear             清空屏幕/對話框
     /config            開啟文字式設定選單（CLI）或在終端中顯示（GUI）
-    /config-web        在瀏覽器中開啟設定頁（會啟動背景 Web UI）
+    /config-web        打開配置頁面（GUI 中使用內建 webview，CLI 中使用瀏覽器）
 
 查詢指令：
   /tools             列出所有可用工具

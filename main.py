@@ -261,6 +261,7 @@ class GUIAgentApp:
                 history=self._gui_history,
                 output_callback=self._gui_output_callback,
                 exit_callback=self.main_window.close,
+                gui_window=self.main_window,  # 傳入 GUI 窗口以支持 webview
             )
         
         self.main_window.update_speech_bubble("AI ready. Double-click to show input.")

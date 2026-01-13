@@ -3,8 +3,16 @@ import re
 import string
 import sys
 
-from PySide6.QtCore import Qt, QTimer, QVariantAnimation, QPropertyAnimation, QEasingCurve, Property, QMetaObject, Signal, Slot, QEventLoop
+from PySide6.QtCore import Qt, QTimer, QVariantAnimation, QPropertyAnimation, QEasingCurve, Property, QMetaObject, Signal, Slot, QEventLoop, QUrl
 from PySide6.QtGui import QColor, QPainter, QPen, QRadialGradient, QKeyEvent
+
+# QtWebEngine is optional - only import when needed
+try:
+    from PySide6.QtWebEngineWidgets import QWebEngineView
+    HAS_WEBENGINE = True
+except ImportError:
+    HAS_WEBENGINE = False
+    QWebEngineView = None  # type: ignore
 
 # Convert bare URLs in markdown/plain text into markdown links so QTextBrowser renders them as clickable
 import re
@@ -1357,6 +1365,8 @@ class MainWindow(QMainWindow):
 
         self.input_container.hide()  # 初始隱藏
 
+        self.config_webview_window = None  # WebView 窗口引用
+
         self._pending_geometry_refresh = False
         
         # 连接确认信号到槽
@@ -1365,6 +1375,52 @@ class MainWindow(QMainWindow):
     def set_input_callback(self, callback):
         """設置輸入回調函數"""
         self.input_callback = callback
+    
+    def open_config_webview(self):
+        """打開配置頁面 WebView"""
+        try:
+            if not HAS_WEBENGINE:
+                error_msg = (
+                    "無法打開內建 WebView：\n\n"
+                    "PySide6-WebEngine 未安裝。\n\n"
+                    "請在終端中執行：\n"
+                    "pip install PySide6-WebEngine\n\n"
+                    "或使用指令：/config （終端模式）"
+                )
+                self.update_speech_bubble(error_msg)
+                logger.warning("WebEngine not available")
+                return
+            
+            from internal.services import config_webui
+            
+            # 確保 Web UI 正在運行
+            url = config_webui.ensure_webui_running()
+            
+            # 如果窗口已存在，顯示並激活
+            if self.config_webview_window is not None:
+                try:
+                    self.config_webview_window.show()
+                    self.config_webview_window.activateWindow()
+                    self.config_webview_window.raise_()
+                    logger.info("Config webview window reactivated")
+                except RuntimeError:
+                    # 窗口已被刪除，重新創建
+                    self.config_webview_window = None
+            
+            if self.config_webview_window is None:
+                # 創建新窗口
+                self.config_webview_window = ConfigWebViewWindow(url, parent=self)
+                self.config_webview_window.show()
+                logger.info(f"Created new config webview: {url}")
+            
+        except ImportError as e:
+            error_msg = f"無法打開配置頁面：\n{str(e)}\n\n請安裝 PySide6-WebEngine"
+            self.update_speech_bubble(error_msg)
+            logger.error(f"Failed to open config webview: {e}")
+        except Exception as e:
+            error_msg = f"無法打開配置頁面：{str(e)}"
+            self.update_speech_bubble(error_msg)
+            logger.error(f"Failed to open config webview: {e}", exc_info=True)
 
     @Slot(str, str, object)
     def _handle_confirm_request(self, message: str, default_choice: str, result_container: object):
@@ -1519,6 +1575,26 @@ class MainWindow(QMainWindow):
             logger.error(f"Bubble geometry update error: {e}")
 
 
+class ConfigWebViewWindow(QMainWindow):
+    """配置頁面 WebView 窗口"""
+    
+    def __init__(self, url: str, parent=None):
+        super().__init__(parent)
+        
+        if not HAS_WEBENGINE:
+            raise ImportError("PySide6-WebEngine is not installed. Please run: pip install PySide6-WebEngine")
+        
+        self.setWindowTitle("Agent 配置管理")
+        self.setGeometry(100, 100, 1200, 800)
+        
+        # 創建 WebView
+        self.webview = QWebEngineView()
+        self.webview.setUrl(QUrl(url))
+        
+        # 直接將 WebView 設置為中央組件，不添加工具欄
+        self.setCentralWidget(self.webview)
+
+
 class ConfirmDialog(QDialog):
     """確認對話框，用於工具執行確認"""
     
@@ -1571,14 +1647,14 @@ class ConfirmDialog(QDialog):
         # 訊息標籤
         message_label = QLabel(message)
         message_label.setWordWrap(True)
-        message_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        message_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         layout.addWidget(message_label)
         
         # 按鈕區域
         button_box = QDialogButtonBox()
         
-        yes_button = button_box.addButton("允許", QDialogButtonBox.AcceptRole)
-        no_button = button_box.addButton("拒絕", QDialogButtonBox.RejectRole)
+        yes_button = button_box.addButton("允許", QDialogButtonBox.ButtonRole.AcceptRole)
+        no_button = button_box.addButton("拒絕", QDialogButtonBox.ButtonRole.RejectRole)
         no_button.setObjectName("cancelButton")
         
         # 根據默認選擇設置默認按鈕
@@ -1599,7 +1675,7 @@ class ConfirmDialog(QDialog):
     def get_result(self) -> bool:
         """顯示對話框並返回結果"""
         result = self.exec()
-        return result == QDialog.Accepted
+        return result == QDialog.DialogCode.Accepted
 
 
 if __name__ == "__main__":
