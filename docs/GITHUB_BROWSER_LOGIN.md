@@ -72,27 +72,24 @@ uv run main.py --config
 
 ### 使用的認證方式
 
-這個系統使用 **GitHub Device Flow**，這是 GitHub 官方推薦用於桌面應用程式的 OAuth 方式。
+這個系統使用 **GitHub Device Flow**，GitHub 官方推薦用於桌面應用程式的 OAuth 方式。
 
 **優點**：
-- ✅ 不需要 client_secret（更安全）
+- ✅ 不需要 client_secret
 - ✅ 不需要處理複雜的回調 URL
-- ✅ 適合無法嵌入瀏覽器的應用
 - ✅ 用戶體驗友好
 
 **流程**：
-```
 1. 應用程式請求裝置碼 → GitHub 返回 user_code 和 device_code
-2. 應用程式顯示 user_code 給用戶
-3. 用戶在瀏覽器中輸入 user_code
-4. 應用程式輪詢 GitHub 檢查授權狀態
-5. 用戶完成授權後，應用程式獲得 access_token
-```
+2. 用戶在瀏覽器中輸入 user_code
+3. 應用程式輪詢 GitHub 檢查授權狀態
+4. 用戶完成授權後，獲得 access_token
+5. 系統自動用 GitHub token 換取 Copilot API token
 
 ### 需要的權限（Scopes）
 
 自動請求以下權限：
-- `repo` - 存取倉庫（用於 Copilot）
+- `repo` - 存取倉庫
 - `read:org` - 讀取組織資訊
 - `copilot` - 使用 GitHub Copilot
 
@@ -113,39 +110,19 @@ uv run main.py --config
 ## 常見問題
 
 ### Q: 瀏覽器沒有自動打開？
-
 **A**: 手動複製程式顯示的 URL 到瀏覽器中打開。
 
 ### Q: 看到「Port 8765 already in use」錯誤？
-
-**A**: 有其他程式正在使用 8765 端口。你可以：
-1. 關閉佔用該端口的程式
-2. 等待幾分鐘後重試
-3. 或使用「手動輸入 token」方式
+**A**: 有其他程式正在使用 8765 端口。關閉佔用該端口的程式，或使用「手動輸入 token」方式。
 
 ### Q: 認證超時怎麼辦？
-
-**A**: Device Flow 的代碼有效期是 15 分鐘。如果超時：
-1. 重新執行配置命令
-2. 更快地完成瀏覽器授權步驟
-
-### Q: 我想撤銷授權怎麼辦?
-
-**A**: 訪問 https://github.com/settings/applications
-- 找到你的應用程式
-- 點擊「Revoke」撤銷授權
+**A**: Device Flow 的代碼有效期是 15 分鐘。如果超時，重新執行配置命令。
 
 ### Q: Token 會過期嗎？
-
-**A**: GitHub OAuth tokens 預設不會過期，除非你手動撤銷。如果 token 過期或失效，重新執行瀏覽器登入即可。
+**A**: GitHub OAuth token 預設不會過期。如果 token 失效，重新執行瀏覽器登入即可。
 
 ### Q: 這個方式安全嗎？
-
-**A**: 是的！Device Flow 是 GitHub 官方推薦的桌面應用認證方式：
-- 不需要在應用中儲存 client_secret
-- Token 直接從 GitHub 獲取
-- 使用標準的 OAuth 2.0 流程
-- 符合安全最佳實踐
+**A**: 是的！Device Flow 是 GitHub 官方推薦的桌面應用認證方式，使用標準的 OAuth 2.0 流程。
 
 ## 與其他方式的比較
 

@@ -9,6 +9,7 @@
 - **[Web UI 配置指南](WEB_UI_GUIDE.md)** - 圖形化配置介面使用說明（推薦）⭐
 - **[Windows 快速開始](WINDOWS_QUICK_START.md)** - Windows 用戶的完整安裝與配置指南
 - **[配置指南](CONFIG_GUIDE.md)** - 模型提供者和 Agent 配置說明（包含 CLI 和 Web UI）
+- **[默認配置指南](DEFAULT_CONFIG_GUIDE.md)** - 多級默認配置系統使用說明
 - **[遷移指南](MIGRATION_GUIDE.md)** - 從舊版環境變數遷移到新配置系統
 
 ### 🔐 GitHub 認證
@@ -30,20 +31,6 @@
 - [Skills 匹配與優先級](SKILLS_MATCHING_AND_PRIORITY.md)
 - [Skills LLM 匹配](SKILLS_LLM_MATCHING.md)
 - [多語言支援](SKILLS_MULTILINGUAL_SUPPORT.md)
-
-### 🔧 技術實現細節
-
-<details>
-<summary>展開查看技術文檔</summary>
-
-- [Skills 異步修復](SKILLS_ASYNC_FIX.md)
-- [Skills Claude Code 實現](SKILLS_CLAUDE_CODE_IMPLEMENTATION.md)
-- [Skills 完整實現](SKILLS_FULL_IMPLEMENTATION.md)
-- [Skills 優先級更新](SKILLS_PRIORITY_UPDATE.md)
-- [Skills Tool-based 遷移](SKILLS_TOOL_BASED_MIGRATION.md)
-- [Skills 工具描述修復](SKILLS_TOOL_DESCRIPTION_FIX.md)
-
-</details>
 
 ---
 

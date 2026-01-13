@@ -72,11 +72,16 @@ API Key: sk-ant-...
 1. 選擇 "新增 GitHub Copilot 提供者"
 2. 輸入提供者 ID (例如: `github-copilot`)
 3. 選擇取得 Token 的方式：
-   - **瀏覽器登入** (推薦) - 無需安裝 gh CLI
+   - **瀏覽器登入** (推薦)
    - **自動取得** - 需要已登入 gh CLI
-   - **手動輸入** - 手動貼上 Token
+   - **手動輸入**
 
-推薦使用 **Web UI + 瀏覽器登入**，最簡單！詳見 [GitHub 瀏覽器登入指南](GITHUB_BROWSER_LOGIN.md)。
+推薦使用 **Web UI + 瀏覽器登入**，最簡單！
+
+**技術說明**：
+- 使用兩段式認證：GitHub OAuth token → Copilot API token
+- Token 自動緩存和刷新，有效期約 10 分鐘
+- API 端點：`https://api.githubcopilot.com`
 
 ### 3. 設定 Agent
 
@@ -121,8 +126,11 @@ API Key: sk-ant-...
 - `claude-3-sonnet-20240229`
 
 ### GitHub Copilot
-- `gpt-4`
-- `gpt-3.5-turbo`
+- `gpt-4o-mini`
+- `gpt-4o`
+- `o1-preview`
+- `o1-mini`
+- `claude-3.5-sonnet`
 
 ## 資料庫位置
 
@@ -181,7 +189,13 @@ set_agent_config(config)
 請先使用 `uv run main.py --config` 設定提供者和 agent 配置。
 
 ### 問題：GitHub Copilot 認證失敗
-確保你的 GitHub token 有效且有權限使用 Copilot API。
+
+1. 確認你的 GitHub token 有效
+2. 確認有 GitHub Copilot 訂閱（個人版或 Pro+）
+3. 查看 log 確認 token 交換是否成功：
+   - `Exchanging GitHub token for Copilot token...`
+   - `✓ Got Copilot token from ...`
+4. 如果 timeout，重試即可（token 會緩存）
 
 ### 問題：模型名稱錯誤
 不同提供者支援的模型名稱不同，請參考各提供者的文檔。

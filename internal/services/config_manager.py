@@ -115,35 +115,26 @@ _copilot_token_cache: dict[str, tuple[str, float]] = {}
 
 async def _get_copilot_token(github_token: str) -> str:
     """
-    Exchange GitHub OAuth token for Copilot-specific token.
-    
-    This is the critical two-stage authentication:
-    1. User authenticates with GitHub OAuth (device flow)
-    2. Exchange GitHub token for Copilot API token
-    
-    Reference: https://github.com/anomalyco/opencode
-    Common endpoints:
-    - https://copilot-proxy.githubusercontent.com/v2/token
-    - https://github.com/github-copilot/chat/token
-    - https://api.github.com/copilot_internal/v2/token
+    Exchange GitHub OAuth token for Copilot API token.
+    Two-stage auth: GitHub OAuth -> Copilot token
+    Token cached for ~10min, auto-refresh before expiry.
     """
-    # Check cache first (tokens are short-lived, ~10min)
+    # Check cache first
     if github_token in _copilot_token_cache:
         copilot_token, expires_at = _copilot_token_cache[github_token]
-        if time.time() < expires_at - 60:  # Refresh 1min before expiry
+        if time.time() < expires_at - 60:
             logger.debug("Using cached Copilot token")
             return copilot_token
     
     logger.info("Exchanging GitHub token for Copilot token...")
     
-    # Try multiple token endpoints (順序很重要)
     token_endpoints = [
-        "https://api.github.com/copilot_internal/v2/token",  # VS Code 使用
-        "https://copilot-proxy.githubusercontent.com/v2/token",  # 舊端點
+        "https://api.github.com/copilot_internal/v2/token",
+        "https://copilot-proxy.githubusercontent.com/v2/token",
     ]
     
     headers = {
-        "Authorization": f"token {github_token}",  # 注意：這裡是 'token' 不是 'Bearer'
+        "Authorization": f"token {github_token}",
         "Accept": "application/json",
         "User-Agent": "GitHubCopilotChat/1.0",
         "Editor-Version": "vscode/1.85.0",
@@ -161,19 +152,18 @@ async def _get_copilot_token(github_token: str) -> str:
                 if response.status_code == 200:
                     data = response.json()
                     copilot_token = data.get("token")
-                    expires_at_str = data.get("expires_at")  # Unix timestamp or ISO string
+                    expires_at_str = data.get("expires_at")
                     
                     if copilot_token:
-                        # Parse expiry time (默認 10分鐘)
+                        # Parse expiry time
                         try:
                             if isinstance(expires_at_str, (int, float)):
                                 expires_at = float(expires_at_str)
                             else:
-                                # Try parsing as ISO datetime
                                 from datetime import datetime
                                 expires_at = datetime.fromisoformat(expires_at_str.replace('Z', '+00:00')).timestamp()
                         except Exception:
-                            expires_at = time.time() + 600  # Default 10min
+                            expires_at = time.time() + 600
                         
                         # Cache the token
                         _copilot_token_cache[github_token] = (copilot_token, expires_at)
@@ -211,28 +201,15 @@ def _create_github_copilot_model(
     http_client: AsyncClient
 ) -> OpenAIChatModel:
     """
-    Create model for GitHub Copilot.
+    Create GitHub Copilot model with two-stage authentication.
     
-    Critical Implementation Notes:
-    1. Two-stage authentication:
-       - Stage 1: GitHub OAuth (device flow) -> GitHub access token
-       - Stage 2: Exchange GitHub token -> Copilot API token (THIS FUNCTION)
+    Uses custom HTTP interceptor to:
+    1. Exchange GitHub token for Copilot token
+    2. Inject Copilot token and required headers into requests
     
-    2. Token endpoints (tried in order):
-       - https://api.githubcopilot.com/token (latest)
-       - https://api.github.com/copilot_internal/v2/token (VS Code)
-       - https://copilot-proxy.githubusercontent.com/v2/token (legacy)
-    
-    3. API endpoints:
-       - Chat: https://api.githubcopilot.com/chat/completions
-       - Embeddings: https://api.githubcopilot.com/embeddings
-    
-    4. Important headers:
-       - Authorization: Bearer {copilot_token} (NOT github_token!)
-       - X-Initiator: agent (affects premium quota billing)
-       - User-Agent, Editor-Version (client identification)
-    
-    Reference: https://github.com/anomalyco/opencode
+    Key headers:
+    - Authorization: Bearer {copilot_token}
+    - X-Initiator: agent (affects premium quota)
     """
     if not config.github_token:
         logger.error(f"No GitHub token configured for {config.name}")
@@ -240,7 +217,6 @@ def _create_github_copilot_model(
     
     logger.info(f"Setting up GitHub Copilot model for {config.name}")
     
-    # GitHub Copilot API endpoint (no /v1 suffix!)
     github_copilot_base_url = "https://api.githubcopilot.com"
     
     # Create a custom HTTP client with interceptor to handle token exchange
@@ -248,7 +224,7 @@ def _create_github_copilot_model(
     import asyncio
     
     class CopilotTokenInterceptor(HTTPXClient):
-        """Custom HTTP client that auto-exchanges GitHub token for Copilot token"""
+        """HTTP client that auto-injects Copilot token and headers"""
         
         def __init__(self, github_token: str, *args, **kwargs):
             super().__init__(*args, **kwargs)
@@ -256,7 +232,7 @@ def _create_github_copilot_model(
             self._token_lock = asyncio.Lock()
         
         async def send(self, request: Request, *args, **kwargs) -> Response:
-            # Intercept and add Copilot token
+            # Get Copilot token
             async with self._token_lock:
                 try:
                     copilot_token = await _get_copilot_token(self.github_token)
@@ -264,35 +240,61 @@ def _create_github_copilot_model(
                     logger.error(f"Failed to get Copilot token: {e}")
                     raise
             
-            # Set headers for Copilot API
+            # Inject headers
             request.headers["Authorization"] = f"Bearer {copilot_token}"
-            request.headers["X-Initiator"] = "agent"  # Important for quota
+            request.headers["X-Initiator"] = "agent"
             request.headers["User-Agent"] = "GitHubCopilotChat/1.0"
             request.headers["Editor-Version"] = "vscode/1.85.0"
             request.headers["Editor-Plugin-Version"] = "copilot-chat/0.11.0"
             
             logger.debug(f"Copilot API request: {request.method} {request.url}")
-            return await super().send(request, *args, **kwargs)
+            
+            # Send request and get response
+            response = await super().send(request, *args, **kwargs)
+            
+            # Fix Copilot API response to be OpenAI-compatible
+            # GitHub Copilot sometimes returns None for 'object' field
+            if response.headers.get("content-type", "").startswith("application/json"):
+                try:
+                    import json
+                    response_data = response.json()
+                    
+                    # Fix missing or None 'object' field
+                    if response_data.get("object") is None:
+                        response_data["object"] = "chat.completion"
+                        
+                        # Reconstruct response with fixed data
+                        from httpx import Response as HTTPXResponse
+                        fixed_response = HTTPXResponse(
+                            status_code=response.status_code,
+                            headers=response.headers,
+                            content=json.dumps(response_data).encode(),
+                            request=response.request,
+                        )
+                        logger.debug("Fixed Copilot response 'object' field")
+                        return fixed_response
+                except Exception as e:
+                    logger.debug(f"Could not fix response format: {e}")
+            
+            return response
     
-    # Create interceptor client
     copilot_http_client = CopilotTokenInterceptor(
         github_token=config.github_token,
-        timeout=60.0,  # Increased timeout for Copilot API
+        timeout=60.0,
         verify=False
     )
     
-    # Create OpenAI provider with Copilot endpoint
-    # Note: api_key is dummy here since we handle auth in interceptor
+    # Dummy api_key since interceptor handles auth
     provider = OpenAIProvider(
         base_url=github_copilot_base_url,
-        api_key="dummy",  # Interceptor handles real auth
+        api_key="dummy",
         http_client=copilot_http_client,
     )
     
     if not config.model_name:
         logger.warning(f"{config.name} model name is empty.")
     
-    logger.info(f"✓ GitHub Copilot model ready: {config.model_name}")
+    logger.info(f"GitHub Copilot ready: {config.model_name}")
     
     return OpenAIChatModel(model_name=config.model_name, provider=provider)
 
