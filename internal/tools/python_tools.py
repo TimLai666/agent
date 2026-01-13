@@ -24,7 +24,8 @@ def add_python_tools(agent: Agent) -> None:
                 message=f"Agent wants to run Python script({description}), allow?",
                 default_choice="Y",
             ):
-                raise PermissionError("Script execution cancelled by user.")
+                logger.info(f"User denied script execution: {description}")
+                raise PermissionError("❌ User denied permission to execute this script. The operation was cancelled.")
             old_stdout: TextIO | Any = sys.stdout
             buffer: io.StringIO = io.StringIO()
             sys.stdout = TeeStdout(old_stdout, buffer)

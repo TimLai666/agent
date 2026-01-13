@@ -175,7 +175,8 @@ class FileTools:
                 message=f"Agent wants to modify file '{file_path}', allow?",
                 default_choice="Y",
             ):
-                raise PermissionError("File modification cancelled by user.")
+                logger.info(f"User denied file modification: {file_path}")
+                raise PermissionError("❌ User denied permission to modify this file. The operation was cancelled.")
             logger.info(f"Modifying file: {file_path}")
             if not os.path.exists(file_path):
                 raise FileNotFoundError(f"File '{file_path}' does not exist.")
@@ -194,7 +195,8 @@ class FileTools:
                 message=f"Agent wants to rename '{path}' to '{new_name}', allow?",
                 default_choice="Y",
             ):
-                raise PermissionError("File renaming cancelled by user.")
+                logger.info(f"User denied file rename: {path} -> {new_name}")
+                raise PermissionError("❌ User denied permission to rename this file. The operation was cancelled.")
             logger.info(f"Renaming '{path}' to '{new_name}'")
             if not os.path.exists(path):
                 raise FileNotFoundError(f"File '{path}' does not exist.")
@@ -213,7 +215,8 @@ class FileTools:
                 message=f"Agent wants to create a new directory '{dir}', allow?",
                 default_choice="Y",
             ):
-                raise PermissionError("Directory creation cancelled by user.")
+                logger.info(f"User denied directory creation: {dir}")
+                raise PermissionError("❌ User denied permission to create this directory. The operation was cancelled.")
             logger.info(f"Creating new directory: {dir}")
             if os.path.exists(dir):
                 raise FileExistsError(f"Directory '{dir}' already exists.")
@@ -229,7 +232,8 @@ class FileTools:
                 message=f"Agent wants to create a new file at '{file_path}', allow?",
                 default_choice="Y",
             ):
-                raise PermissionError("File creation cancelled by user.")
+                logger.info(f"User denied file creation: {file_path}")
+                raise PermissionError("❌ User denied permission to create this file. The operation was cancelled.")
             logger.info(f"Creating new file: {file_path}")
             if os.path.exists(file_path):
                 raise FileExistsError(f"File '{file_path}' already exists.")

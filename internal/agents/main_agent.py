@@ -1,11 +1,17 @@
-from httpx import AsyncClient
+import asyncio
+import functools
+import inspect
 import json
+import re
+import sys
+from typing import Any, cast
+
+from httpx import AsyncClient
 from pydantic_ai import Agent
 from pydantic_ai.messages import ModelRequest, ModelResponse
 
 from internal.co_agents.philosopher import PhilosopherCoAgent
 from internal.logger import logger
-import re
 from internal.prompts import (
     SYSTEM_PROMPT,
     build_runtime_instructions,
@@ -19,13 +25,10 @@ from internal.services.agent_factory import (
     load_agent_config_chain,
 )
 from internal.set_tools import add_all_tools
+from internal.skills_loader import SkillRegistry, load_skill_registry
 from internal.sub_agents import SubAgentRegistry, load_sub_agent_registry
-import sys
-import inspect
-import asyncio
-import functools
-from typing import Any, cast
-from pydantic_ai.mcp import MCPServerStdio
+
+from internal.mcp_server_list import all_mcp_servers
 
 PROMPT_KEY = "MAIN_AGENT_PROMPT"
 ENV_PREFIX = "MAIN"
@@ -55,54 +58,48 @@ class MainAgent:
         http_client: AsyncClient,
         philosopher: PhilosopherCoAgent,
         sub_agents: SubAgentRegistry | None = None,
+        skills: SkillRegistry | None = None,
     ) -> "MainAgent":
+        # Load skills first (so sub-agents can use them)
+        if skills is None:
+            try:
+                skills = load_skill_registry()
+            except Exception:
+                logger.exception("Failed to load skills; continuing without them")
+                skills = SkillRegistry({}, None)
+
+        # Load sub-agents with skills
         if sub_agents is None:
             try:
                 sub_agents = cast(
                     SubAgentRegistry,
                     load_sub_agent_registry(
-                        base_config, env, http_client, philosopher=philosopher
+                        base_config,
+                        env,
+                        http_client,
+                        philosopher=philosopher,
+                        skills=skills,
                     ),
                 )
             except Exception:
                 logger.exception("Failed to load sub-agents; continuing without them")
                 sub_agents = SubAgentRegistry({}, {})
 
-        config = load_agent_config_chain([cls.ENV_PREFIX], base_config, env)
+        # Apply MAIN-specific default temperature of 0.5 when MAIN_MODEL_TEMPERATURE is not set.
+        main_defaults = AgentConfig(
+            name="main",
+            base_url=base_config.base_url,
+            api_key=base_config.api_key,
+            model_name=base_config.model_name,
+            temperature=0.5,
+        )
+        config = load_agent_config_chain([cls.ENV_PREFIX], main_defaults, env)
         model = create_openai_model(config, http_client)
         instructions = build_runtime_instructions(get_prompt(cls.PROMPT_KEY))
         if sub_agents and not sub_agents.is_empty():
-            instructions += (
-                "\n\nSub-agents are available via tools: list_sub_agents, ask_sub_agent."
-            )
-        # build MCP servers for browser tools
-        mcp_env = env.copy()
-        if config.api_key:
-            mcp_env["OPENAI_API_KEY"] = config.api_key
-        if config.base_url:
-            mcp_env["OPENAI_BASE_URL"] = config.base_url
-        if config.model_name:
-            mcp_env["BROWSER_USE_LLM_MODEL"] = config.model_name
-
-        headed_env = mcp_env.copy()
-        headed_env["BROWSER_USE_HEADLESS"] = "false"
-        browser_use_headed = MCPServerStdio(
-            command=sys.executable,
-            args=["-m", "browser_use.mcp.server"],
-            env=headed_env,
-            tool_prefix="browser_headed",
-        )
-
-        headless_env = mcp_env.copy()
-        headless_env["BROWSER_USE_HEADLESS"] = "true"
-        browser_use_headless = MCPServerStdio(
-            command=sys.executable,
-            args=["-m", "browser_use.mcp.server"],
-            env=headless_env,
-            tool_prefix="browser_headless",
-        )
-
-        mcp_servers = [browser_use_headed, browser_use_headless]
+            instructions += "\n\nSub-agents are available via tools: list_sub_agents, ask_sub_agent."
+   
+        mcp_servers = all_mcp_servers
 
         agent: Agent[None, str] = Agent(
             model=model,
@@ -110,8 +107,9 @@ class MainAgent:
             instructions=instructions,
             tools=[],
             model_settings={"temperature": config.temperature},
-            mcp_servers=mcp_servers,
+            toolsets=mcp_servers,
         )
+
         planner_agent: Agent[None, str] = Agent(
             model=model,
             system_prompt=SYSTEM_PROMPT,
@@ -134,41 +132,79 @@ class MainAgent:
             tools=[],
             model_settings={"temperature": config.temperature},
         )
+        # Lightweight decider agent: same underlying model, but no system prompt, no tools, no MCP/toolsets
+        decider_agent: Agent[None, str] = Agent(
+            model=model,
+            system_prompt="",
+            instructions="",
+            tools=[],
+            model_settings={"temperature": config.temperature},
+        )
+        # Register skill tool (Claude Code compatible)
+        from internal.tools.skill_tools import register_skill_tool
+
+        register_skill_tool(agent, skills)
+
         # register global tools directly on the main agent
         # Wrap agent.tool_plain temporarily so that each registered tool is
         # wrapped to log calls, arguments, results and exceptions.
         original_tool_plain = getattr(agent, "tool_plain", None)
         if original_tool_plain:
+
             def logging_tool_plain(func=None, /, **kwargs):
                 if func is None:
+
                     def decorator(inner):
                         return logging_tool_plain(inner, **kwargs)
+
                     return decorator
 
                 # create a wrapped callable that logs on invocation
                 if inspect.iscoroutinefunction(func):
+
                     @functools.wraps(func)
                     async def wrapped_async(*args, **kwargs):
-                        logger.info("Tool call start: %s args=%s kwargs=%s", func.__name__, args, kwargs)
+                        logger.info(
+                            "Tool call start: %s args=%s kwargs=%s",
+                            func.__name__,
+                            args,
+                            kwargs,
+                        )
                         try:
                             res = await func(*args, **kwargs)
-                            logger.info("Tool call end: %s result=%s", func.__name__, res)
+                            logger.info(
+                                "Tool call end: %s result=%s", func.__name__, res
+                            )
                             return res
                         except Exception:
-                            logger.exception("Tool %s raised an exception", func.__name__)
+                            logger.exception(
+                                "Tool %s raised an exception", func.__name__
+                            )
                             raise
+
                     wrapped_callable = wrapped_async
                 else:
+
                     @functools.wraps(func)
                     def wrapped_sync(*args, **kwargs):
-                        logger.info("Tool call start: %s args=%s kwargs=%s", func.__name__, args, kwargs)
+                        logger.info(
+                            "Tool call start: %s args=%s kwargs=%s",
+                            func.__name__,
+                            args,
+                            kwargs,
+                        )
                         try:
                             res = func(*args, **kwargs)
-                            logger.info("Tool call end: %s result=%s", func.__name__, res)
+                            logger.info(
+                                "Tool call end: %s result=%s", func.__name__, res
+                            )
                             return res
                         except Exception:
-                            logger.exception("Tool %s raised an exception", func.__name__)
+                            logger.exception(
+                                "Tool %s raised an exception", func.__name__
+                            )
                             raise
+
                     wrapped_callable = wrapped_sync
 
                 # delegate to the original registration API with the wrapped callable
@@ -176,13 +212,18 @@ class MainAgent:
 
             cast(Any, agent).tool_plain = logging_tool_plain
 
-        main_agent = cls(agent, philosopher, sub_agents, planner_agent, discussion_agent)
+        main_agent = cls(
+            agent,
+            philosopher,
+            sub_agents,
+            planner_agent,
+            discussion_agent,
+            decider_agent,
+            skills,
+        )
         try:
             add_all_tools(
                 agent,
-                config.model_name,
-                config.base_url,
-                config.api_key,
                 extra_tools=[
                     main_agent.ask_philosopher,
                     main_agent.list_sub_agents,
@@ -193,7 +234,9 @@ class MainAgent:
                 sub_agents.register_tools(agent)
             logger.info("Registered tools on MainAgent")
         except Exception:
-            logger.exception("Failed to add tools to main agent; continuing without external tools")
+            logger.exception(
+                "Failed to add tools to main agent; continuing without external tools"
+            )
         finally:
             # restore original registration function if we replaced it
             if original_tool_plain:
@@ -207,17 +250,22 @@ class MainAgent:
         sub_agents: SubAgentRegistry | None = None,
         planner_agent: Agent[None, str] | None = None,
         discussion_agent: Agent[None, str] | None = None,
+        decider_agent: Agent[None, str] | None = None,
+        skills: SkillRegistry | None = None,
     ) -> None:
         self.agent = agent
         self.philosopher = philosopher
         self.sub_agents = sub_agents
+        self.skills = skills
         self._planner_agent = planner_agent or agent
         self._discussion_agent = discussion_agent
+        self._decider_agent = decider_agent or agent
         self._last_messages: list[ModelRequest | ModelResponse] | None = None
         self._last_execution_steps: list[dict[str, Any]] = []
         self._last_user_prompt: str | None = None
         self._previous_user_prompt: str | None = None
         self._last_assistant_reply: str | None = None
+        self._mcp_tool_names: set[str] | None = None  # 緩存 MCP 工具名稱列表
         # tools are registered via add_all_tools during create()
 
     async def _extract_execution_plan(self, text: str) -> dict | None:
@@ -233,10 +281,14 @@ class MainAgent:
         # Try full-text JSON parse first
         try:
             parsed = json.loads(text)
-            if isinstance(parsed, dict) and ("execution_plan" in parsed or "plan" in parsed):
+            if isinstance(parsed, dict) and (
+                "execution_plan" in parsed or "plan" in parsed
+            ):
                 return parsed
             # if the parsed dict itself *is* a plan
-            if isinstance(parsed, dict) and ("steps" in parsed or "plan" in parsed or "execution_plan" in parsed):
+            if isinstance(parsed, dict) and (
+                "steps" in parsed or "plan" in parsed or "execution_plan" in parsed
+            ):
                 return parsed
         except Exception:
             pass
@@ -248,22 +300,24 @@ class MainAgent:
         text_len = len(text)
         i = 0
         while i < text_len:
-            if text[i] != '{':
+            if text[i] != "{":
                 i += 1
                 continue
             depth = 0
             j = i
             while j < text_len:
-                if text[j] == '{':
+                if text[j] == "{":
                     depth += 1
-                elif text[j] == '}':
+                elif text[j] == "}":
                     depth -= 1
                     if depth == 0:
                         snippet = text[i : j + 1]
                         try:
                             parsed = json.loads(snippet)
                             if isinstance(parsed, dict) and (
-                                "execution_plan" in parsed or "plan" in parsed or "steps" in parsed
+                                "execution_plan" in parsed
+                                or "plan" in parsed
+                                or "steps" in parsed
                             ):
                                 return parsed
                         except Exception:
@@ -309,7 +363,7 @@ class MainAgent:
             tool_name = step.get("tool") if isinstance(step, dict) else None
             args = step.get("args", {}) if isinstance(step, dict) else {}
             note = step.get("note") if isinstance(step, dict) else None
-            header = f"Step {idx+1}: {tool_name}"
+            header = f"Step {idx + 1}: {tool_name}"
             if note:
                 header += f"  ({note})"
             results.append(header)
@@ -333,14 +387,18 @@ class MainAgent:
                                 or ""
                             ).strip()
                         if not question:
-                            question = self._build_sub_agent_prompt(note, current_args, step_outputs)
+                            question = self._build_sub_agent_prompt(
+                                note, current_args, step_outputs
+                            )
                         current_args = {
                             "question": self._build_philosopher_prompt(
                                 note, current_args, step_outputs, question
                             )
                         }
                     elif current_tool in {"philosopher", "哲學家"}:
-                        question = self._build_sub_agent_prompt(note, current_args, step_outputs)
+                        question = self._build_sub_agent_prompt(
+                            note, current_args, step_outputs
+                        )
                         current_tool = "ask_philosopher"
                         current_args = {
                             "question": self._build_philosopher_prompt(
@@ -356,7 +414,9 @@ class MainAgent:
                             if isinstance(current_args, dict):
                                 question = str(current_args.get("prompt", "")).strip()
                             if not question:
-                                question = self._build_sub_agent_prompt(note, current_args, step_outputs)
+                                question = self._build_sub_agent_prompt(
+                                    note, current_args, step_outputs
+                                )
                             current_tool = "ask_philosopher"
                             current_args = {
                                 "question": self._build_philosopher_prompt(
@@ -370,22 +430,41 @@ class MainAgent:
                     and self.sub_agents.get_agent(current_tool)
                     and "ask_sub_agent" in allowed_names
                 ):
-                    prompt = self._build_sub_agent_prompt(note, current_args, step_outputs)
+                    prompt = self._build_sub_agent_prompt(
+                        note, current_args, step_outputs
+                    )
                     current_args = {"name": current_tool, "prompt": prompt}
                     current_tool = "ask_sub_agent"
 
                 if not current_tool:
                     current_error = "Missing 'tool' field."
                 elif current_tool not in allowed_names:
-                    current_error = f"Tool '{current_tool}' is not registered."
-                else:
+                    # 檢查是否為 MCP 工具
+                    if isinstance(current_tool, str) and self._is_mcp_tool(current_tool):
+                        # MCP 工具的錯誤：記錄後跳出，不進入 recovery
+                        # 這樣錯誤資訊會被傳遞給 LLM，由 LLM 生成友好的回應
+                        step_meta["error"] = (
+                            f"MCP tool '{current_tool}' cannot be executed in plan mode. "
+                            "This tool requires agent runtime context."
+                        )
+                        results.append(f"  -> MCP tool error: {step_meta['error']}")
+                        break  # 跳出 while True 循環，不進入 recovery
+                    else:
+                        current_error = f"Tool '{current_tool}' is not registered."
+                
+                if not current_error and current_tool in allowed_names:
+                    
                     if current_args:
                         current_args = self._resolve_args(current_args, step_outputs)
                     if current_args is None:
                         current_args = {}
                     elif not isinstance(current_args, dict):
                         current_args = {"value": current_args}
-                    tool_def = registered.get(str(current_tool)) if isinstance(current_tool, str) else None
+                    tool_def = (
+                        registered.get(str(current_tool))
+                        if isinstance(current_tool, str)
+                        else None
+                    )
                     if tool_def is None:
                         current_error = f"Tool '{current_tool}' declared but not found on agent runtime."
                     elif getattr(tool_def, "takes_ctx", False):
@@ -395,14 +474,23 @@ class MainAgent:
                         try:
                             try:
                                 schema = tool_def.function_schema.json_schema or {}
-                                expected_keys = list((schema.get("properties") or {}).keys())
+                                expected_keys = list(
+                                    (schema.get("properties") or {}).keys()
+                                )
                             except Exception:
                                 expected_keys = []
                             if current_args and expected_keys:
                                 expected_set = set(expected_keys)
                                 if not set(current_args.keys()).issubset(expected_set):
-                                    if len(expected_keys) == 1 and len(current_args) == 1:
-                                        current_args = {expected_keys[0]: next(iter(current_args.values()))}
+                                    if (
+                                        len(expected_keys) == 1
+                                        and len(current_args) == 1
+                                    ):
+                                        current_args = {
+                                            expected_keys[0]: next(
+                                                iter(current_args.values())
+                                            )
+                                        }
                             if current_tool == "get_stock_history":
                                 period = current_args.get("period")
                                 if isinstance(period, str):
@@ -411,16 +499,26 @@ class MainAgent:
                                         current_args["period"] = "1mo"
                                     elif normalized in {"3m"}:
                                         current_args["period"] = "3mo"
-                            logger.info("Executing tool '%s' with args: %s", current_tool, current_args)
+                            logger.info(
+                                "Executing tool '%s' with args: %s",
+                                current_tool,
+                                current_args,
+                            )
                             if inspect.iscoroutinefunction(callable_obj):
                                 res = await callable_obj(**current_args)
                             else:
-                                maybe = callable_obj(**current_args) if current_args else callable_obj()
+                                maybe = (
+                                    callable_obj(**current_args)
+                                    if current_args
+                                    else callable_obj()
+                                )
                                 if asyncio.iscoroutine(maybe):
                                     res = await maybe
                                 else:
                                     res = maybe
-                            logger.info("Tool '%s' execution result: %s", current_tool, res)
+                            logger.info(
+                                "Tool '%s' execution result: %s", current_tool, res
+                            )
                             results.append(f"  -> result: {res}")
                             step_outputs.append(str(res))
                             step_meta["result"] = res
@@ -446,8 +544,12 @@ class MainAgent:
                     note=note,
                 )
                 if not recovery:
-                    results.append("  -> recovery failed: no corrected tool call returned")
-                    step_meta["error"] = "recovery failed: no corrected tool call returned"
+                    results.append(
+                        "  -> recovery failed: no corrected tool call returned"
+                    )
+                    step_meta["error"] = (
+                        "recovery failed: no corrected tool call returned"
+                    )
                     break
                 current_tool = recovery.get("tool")
                 current_args = recovery.get("args", {})
@@ -464,8 +566,7 @@ class MainAgent:
         error: str,
         note: str | None,
     ) -> dict[str, Any] | None:
-        tools_text = self._format_tools_context().strip()
-
+        tools_text: str = self._format_tools_context().strip()
         sub_agents_text = self._format_sub_agents_context().strip()
         note_text = f"Note: {note}\n" if note else ""
         prompt = (
@@ -477,15 +578,17 @@ class MainAgent:
             f"失敗的 tool：{tool}\n"
             f"args：{args}\n"
             f"錯誤：{error}\n\n"
-            "只輸出 JSON，格式：{\"tool\": \"tool_name\", \"args\": {\"key\": \"value\"}}。\n"
-            "如需使用前一步結果，可用 \"$last\" 或 \"$step1\" 佔位符。\n"
+            '只輸出 JSON，格式：{"tool": "tool_name", "args": {"key": "value"}}。\n'
+            '如需使用前一步結果，可用 "$last" 或 "$step1" 佔位符。\n'
         )
 
         for attempt in range(2):
             try:
                 retry_hint = ""
                 if attempt == 1:
-                    retry_hint = "上一次沒有輸出合法 JSON。這次只輸出 JSON，不能有其他文字。\n\n"
+                    retry_hint = (
+                        "上一次沒有輸出合法 JSON。這次只輸出 JSON，不能有其他文字。\n\n"
+                    )
                 result = await self._planner_agent.run(retry_hint + prompt)
                 out = (result.output or "").strip()
                 parsed = json.loads(out)
@@ -496,11 +599,13 @@ class MainAgent:
         return None
 
     async def _should_consult_philosopher(
-        self, prompt: str, message_history: list[ModelRequest | ModelResponse] | None = None
+        self,
+        prompt: str,
+        message_history: list[ModelRequest | ModelResponse] | None = None,
     ) -> bool:
         """以主 agent 模型決定是否需要與哲學家討論。
 
-        會向 `self.agent` 發出簡短判定請求（回傳 YES/NO 與簡短原因）。
+        會向 `decider` 發出簡短判定請求（回傳 YES/NO 與簡短原因）。
         若模型失敗或回應不明確，採保守策略：回傳 True 以確保討論。
         """
         # 使用嚴格 JSON 回應格式：{"consult": true|false, "reason": "..."}
@@ -510,13 +615,18 @@ class MainAgent:
             " 嚴格回傳一個有效 JSON 對象，不要包含其他文字。JSON 格式：{'consult': true/false, 'reason': '短理由'}。"
             " **重要**：在這個判定步驟中，請不要呼叫任何工具或嘗試執行外部函式；僅依靠你的語言理解回傳 JSON。"
             " 範例：\n"
-            "輸入: '現在幾點'\n輸出: {" + '"consult": false, "reason": "簡單事實性查詢"}' + "\n"
-            "輸入: '評估不同投資組合的風險與報酬'\n輸出: {" + '"consult": true, "reason": "需要權衡與推理"}' + "\n\n"
+            "輸入: '現在幾點'\n輸出: {"
+            + '"consult": false, "reason": "簡單事實性查詢"}'
+            + "\n"
+            "輸入: '評估不同投資組合的風險與報酬'\n輸出: {"
+            + '"consult": true, "reason": "需要權衡與推理"}'
+            + "\n\n"
             "使用者輸入：\n" + prompt + "\n\n請只回傳 JSON，且不要呼叫任何工具："
         )
 
         try:
-            result = await self.agent.run(decider, message_history=message_history)
+            dec = getattr(self, "_decider_agent", self.agent)
+            result = await dec.run(decider, message_history=message_history)
             out = (result.output or "").strip()
             # 嘗試解析 JSON
             try:
@@ -526,22 +636,37 @@ class MainAgent:
             except Exception:
                 # 若模型回傳包含 JSON 片段，嘗試從其中抽取 true/false
                 lower = out.lower()
-                if "true" in lower or "yes" in lower or "是" in lower or "需要" in lower:
+                if (
+                    "true" in lower
+                    or "yes" in lower
+                    or "是" in lower
+                    or "需要" in lower
+                ):
                     return True
-                if "false" in lower or "no" in lower or "否" in lower or "不需要" in lower:
+                if (
+                    "false" in lower
+                    or "no" in lower
+                    or "否" in lower
+                    or "不需要" in lower
+                ):
                     return False
                 # 解析失敗：為避免多餘討論，採保守策略：不討論
-                logger.info("Decision response not parseable; defaulting to NO consult. Response: %s", out)
+                logger.info(
+                    "Decision response not parseable; defaulting to NO consult. Response: %s",
+                    out,
+                )
                 return False
         except Exception:
-            logger.exception("Decision call to main agent failed; defaulting to NO consult")
+            logger.exception(
+                "Decision call to main agent failed; defaulting to NO consult"
+            )
             return False
 
     async def ask_philosopher(self, question: str) -> str:
         """Tool: forward question to philosopher co-agent."""
-        logger.info("Main agent -> philosopher")
-        print("[LOG] main -> philosopher")
-        return await self._run_philosopher_discussion(question)
+        if not self.philosopher:
+            raise RuntimeError("Philosopher co-agent is not available.")
+        return await self.philosopher.run(question)
 
     async def _run_philosopher_discussion(self, question: str) -> str:
         discussion: list[tuple[str, str]] = []
@@ -618,8 +743,28 @@ class MainAgent:
             return []
         return self.sub_agents.list_summaries()
 
-    async def ask_sub_agent(self, name: str, prompt: str) -> str:
-        """Tool: delegate a task to a sub-agent by name."""
+    async def ask_sub_agent(self, name: str = "", prompt: str = "", **kwargs) -> str:
+        """Tool: delegate a task to a sub-agent by name.
+
+        Args:
+            name: Name of the sub-agent to use
+            prompt: The task or question for the sub-agent
+            **kwargs: Additional arguments (ignored for compatibility)
+
+        Returns:
+            The sub-agent's response
+        """
+        if not name:
+            return "Error: 'name' argument is required for ask_sub_agent."
+        if not prompt:
+            return "Error: 'prompt' argument is required for ask_sub_agent."
+
+        # Ignore extra kwargs (e.g., 'role') for compatibility
+        if kwargs:
+            logger.debug(
+                f"ask_sub_agent ignoring extra arguments: {list(kwargs.keys())}"
+            )
+
         if not self.sub_agents or self.sub_agents.is_empty():
             return "No sub-agents are registered."
 
@@ -648,9 +793,13 @@ class MainAgent:
         return "\n".join(lines) + "\n\n"
 
     def _format_tools_context(self) -> str:
+        """格式化所有可用工具的說明，包含直接註冊的工具和 MCP Server。"""
+        lines = []
+        
+        # 1. 直接註冊的工具
         tools_meta = self._get_function_tools()
         if tools_meta:
-            tools_lines = ["Available tools:"]
+            lines.append("Available tools:")
             for name, tool in tools_meta.items():
                 doc = tool.description.splitlines()[0] if tool.description else ""
                 params = []
@@ -661,20 +810,109 @@ class MainAgent:
                     params = []
                 sig = f"({', '.join(params)})" if params else "()"
                 if doc:
-                    tools_lines.append(f"- {name}{sig}: {doc}")
+                    lines.append(f"- {name}{sig}: {doc}")
                 else:
-                    tools_lines.append(f"- {name}{sig}")
-            return "\n".join(tools_lines) + "\n\n"
-        return "Available tools: (none)\n\n"
+                    lines.append(f"- {name}{sig}")
+        else:
+            lines.append("Available tools: (none)")
+        
+        # 2. MCP Servers（在運行時由 pydantic-ai 動態處理）
+        mcp_servers = self._get_mcp_servers()
+        if mcp_servers:
+            lines.append("\nMCP Servers (tools available at runtime):")
+            for server in mcp_servers:
+                prefix = getattr(server, 'tool_prefix', None) or 'no-prefix'
+                command = getattr(server, 'command', 'unknown')
+                args = getattr(server, 'args', [])
+                server_name = f"{command} {' '.join(args) if args else ''}".strip()
+                if prefix != 'no-prefix':
+                    lines.append(f"- {prefix}_* (from {server_name})")
+                else:
+                    lines.append(f"- MCP Server: {server_name}")
+        
+        return "\n".join(lines) + "\n\n"
 
     def _get_function_tools(self) -> dict[str, Any]:
+        """取得所有可用工具，包含直接註冊的工具和 MCP 工具。
+        
+        注意：這個方法返回的是已經註冊到 agent 的工具。
+        MCP 工具只有在 run_mcp_servers() context 內且 LLM 實際調用時才會被動態解析。
+        """
+        all_tools = {}
+        
+        # 1. 取得直接註冊的工具
         tools_meta = getattr(self.agent, "_function_tools", None)
         if tools_meta:
-            return tools_meta
+            all_tools.update(tools_meta)
+        
+        # 2. 取得 toolset 中的工具
         toolset = getattr(self.agent, "_function_toolset", None)
         if toolset and getattr(toolset, "tools", None):
-            return toolset.tools
-        return {}
+            all_tools.update(toolset.tools)
+        
+        return all_tools
+    
+    def _get_mcp_servers(self) -> list:
+        """取得所有 MCP Server 實例。"""
+        user_toolsets = getattr(self.agent, "_user_toolsets", [])
+        from pydantic_ai.mcp import MCPServerStdio
+        return [ts for ts in user_toolsets if isinstance(ts, MCPServerStdio)]
+    
+    def _try_get_mcp_tool_names(self) -> set[str] | None:
+        """嘗試獲取所有 MCP 工具的名稱列表。
+        
+        注意：只有在 MCP Server 已經啟動並初始化後才能獲取工具列表。
+        如果無法獲取（例如 server 未啟動），返回 None。
+        """
+        mcp_servers = self._get_mcp_servers()
+        if not mcp_servers:
+            return None
+        
+        tool_names = set()
+        for server in mcp_servers:
+            # 檢查 server 是否已經運行
+            is_running = getattr(server, 'is_running', False)
+            if not is_running:
+                # Server 未運行，無法獲取工具列表
+                continue
+            
+            try:
+                # pydantic-ai 的 MCPServerStdio 有 _cached_tools 屬性
+                # 在 server 連接後會緩存工具列表
+                cached_tools = getattr(server, '_cached_tools', None)
+                if cached_tools and isinstance(cached_tools, list):
+                    # 從緩存的工具列表中提取名稱
+                    for tool in cached_tools:
+                        # 工具可能是 dict 或對象
+                        if isinstance(tool, dict):
+                            name = tool.get('name')
+                        else:
+                            name = getattr(tool, 'name', None)
+                        if name:
+                            tool_names.add(name)
+            except Exception:
+                # 忽略錯誤，繼續處理下一個 server
+                pass
+        
+        return tool_names if tool_names else None
+    
+    def _is_mcp_tool(self, tool_name: str) -> bool:
+        """檢查是否為 MCP 工具。
+        
+        從 MCP Server 的 _cached_tools 獲取實際的工具列表進行比對。
+        """
+        # 如果有緩存，直接使用
+        if self._mcp_tool_names is not None:
+            return tool_name in self._mcp_tool_names
+        
+        # 嘗試從 MCP Server 獲取工具列表
+        mcp_tool_names = self._try_get_mcp_tool_names()
+        if mcp_tool_names:
+            self._mcp_tool_names = mcp_tool_names
+            return tool_name in mcp_tool_names
+        
+        # 無法獲取工具列表
+        return False
 
     def _get_recent_tool_output(self) -> str | None:
         for step in reversed(self._last_execution_steps):
@@ -819,7 +1057,6 @@ class MainAgent:
 
         return resolve_value(args)
 
-
     async def _request_execution_plan(
         self,
         prompt: str,
@@ -841,10 +1078,10 @@ class MainAgent:
             )
 
         plan_prompt = (
-            "你只能把下列工具請求轉成 JSON，格式固定為 {\"plan\": [ ... ]}。\n"
+            '你只能把下列工具請求轉成 JSON，格式固定為 {"plan": [ ... ]}。\n'
             "不得自行決定工具、不得新增/刪除步驟、不得更改參數語意。\n"
             "每個步驟必須包含 tool 欄位；需要參數時加入 args 物件，沒有參數就省略或用 {}。\n"
-            "若請求為 none，回傳 {\"plan\": []}。\n"
+            '若請求為 none，回傳 {"plan": []}。\n'
             "忽略 INTENT，只轉換 TOOL_REQUESTS。\n"
             "只輸出 JSON。\n\n"
             + retry_hint
@@ -877,22 +1114,22 @@ class MainAgent:
                 "必須輸出 TOOL_REQUESTS，不可輸出 none。\n"
                 "若完全不需要工具（可直接回答且無需查證/執行），才可輸出 TOOL_REQUESTS: none。\n\n"
             )
-        draft_prompt = (force_hint +
-            "你是主 agent 的規劃器。先寫一段話描述你要做什麼、怎麼做，然後列出工具請求。\n"
+        draft_prompt = (
+            force_hint
+            + "你是主 agent 的規劃器。先寫一段話描述你要做什麼、怎麼做，然後列出工具請求。\n"
             "輸出格式只允許下列兩種之一：\n"
             "1) INTENT: <一段話>\n"
             "   TOOL_REQUESTS: none\n"
             "2) INTENT: <一段話>\n"
             "   TOOL_REQUESTS:\n"
             "   - tool: tool_name\n"
-            "     args: {\"key\": \"value\"}\n"
+            '     args: {"key": "value"}\n'
             "每一步都必須明確指定 tool；無參數就省略 args 行。\n"
-            "如果後續步驟需要前一步的輸出，使用 \"$last\" 或 \"$step1\" 佔位符。\n"
+            '如果後續步驟需要前一步的輸出，使用 "$last" 或 "$step1" 佔位符。\n'
             "不得輸出 JSON。\n\n"
             "重要：如果需求涉及時事/最新/新聞/趨勢，必須列出瀏覽器/MCP 工具或請求 trend-researcher；不可憑空編造。\n"
             "若無法取得可靠來源，工具請求應為 none，並在 INTENT 指出需要使用者指定具體事件。\n\n"
             "常見需求對應工具（若符合就直接用）：\n"
-            "- 詢問現在時間：get_now\n"
             "- 查某日期是星期幾：get_weekday，參數 date_str\n"
             "- 擲骰子：roll_dice\n"
             "- 從清單隨機挑一個：random_pick，參數 items\n"
@@ -928,7 +1165,7 @@ class MainAgent:
             "你是工具使用判斷器。判斷此問題是否需要工具才能可靠回答。\n"
             "若需要查檔案/執行命令/外部查證/多步推理驗證，force 應為 true。\n"
             "若可直接回答且不需查證，force 為 false。\n"
-            "只輸出 JSON：{\"force\": true|false, \"reason\": \"...\"}\n\n"
+            '只輸出 JSON：{"force": true|false, "reason": "..."}\n\n'
             f"使用者請求：\n{prompt}\n"
         )
         try:
@@ -944,11 +1181,17 @@ class MainAgent:
         prompt: str,
         message_history: list[ModelRequest | ModelResponse] | None = None,
     ) -> list[dict[str, Any] | Any]:
-        plan_obj = await self._request_execution_plan(prompt, message_history=message_history, attempt=1)
+        plan_obj = await self._request_execution_plan(
+            prompt, message_history=message_history, attempt=1
+        )
         if plan_obj is None or _plan_is_empty(plan_obj):
-            plan_obj = await self._request_execution_plan(prompt, message_history=message_history, attempt=2)
+            plan_obj = await self._request_execution_plan(
+                prompt, message_history=message_history, attempt=2
+            )
         if plan_obj is None or _plan_is_empty(plan_obj):
-            if await self._should_force_tool_use(prompt, message_history=message_history):
+            if await self._should_force_tool_use(
+                prompt, message_history=message_history
+            ):
                 plan_obj = await self._request_execution_plan(
                     prompt,
                     message_history=message_history,
@@ -1085,7 +1328,9 @@ class MainAgent:
             return []
 
         candidates = "\n".join(
-            f"- {item['name']}: {item['description']}" if item.get("description") else f"- {item['name']}"
+            f"- {item['name']}: {item['description']}"
+            if item.get("description")
+            else f"- {item['name']}"
             for item in summaries
         )
 
@@ -1094,7 +1339,7 @@ class MainAgent:
         decision_prompt = (
             "你是主 agent 的子代理選擇器。根據使用者需求，從清單挑選最合適的子代理。\n"
             "若沒有明確需要，回傳空陣列。\n"
-            "只回傳 JSON：{\"agents\": [\"name1\", \"name2\"]}。\n"
+            '只回傳 JSON：{"agents": ["name1", "name2"]}。\n'
             f"最多選 {max_auto_agents} 個，必須是清單中的名稱，不要輸出其他文字。\n\n"
             "可用子代理：\n"
             f"{candidates}\n\n"
@@ -1103,7 +1348,9 @@ class MainAgent:
         )
 
         try:
-            result = await self.agent.run(decision_prompt, message_history=message_history)
+            result = await self.agent.run(
+                decision_prompt, message_history=message_history
+            )
             out = (result.output or "").strip()
             parsed = json.loads(out)
             agents = parsed.get("agents", [])
@@ -1226,14 +1473,26 @@ class MainAgent:
             except Exception:
                 # 尝试基于可解析的文字作简单判定；若无法解析则不结束
                 lower = out.lower()
-                if "true" in lower or "yes" in lower or "可以" in lower or "結束" in lower:
+                if (
+                    "true" in lower
+                    or "yes" in lower
+                    or "可以" in lower
+                    or "結束" in lower
+                ):
                     return True
-                if "false" in lower or "no" in lower or "不" in lower or "還需要" in lower:
+                if (
+                    "false" in lower
+                    or "no" in lower
+                    or "不" in lower
+                    or "還需要" in lower
+                ):
                     return False
                 # 解析失敗：不回退、不使用任何後備規則，直接回傳 False（繼續討論）
                 return False
         except Exception:
-            logger.exception("End-discussion decision call failed; defaulting to NO end")
+            logger.exception(
+                "End-discussion decision call failed; defaulting to NO end"
+            )
             return False
 
     async def _decide_discussion_depth(
@@ -1247,9 +1506,9 @@ class MainAgent:
         """
         dec = (
             "你是主 agent 的討論深度決策器。請根據下列使用者問題判斷哲學家討論的內容深度（very_shallow/shallow/medium/deep/very_deep），"
-            " 並回傳嚴格的 JSON：{\"depth\": \"very_shallow|shallow|medium|deep|very_deep\", \"rounds\": 1..5}."
-            " 範例：\n輸入：'現在幾點'\n輸出：{\"depth\": \"very_shallow\", \"rounds\": 1}\n"
-            "輸入：'評估不同投資組合的風險與報酬'\n輸出：{\"depth\": \"very_deep\", \"rounds\": 5}\n\n使用者輸入：\n"
+            ' 並回傳嚴格的 JSON：{"depth": "very_shallow|shallow|medium|deep|very_deep", "rounds": 1..5}.'
+            ' 範例：\n輸入：\'現在幾點\'\n輸出：{"depth": "very_shallow", "rounds": 1}\n'
+            '輸入：\'評估不同投資組合的風險與報酬\'\n輸出：{"depth": "very_deep", "rounds": 5}\n\n使用者輸入：\n'
             + prompt
             + "\n\n請只回傳 JSON，且不要呼叫工具。"
         )
@@ -1261,7 +1520,13 @@ class MainAgent:
                 parsed = json.loads(out)
                 depth = parsed.get("depth", "medium")
                 rounds = int(parsed.get("rounds", 2))
-                if depth not in ("very_shallow", "shallow", "medium", "deep", "very_deep"):
+                if depth not in (
+                    "very_shallow",
+                    "shallow",
+                    "medium",
+                    "deep",
+                    "very_deep",
+                ):
                     depth = "medium"
                 if rounds < 1:
                     rounds = 1
@@ -1278,11 +1543,83 @@ class MainAgent:
         self,
         prompt: str,
         message_history: list[ModelRequest | ModelResponse] | None = None,
+        skip_plan_execution: bool = False,  # 默認跳過 plan execution，讓 agent 自己調用工具
     ) -> str:
         self._previous_user_prompt = self._last_user_prompt
         self._last_user_prompt = prompt
         prompt, explicit_subagents = self._prepare_prompt(prompt)
         prompt, trigger_state = self._apply_keyword_triggers(prompt)
+
+        # 如果啟用 skip_plan_execution，直接讓 agent.run() 自己調用工具
+        if skip_plan_execution:
+            # 只處理 sub-agents（如果需要）
+            auto_subagents = (
+                []
+                if explicit_subagents
+                else await self._decide_sub_agents(prompt, message_history=message_history)
+            )
+            parallel_subagents = explicit_subagents or auto_subagents
+            
+            if parallel_subagents:
+                order, tasks = self._start_subagent_tasks(parallel_subagents, prompt)
+                if order and tasks:
+                    parallel_results, parallel_meta = await self._collect_subagent_results(
+                        order, tasks, prompt
+                    )
+                    self._last_execution_steps = parallel_meta
+                    if parallel_results:
+                        exec_text = "\n".join(parallel_results)
+                        prompt = f"{prompt}\n\nSub-agent results:\n{exec_text}"
+            
+            # 直接調用 agent.run()，捕獲 MCP 工具錯誤
+            try:
+                result = await self.agent.run(prompt, message_history=message_history)
+                try:
+                    self._last_messages = result.all_messages()
+                except Exception:
+                    self._last_messages = None
+                self._last_assistant_reply = self._extract_user_reply(result.output or "")
+                return result.output or ""
+            except Exception as e:
+                # 捕獲 MCP 工具錯誤，將錯誤資訊附加到 prompt 中，讓 LLM 生成友好的回應
+                error_msg = str(e)
+                logger.warning(f"Tool execution error in agent.run(): {error_msg}")
+                
+                # 將錯誤作為執行結果附加到 prompt
+                error_context = (
+                    f"\n\nTool execution error:\n{error_msg}\n\n"
+                    "Please provide a helpful response to the user explaining that the external service "
+                    "is temporarily unavailable and suggest alternatives if possible."
+                )
+                
+                # 重新調用 agent.run()，這次不呼叫工具，只是讓 LLM 看到錯誤並生成回應
+                try:
+                    result = await self.agent.run(prompt + error_context, message_history=message_history)
+                    try:
+                        self._last_messages = result.all_messages()
+                    except Exception:
+                        self._last_messages = None
+                    self._last_assistant_reply = self._extract_user_reply(result.output or "")
+                    return result.output or ""
+                except Exception as final_error:
+                    # 最後的 fallback - 建立簡單的錯誤說明讓 agent 理解
+                    logger.error(f"All retry attempts failed: {final_error}")
+                    final_prompt = (
+                        f"The user asked: {self._last_user_prompt}\n\n"
+                        f"A tool execution error occurred: {error_msg}\n"
+                        "The external service is currently unavailable. "
+                        "Please provide a helpful and friendly response to the user."
+                    )
+                    # 最後一次嘗試，不帶歷史記錄，簡單調用
+                    try:
+                        result = await self.agent.run(final_prompt)
+                        return result.output or "抱歉，目前無法連接到外部服務。請稍後再試。"
+                    except Exception:
+                        # 真的完全失敗了，返回基本訊息
+                        return "抱歉，系統暫時無法處理您的請求。請稍後再試。"
+
+        # 舊的 plan execution 模式（保留以備需要）
+        # Skills are now tool-based (use_skill tool) - no automatic injection
         plan_list = await self._build_plan_list(prompt, message_history=message_history)
         if explicit_subagents:
             plan_list = self._filter_plan_subagent_steps(plan_list, explicit_subagents)
@@ -1301,17 +1638,23 @@ class MainAgent:
         if order and tasks and background_mode and plan_list:
             exec_results.extend(await self.execute_plan({"plan": plan_list}))
             plan_meta = list(self._last_execution_steps or [])
-            parallel_results, parallel_meta = await self._collect_subagent_results(order, tasks, prompt)
+            parallel_results, parallel_meta = await self._collect_subagent_results(
+                order, tasks, prompt
+            )
             exec_results.extend(parallel_results)
             self._last_execution_steps = plan_meta + parallel_meta
         else:
             if order and tasks:
-                parallel_results, parallel_meta = await self._collect_subagent_results(order, tasks, prompt)
+                parallel_results, parallel_meta = await self._collect_subagent_results(
+                    order, tasks, prompt
+                )
                 if parallel_results:
                     exec_results.extend(parallel_results)
             if plan_list:
                 exec_results.extend(
-                    await self.execute_plan({"plan": plan_list}, pre_steps_meta=parallel_meta)
+                    await self.execute_plan(
+                        {"plan": plan_list}, pre_steps_meta=parallel_meta
+                    )
                 )
             else:
                 self._last_execution_steps = parallel_meta
@@ -1329,12 +1672,121 @@ class MainAgent:
         self._last_assistant_reply = self._extract_user_reply(result.output)
         return result.output
 
-    async def run_stream(self, prompt: str, message_history: list[ModelRequest | ModelResponse] | None = None):
+    async def run_stream(
+        self,
+        prompt: str,
+        message_history: list[ModelRequest | ModelResponse] | None = None,
+        skip_plan_execution: bool = False,  # 默認使用 plan execution
+    ):
         """Streamed version of run(): yields chunks from philosopher/subagents/main agent as they produce output."""
         self._previous_user_prompt = self._last_user_prompt
         self._last_user_prompt = prompt
         prompt, explicit_subagents = self._prepare_prompt(prompt)
         prompt, trigger_state = self._apply_keyword_triggers(prompt)
+
+        # 如果啟用 skip_plan_execution，直接讓 agent.run_stream() 自己調用工具
+        if skip_plan_execution:
+            # 只處理 sub-agents（如果需要）
+            auto_subagents = (
+                []
+                if explicit_subagents
+                else await self._decide_sub_agents(prompt, message_history=message_history)
+            )
+            parallel_subagents = explicit_subagents or auto_subagents
+            
+            if parallel_subagents:
+                order, tasks = self._start_subagent_tasks(parallel_subagents, prompt)
+                if order and tasks:
+                    parallel_results, parallel_meta = await self._collect_subagent_results(
+                        order, tasks, prompt
+                    )
+                    self._last_execution_steps = parallel_meta
+                    if parallel_results:
+                        exec_text = "\n".join(parallel_results)
+                        prompt = f"{prompt}\n\nSub-agent results:\n{exec_text}"
+            
+            # 直接調用 agent.run_stream()，捕獲 MCP 工具錯誤
+            try:
+                async with self.agent.run_stream(
+                    user_prompt=prompt, message_history=message_history
+                ) as result:
+                    collected = ""
+                    try:
+                        async for chunk in result.stream_text(delta=True):
+                            if not chunk:
+                                continue
+                            collected += chunk
+                            yield chunk
+                    except Exception as stream_error:
+                        # 捕獲 stream 過程中的錯誤（例如 MCP 工具錯誤）
+                        error_msg = str(stream_error)
+                        logger.warning(f"Tool execution error during streaming: {error_msg}")
+                        
+                        # yield 錯誤提示給 LLM，讓它生成友好回應
+                        error_prompt = (
+                            f"\n\n[System Note: A tool execution error occurred: {error_msg}. "
+                            "Please provide a helpful response explaining the service is temporarily unavailable.]"
+                        )
+                        yield error_prompt
+                        
+                    try:
+                        self._last_messages = result.all_messages()
+                    except Exception:
+                        self._last_messages = None
+                    self._last_assistant_reply = self._extract_user_reply(collected)
+                return
+            except Exception as e:
+                # 捕獲 context manager 層級的錯誤
+                error_msg = str(e)
+                logger.warning(f"Tool execution error in agent.run_stream(): {error_msg}")
+                
+                # 將錯誤作為執行結果附加到 prompt
+                error_context = (
+                    f"\n\nTool execution error:\n{error_msg}\n\n"
+                    "Please provide a helpful response to the user explaining that the external service "
+                    "is temporarily unavailable and suggest alternatives if possible."
+                )
+                
+                # 重新調用 agent.run_stream()，這次不呼叫工具，只是讓 LLM 看到錯誤並生成回應
+                try:
+                    async with self.agent.run_stream(
+                        user_prompt=prompt + error_context, message_history=message_history
+                    ) as result:
+                        collected = ""
+                        async for chunk in result.stream_text(delta=True):
+                            if not chunk:
+                                continue
+                            collected += chunk
+                            yield chunk
+                        try:
+                            self._last_messages = result.all_messages()
+                        except Exception:
+                            self._last_messages = None
+                        self._last_assistant_reply = self._extract_user_reply(collected)
+                    return
+                except Exception as final_error:
+                    # 最後的 fallback - 建立簡單的錯誤說明讓 agent 理解
+                    logger.error(f"All retry attempts failed: {final_error}")
+                    final_prompt = (
+                        f"The user asked: {self._last_user_prompt}\n\n"
+                        f"A tool execution error occurred: {error_msg}\n"
+                        "The external service is currently unavailable. "
+                        "Please provide a helpful and friendly response to the user."
+                    )
+                    # 最後一次嘗試
+                    try:
+                        async with self.agent.run_stream(user_prompt=final_prompt) as result:
+                            async for chunk in result.stream_text(delta=True):
+                                if chunk:
+                                    yield chunk
+                        return
+                    except Exception:
+                        # 真的完全失敗了
+                        yield "抱歉，系統暫時無法處理您的請求。請稍後再試。"
+                        return
+
+        # 舊的 plan execution 模式（保留以備需要）
+        # Skills are now tool-based (use_skill tool) - no automatic injection
         plan_list = await self._build_plan_list(prompt, message_history=message_history)
         if explicit_subagents:
             plan_list = self._filter_plan_subagent_steps(plan_list, explicit_subagents)
@@ -1355,7 +1807,9 @@ class MainAgent:
         order, tasks = self._start_subagent_tasks(parallel_subagents, prompt)
         pending_parallel = bool(order and tasks)
         if pending_parallel and (not background_mode or not plan_list):
-            parallel_results, parallel_meta = await self._collect_subagent_results(order, tasks, prompt)
+            parallel_results, parallel_meta = await self._collect_subagent_results(
+                order, tasks, prompt
+            )
             steps_meta.extend(parallel_meta)
             exec_results.extend(parallel_results)
             pending_parallel = False
@@ -1375,14 +1829,21 @@ class MainAgent:
                     header += f"  ({note})"
                 yield header + "\n"
                 exec_results.append(header)
-                step_meta: dict[str, Any] = {"tool": tool_name, "args": args, "note": note}
+                step_meta: dict[str, Any] = {
+                    "tool": tool_name,
+                    "args": args,
+                    "note": note,
+                }
 
                 attempts = 0
                 current_tool = tool_name
                 current_args = args
                 current_error = ""
                 while True:
-                    if isinstance(current_tool, str) and "ask_philosopher" in allowed_names:
+                    if (
+                        isinstance(current_tool, str)
+                        and "ask_philosopher" in allowed_names
+                    ):
                         if current_tool == "ask_philosopher":
                             question = ""
                             if isinstance(current_args, dict):
@@ -1392,14 +1853,18 @@ class MainAgent:
                                     or ""
                                 ).strip()
                             if not question:
-                                question = self._build_sub_agent_prompt(note, current_args, step_outputs)
+                                question = self._build_sub_agent_prompt(
+                                    note, current_args, step_outputs
+                                )
                             current_args = {
                                 "question": self._build_philosopher_prompt(
                                     note, current_args, step_outputs, question
                                 )
                             }
                         elif current_tool in {"philosopher", "哲學家"}:
-                            question = self._build_sub_agent_prompt(note, current_args, step_outputs)
+                            question = self._build_sub_agent_prompt(
+                                note, current_args, step_outputs
+                            )
                             current_tool = "ask_philosopher"
                             current_args = {
                                 "question": self._build_philosopher_prompt(
@@ -1410,12 +1875,20 @@ class MainAgent:
                             name = ""
                             if isinstance(current_args, dict):
                                 name = str(current_args.get("name", "")).strip().lower()
-                            if name in {"philosopher", "哲學家", "philosopher-co-agent"}:
+                            if name in {
+                                "philosopher",
+                                "哲學家",
+                                "philosopher-co-agent",
+                            }:
                                 question = ""
                                 if isinstance(current_args, dict):
-                                    question = str(current_args.get("prompt", "")).strip()
+                                    question = str(
+                                        current_args.get("prompt", "")
+                                    ).strip()
                                 if not question:
-                                    question = self._build_sub_agent_prompt(note, current_args, step_outputs)
+                                    question = self._build_sub_agent_prompt(
+                                        note, current_args, step_outputs
+                                    )
                                 current_tool = "ask_philosopher"
                                 current_args = {
                                     "question": self._build_philosopher_prompt(
@@ -1429,22 +1902,46 @@ class MainAgent:
                         and self.sub_agents.get_agent(current_tool)
                         and "ask_sub_agent" in allowed_names
                     ):
-                        prompt = self._build_sub_agent_prompt(note, current_args, step_outputs)
+                        prompt = self._build_sub_agent_prompt(
+                            note, current_args, step_outputs
+                        )
                         current_args = {"name": current_tool, "prompt": prompt}
                         current_tool = "ask_sub_agent"
 
                     if not current_tool:
                         current_error = "Missing 'tool' field."
                     elif current_tool not in allowed_names:
-                        current_error = f"Tool '{current_tool}' is not registered."
-                    else:
+                        # 檢查是否為 MCP 工具
+                        if isinstance(current_tool, str) and self._is_mcp_tool(current_tool):
+                            # MCP 工具的錯誤：記錄後跳出，不進入 recovery
+                            # 這樣錯誤資訊會被傳遞給 LLM，由 LLM 生成友好的回應
+                            error_msg = (
+                                f"MCP tool '{current_tool}' cannot be executed in plan mode. "
+                                "This tool requires agent runtime context."
+                            )
+                            step_meta["error"] = error_msg
+                            line = f"  -> MCP tool error: {error_msg}"
+                            yield line + "\n"
+                            exec_results.append(line)
+                            break  # 跳出 while True 循環，不進入 recovery
+                        else:
+                            current_error = f"Tool '{current_tool}' is not registered."
+                    
+                    if not current_error and current_tool in allowed_names:
+                        
                         if current_args:
-                            current_args = self._resolve_args(current_args, step_outputs)
+                            current_args = self._resolve_args(
+                                current_args, step_outputs
+                            )
                         if current_args is None:
                             current_args = {}
                         elif not isinstance(current_args, dict):
                             current_args = {"value": current_args}
-                        tool_def = registered.get(str(current_tool)) if isinstance(current_tool, str) else None
+                        tool_def = (
+                            registered.get(str(current_tool))
+                            if isinstance(current_tool, str)
+                            else None
+                        )
                         if tool_def is None:
                             current_error = f"Tool '{current_tool}' declared but not found on agent runtime."
                         elif getattr(tool_def, "takes_ctx", False):
@@ -1454,14 +1951,25 @@ class MainAgent:
                             try:
                                 try:
                                     schema = tool_def.function_schema.json_schema or {}
-                                    expected_keys = list((schema.get("properties") or {}).keys())
+                                    expected_keys = list(
+                                        (schema.get("properties") or {}).keys()
+                                    )
                                 except Exception:
                                     expected_keys = []
                                 if current_args and expected_keys:
                                     expected_set = set(expected_keys)
-                                    if not set(current_args.keys()).issubset(expected_set):
-                                        if len(expected_keys) == 1 and len(current_args) == 1:
-                                            current_args = {expected_keys[0]: next(iter(current_args.values()))}
+                                    if not set(current_args.keys()).issubset(
+                                        expected_set
+                                    ):
+                                        if (
+                                            len(expected_keys) == 1
+                                            and len(current_args) == 1
+                                        ):
+                                            current_args = {
+                                                expected_keys[0]: next(
+                                                    iter(current_args.values())
+                                                )
+                                            }
                                 if current_tool == "get_stock_history":
                                     period = current_args.get("period")
                                     if isinstance(period, str):
@@ -1479,7 +1987,11 @@ class MainAgent:
                                         open_block = False
                                     yield "<discussion>\n"
                                     transcript_lines: list[str] = []
-                                    async for line in self._run_philosopher_discussion_stream(question):
+                                    async for (
+                                        line
+                                    ) in self._run_philosopher_discussion_stream(
+                                        question
+                                    ):
                                         yield line + "\n"
                                         transcript_lines.append(line)
                                     yield "</discussion>\n"
@@ -1493,16 +2005,26 @@ class MainAgent:
                                         open_block = True
                                     break
 
-                                logger.info("Executing tool '%s' with args: %s", current_tool, current_args)
+                                logger.info(
+                                    "Executing tool '%s' with args: %s",
+                                    current_tool,
+                                    current_args,
+                                )
                                 if inspect.iscoroutinefunction(callable_obj):
                                     res = await callable_obj(**current_args)
                                 else:
-                                    maybe = callable_obj(**current_args) if current_args else callable_obj()
+                                    maybe = (
+                                        callable_obj(**current_args)
+                                        if current_args
+                                        else callable_obj()
+                                    )
                                     if asyncio.iscoroutine(maybe):
                                         res = await maybe
                                     else:
                                         res = maybe
-                                logger.info("Tool '%s' execution result: %s", current_tool, res)
+                                logger.info(
+                                    "Tool '%s' execution result: %s", current_tool, res
+                                )
                                 line = f"  -> result: {res}"
                                 yield line + "\n"
                                 exec_results.append(line)
@@ -1511,7 +2033,9 @@ class MainAgent:
                                 step_meta["tool"] = current_tool
                                 break
                             except Exception as e:
-                                logger.exception("Error executing tool %s", current_tool)
+                                logger.exception(
+                                    "Error executing tool %s", current_tool
+                                )
                                 current_error = f"Execution error: {e}"
                                 step_meta["error"] = current_error
 
@@ -1537,7 +2061,9 @@ class MainAgent:
                         line = "  -> recovery failed: no corrected tool call returned"
                         yield line + "\n"
                         exec_results.append(line)
-                        step_meta["error"] = "recovery failed: no corrected tool call returned"
+                        step_meta["error"] = (
+                            "recovery failed: no corrected tool call returned"
+                        )
                         break
                     current_tool = recovery.get("tool")
                     current_args = recovery.get("args", {})
@@ -1548,7 +2074,9 @@ class MainAgent:
                 if not open_block:
                     yield "<tool-execution>\n"
                     open_block = True
-                parallel_results, parallel_meta = await self._collect_subagent_results(order, tasks, prompt)
+                parallel_results, parallel_meta = await self._collect_subagent_results(
+                    order, tasks, prompt
+                )
                 steps_meta.extend(parallel_meta)
                 exec_results.extend(parallel_results)
                 for line in parallel_results:
@@ -1562,15 +2090,53 @@ class MainAgent:
             prompt = f"{prompt}\n\nTool execution results:\n{exec_text}"
         if current_time:
             prompt = f"Current time: {current_time}\n\n{prompt}"
-        async with self.agent.run_stream(user_prompt=prompt, message_history=message_history) as result:
-            collected = ""
-            async for chunk in result.stream_text(delta=True):
-                if not chunk:
-                    continue
-                collected += chunk
-                yield chunk
+        
+        # 捕獲最終 agent.run_stream() 的錯誤（包括 MCP 工具錯誤）
+        try:
+            async with self.agent.run_stream(
+                user_prompt=prompt, message_history=message_history
+            ) as result:
+                collected = ""
+                try:
+                    async for chunk in result.stream_text(delta=True):
+                        if not chunk:
+                            continue
+                        collected += chunk
+                        yield chunk
+                except Exception as stream_error:
+                    # 捕獲 stream 過程中的錯誤（例如 MCP 工具錯誤）
+                    error_msg = str(stream_error)
+                    logger.warning(f"Tool execution error during streaming: {error_msg}")
+                    
+                    # 建立錯誤上下文給 agent
+                    error_context = (
+                        f"\n\n[System Note: A tool execution error occurred: {error_msg}. "
+                        "Please provide a helpful response to the user explaining the situation "
+                        "and suggesting alternatives if applicable.]"
+                    )
+                    yield error_context
+                    
+                try:
+                    self._last_messages = result.all_messages()
+                except Exception:
+                    self._last_messages = None
+                self._last_assistant_reply = self._extract_user_reply(collected)
+        except Exception as e:
+            # 捕獲 context manager 層級的錯誤
+            error_msg = str(e)
+            logger.warning(f"Error in agent.run_stream(): {error_msg}")
+            
+            # 讓 agent 看到錯誤並生成回應
+            error_prompt = (
+                f"The user asked: {self._last_user_prompt}\n\n"
+                f"A tool execution error occurred: {error_msg}\n"
+                "Please provide a helpful and friendly response explaining the situation."
+            )
             try:
-                self._last_messages = result.all_messages()
+                async with self.agent.run_stream(user_prompt=error_prompt) as result:
+                    async for chunk in result.stream_text(delta=True):
+                        if chunk:
+                            yield chunk
             except Exception:
-                self._last_messages = None
-            self._last_assistant_reply = self._extract_user_reply(collected)
+                # 真的完全失敗了
+                yield "抱歉，系統暫時無法處理您的請求。請稍後再試。"

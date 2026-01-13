@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import re
 from pathlib import Path
-from typing import Awaitable, Callable
+from typing import Awaitable, Callable, Optional, Any
 
 from httpx import AsyncClient
 from pydantic_ai import Agent
@@ -18,6 +18,7 @@ from internal.services.agent_factory import (
 from internal.set_tools import add_all_tools
 from internal.co_agents.philosopher import PhilosopherCoAgent
 from internal.sub_agents.base import SubAgent
+from internal.mcp_server_list import all_mcp_servers
 
 SUB_AGENTS_DIR = Path(__file__).resolve().parent
 _MENTION_RE = re.compile(r"(?<![\\w`])@(\.?[^\s`,.]*(?:\.[^\s`,.]+)*)")
@@ -116,12 +117,31 @@ def load_sub_agent_registry(
     http_client: AsyncClient,
     root_dir: Path | None = None,
     philosopher: PhilosopherCoAgent | None = None,
+    skills: Optional[Any] = None,
 ) -> SubAgentRegistry:
     specs = load_sub_agent_specs(root_dir or SUB_AGENTS_DIR)
     if not specs:
         return SubAgentRegistry({}, {})
 
+    # Sub-agents inherit MAIN_* for base settings, but MODEL_TEMPERATURE is per-SUB only.
     config = load_agent_config_chain(["MAIN", "SUB"], base_config, env)
+    # Temperature: if SUB_MODEL_TEMPERATURE is specified, use it; otherwise default to 1.0 (do not use MAIN_MODEL_TEMPERATURE).
+    sub_temp_raw = env.get("SUB_MODEL_TEMPERATURE")
+    if sub_temp_raw and sub_temp_raw.strip() != "":
+        try:
+            sub_temp = float(sub_temp_raw)
+        except ValueError:
+            logger.warning(f"Invalid SUB_MODEL_TEMPERATURE '{sub_temp_raw}', using default 1.0.")
+            sub_temp = 1.0
+    else:
+        sub_temp = 1.0
+    config = AgentConfig(
+        name=config.name,
+        base_url=config.base_url,
+        api_key=config.api_key,
+        model_name=config.model_name,
+        temperature=sub_temp,
+    )
     model = create_openai_model(config, http_client)
 
     spec_map: dict[str, SubAgentSpec] = {}
@@ -148,17 +168,19 @@ def load_sub_agent_registry(
             instructions=build_runtime_instructions(prompt_text),
             tools=[],
             model_settings={"temperature": config.temperature},
+            toolsets=all_mcp_servers,
         )
         add_all_tools(
             agent,
-            config.model_name,
-            config.base_url,
-            config.api_key,
         )
         if philosopher:
             _register_philosopher_tools(agent, philosopher)
+        # Register skill tool if skills available
+        if skills:
+            from internal.tools.skill_tools import register_skill_tool
+            register_skill_tool(agent, skills)
         spec_map[key] = spec
-        agents[key] = SubAgent(agent, philosopher=philosopher)
+        agents[key] = SubAgent(agent, philosopher=philosopher, skills=skills)
 
     return SubAgentRegistry(spec_map, agents)
 
