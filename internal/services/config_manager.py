@@ -130,7 +130,6 @@ async def _get_copilot_token(github_token: str) -> str:
     
     token_endpoints = [
         "https://api.github.com/copilot_internal/v2/token",
-        "https://copilot-proxy.githubusercontent.com/v2/token",
     ]
     
     headers = {
