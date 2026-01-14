@@ -1,5 +1,5 @@
 1. 只在使用者更改mcp設定時，才更新mcp server列表(資料庫部分)，減少不必要的重新加載。
-2. 圖片顯示寬度不能超出去 我不要橫向捲動
+2. 圖片顯示寬度不能超出去 我不要橫向捲動 圖片設置max-width height:auto
 3. agent預設設定覆蓋層級是否正確 subagent預設真的>全域預設?
 4. system prompt更新
     - 把Claude替換成變數 在prompts.py設置agent名稱
