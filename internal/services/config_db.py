@@ -35,6 +35,23 @@ class AgentModelConfig:
     inherit_from: Optional[str] = None  # Parent agent to inherit from (for sub-agents)
 
 
+@dataclass
+class McpToolConfig:
+    """Configuration for a custom MCP tool"""
+    mcp_tool_id: str  # Unique identifier for this tool
+    name: str  # Display name
+    command: str  # The command to execute
+    args: Optional[str] = None  # Arguments for the command (space-separated)
+
+
+@dataclass
+class RemoteMcpConfig:
+    """Configuration for a remote MCP endpoint"""
+    remote_mcp_id: str  # Unique identifier for this remote MCP
+    name: str  # Display name
+    url: str  # URL to fetch the MCP definition from
+
+
 def _get_db_path() -> Path:
     """Get the database path, creating the directory if needed"""
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -94,10 +111,38 @@ def init_database():
             )
         """)
         
+        # MCP tools table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS mcp_tools (
+                mcp_tool_id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                command TEXT NOT NULL,
+                args TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
+        # Remote MCPs table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS remote_mcps (
+                remote_mcp_id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                url TEXT NOT NULL UNIQUE,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
         # Create indexes
         cursor.execute("""
             CREATE INDEX IF NOT EXISTS idx_agent_provider 
             ON agent_configs(provider_id)
+        """)
+        
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_mcp_tool_name
+            ON mcp_tools(name)
         """)
         
         logger.info(f"Database initialized at {_get_db_path()}")
@@ -345,6 +390,119 @@ def delete_agent_config(agent_name: str) -> bool:
             return cursor.rowcount > 0
     except Exception as e:
         logger.error(f"Failed to delete agent config: {e}")
+        return False
+
+
+def add_mcp_tool(config: McpToolConfig) -> bool:
+    """Add or update an MCP tool configuration"""
+    try:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO mcp_tools (mcp_tool_id, name, command, args)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(mcp_tool_id) DO UPDATE SET
+                    name=excluded.name,
+                    command=excluded.command,
+                    args=excluded.args,
+                    updated_at=CURRENT_TIMESTAMP
+            """, (
+                config.mcp_tool_id,
+                config.name,
+                config.command,
+                config.args,
+            ))
+            return True
+    except Exception as e:
+        logger.error(f"Failed to add MCP tool: {e}")
+        return False
+
+
+def add_remote_mcp(config: RemoteMcpConfig) -> bool:
+    """Add or update a remote MCP configuration"""
+    try:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO remote_mcps (remote_mcp_id, name, url)
+                VALUES (?, ?, ?)
+                ON CONFLICT(remote_mcp_id) DO UPDATE SET
+                    name=excluded.name,
+                    url=excluded.url,
+                    updated_at=CURRENT_TIMESTAMP
+            """, (
+                config.remote_mcp_id,
+                config.name,
+                config.url,
+            ))
+            return True
+    except Exception as e:
+        logger.error(f"Failed to add remote MCP: {e}")
+        return False
+
+
+def list_mcp_tools() -> list[McpToolConfig]:
+    """List all MCP tool configurations"""
+    try:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM mcp_tools ORDER BY name")
+            rows = cursor.fetchall()
+            return [
+                McpToolConfig(
+                    mcp_tool_id=row["mcp_tool_id"],
+                    name=row["name"],
+                    command=row["command"],
+                    args=row["args"],
+                )
+                for row in rows
+            ]
+    except Exception as e:
+        logger.error(f"Failed to list MCP tools: {e}")
+        return []
+
+
+def list_remote_mcps() -> list[RemoteMcpConfig]:
+    """List all remote MCP configurations"""
+    try:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM remote_mcps ORDER BY name")
+            rows = cursor.fetchall()
+            return [
+                RemoteMcpConfig(
+                    remote_mcp_id=row["remote_mcp_id"],
+                    name=row["name"],
+                    url=row["url"],
+                )
+                for row in rows
+            ]
+    except Exception as e:
+        logger.error(f"Failed to list remote MCPs: {e}")
+        return []
+
+
+def delete_mcp_tool(mcp_tool_id: str) -> bool:
+    """Delete an MCP tool configuration"""
+    try:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM mcp_tools WHERE mcp_tool_id = ?", (mcp_tool_id,))
+            return cursor.rowcount > 0
+    except Exception as e:
+        logger.error(f"Failed to delete MCP tool: {e}")
+        return False
+
+
+def delete_remote_mcp(remote_mcp_id: str) -> bool:
+    """Delete a remote MCP configuration"""
+    try:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM remote_mcps WHERE remote_mcp_id = ?", (remote_mcp_id,))
+            return cursor.rowcount > 0
+    except Exception as e:
+        logger.error(f"Failed to delete remote MCP: {e}")
         return False
 
 

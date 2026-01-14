@@ -365,6 +365,9 @@
             <button class="tab-button" onclick="switchTab('defaults')">
                 ⚙️ 默認配置
             </button>
+            <button class="tab-button" onclick="switchTab('mcp-tools')">
+                🔨 MCP 工具
+            </button>
         </div>
 
         <!-- Providers Tab -->
@@ -472,6 +475,28 @@
                     <div id="category-defaults-list">載入中...</div>
                 </div>
             </div>
+        </div>
+
+        <!-- MCP Tools Tab -->
+        <div id="mcp-tools-tab" class="tab-content">
+            <div class="section-header">
+                <h2>自訂 MCP 工具</h2>
+                <div style="display:flex; gap:10px;">
+                    <button class="btn btn-primary" onclick="showAddMcpToolModal()">
+                        ➕ 新增 MCP 工具
+                    </button>
+                    <button class="btn btn-primary" onclick="showAddRemoteMcpModal()">
+                        🌐 新增 遠端 MCP
+                    </button>
+                </div>
+            </div>
+            <div id="mcp-tools-list" class="loading">載入中...</div>
+
+            <div class="section-header" style="margin-top:20px;">
+                <h3>遠端 MCP（從 URL 加載）</h3>
+                <p style="color:#666; margin-left:auto;">可新增遠端 MCP 配置（URL 會被載入並解析成 MCP 客戶端）</p>
+            </div>
+            <div id="remote-mcps-list" class="loading">載入中...</div>
         </div>
     </div>
 
@@ -883,6 +908,76 @@
         </div>
     </div>
 
+    <!-- Add MCP Tool Modal -->
+    <div id="add-mcp-tool-modal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3 class="modal-title">新增 MCP 工具</h3>
+                <button class="close-btn" onclick="closeModal('add-mcp-tool-modal')">&times;</button>
+            </div>
+            <form id="add-mcp-tool-form">
+                <div class="form-group">
+                    <label for="mcp_tool_id">工具 ID *</label>
+                    <input type="text" id="mcp_tool_id" required placeholder="例如: my-custom-tool">
+                </div>
+
+                <div class="form-group">
+                    <label for="mcp_name">顯示名稱 *</label>
+                    <input type="text" id="mcp_name" required placeholder="例如: 我的自訂工具">
+                </div>
+
+                <div class="form-group">
+                    <label for="mcp_command">執行指令 *</label>
+                    <input type="text" id="mcp_command" required placeholder="例如: uvx">
+                </div>
+
+                <div class="form-group">
+                    <label for="mcp_args">指令參數 (可選)</label>
+                    <input type="text" id="mcp_args" placeholder="例如: my-script --arg1 value1">
+                </div>
+
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" onclick="closeModal('add-mcp-tool-modal')">
+                        取消
+                    </button>
+                    <button type="submit" class="btn btn-primary">
+                        新增
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Add Remote MCP Modal -->
+    <div id="add-remote-mcp-modal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3 class="modal-title">新增 遠端 MCP</h3>
+                <button class="close-btn" onclick="closeModal('add-remote-mcp-modal')">&times;</button>
+            </div>
+            <form id="add-remote-mcp-form">
+                <div class="form-group">
+                    <label for="remote_mcp_id">遠端 MCP ID *</label>
+                    <input type="text" id="remote_mcp_id" required placeholder="例如: remote-1">
+                </div>
+                <div class="form-group">
+                    <label for="remote_mcp_name">顯示名稱 *</label>
+                    <input type="text" id="remote_mcp_name" required placeholder="例如: My Remote MCP">
+                </div>
+                <div class="form-group">
+                    <label for="remote_mcp_url">URL *</label>
+                    <input type="text" id="remote_mcp_url" required placeholder="例如: https://example.com/mcp.json">
+                    <small style="color:#666; display:block; margin-top:5px;">請輸入可返回 MCP 描述的 URL</small>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary"
+                        onclick="closeModal('add-remote-mcp-modal')">取消</button>
+                    <button type="submit" class="btn btn-primary">新增</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
     <script>
         // Tab switching
         function switchTab(tab) {
@@ -898,6 +993,8 @@
                 loadAgents();
             } else if (tab === 'defaults') {
                 loadDefaultsTab();
+            } else if (tab === 'mcp-tools') {
+                loadMcpTools();
             }
         }
 
@@ -916,6 +1013,10 @@
 
         function closeModal(modalId) {
             document.getElementById(modalId).classList.remove('active');
+        }
+
+        function showAddMcpToolModal() {
+            document.getElementById('add-mcp-tool-modal').classList.add('active');
         }
 
         // 切換繼承模式
@@ -2363,8 +2464,339 @@
         });
 
         // Initial load
+
         loadProviders();
+
+
+
+        // ========== MCP Tools Functions ==========
+
+
+
+        // Load MCP tools
+
+
+
+        async function loadMcpTools() {
+
+            const container = document.getElementById('mcp-tools-list');
+
+            container.innerHTML = '<div class="loading">載入中...</div>';
+
+
+
+            try {
+
+                const response = await fetch('/api/mcp-tools');
+
+                const tools = await response.json();
+
+
+
+                if (tools.length === 0) {
+
+                    container.innerHTML = `
+
+                                <div class="empty-state">
+
+                                    <svg fill="currentColor" viewBox="0 0 20 20"><path d="M10 18a8 8 0 100-16 8 8 0 000 16zM9.555 7.168A1 1 0 008 8v4a1 1 0 001.555.832l3-2a1 1 0 000-1.664l-3-2z"></path></svg>
+
+                                    <p>尚未新增任何自訂 MCP 工具</p>
+
+                                    <p>點擊上方「新增 MCP 工具」按鈕開始設定</p>
+
+                                </div>
+
+                            `;
+
+                } else {
+                    container.innerHTML = tools.map(tool => `
+
+                            <div class="card">
+
+                                <div class="card-header">
+
+                                    <div>
+
+                                        <div class="card-title">${tool.name}</div>
+
+                                        <div class="card-subtitle">${tool.mcp_tool_id}</div>
+
+                                    </div>
+
+                                    <div class="card-actions">
+
+                                        <button class="btn btn-danger" onclick="deleteMcpTool('${tool.mcp_tool_id}')">
+
+                                            🗑️ 刪除
+
+                                        </button>
+
+                                    </div>
+
+                                </div>
+
+                                <div class="card-body">
+
+                                    <p><strong>指令:</strong> <code>${tool.command}</code></p>
+
+                                    ${tool.args ? `<p><strong>參數:</strong> <code>${tool.args}</code></p>` : ''}
+
+                                </div>
+
+                            </div>
+
+                        `).join('');
+                }
+
+            } catch (error) {
+
+                container.innerHTML = `<div class="alert alert-error">載入失敗: ${error.message}</div>`;
+
+            }
+
+            // Always load remote MCP list regardless of local tools status
+            await loadRemoteMcps();
+
+        }
+
+
+
+        // Add MCP Tool
+
+        document.getElementById('add-mcp-tool-form').addEventListener('submit', async (e) => {
+
+            e.preventDefault();
+
+
+
+            const data = {
+
+                mcp_tool_id: document.getElementById('mcp_tool_id').value,
+
+                name: document.getElementById('mcp_name').value,
+
+                command: document.getElementById('mcp_command').value,
+
+                args: document.getElementById('mcp_args').value || null,
+
+            };
+
+
+
+            try {
+
+                const response = await fetch('/api/mcp-tools', {
+
+                    method: 'POST',
+
+                    headers: { 'Content-Type': 'application/json' },
+
+                    body: JSON.stringify(data)
+
+                });
+
+
+
+                const result = await response.json();
+
+
+
+                if (result.success) {
+
+                    closeModal('add-mcp-tool-modal');
+
+                    document.getElementById('add-mcp-tool-form').reset();
+
+                    loadMcpTools();
+
+                    alert('✅ MCP 工具新增成功！');
+
+                } else {
+
+                    alert('❌ ' + result.error);
+
+                }
+
+            } catch (error) {
+
+                alert('❌ 新增失敗: ' + error.message);
+
+            }
+
+        });
+
+
+
+        // Delete MCP Tool
+
+        async function deleteMcpTool(toolId) {
+
+            if (!confirm(`確定要刪除 MCP 工具 "${toolId}" 嗎？`)) {
+
+                return;
+
+            }
+
+
+
+            try {
+
+                const response = await fetch(`/api/mcp-tools/${toolId}`, {
+
+                    method: 'DELETE'
+
+                });
+
+
+
+                const result = await response.json();
+
+
+
+                if (result.success) {
+
+                    loadMcpTools();
+
+                    alert('✅ MCP 工具刪除成功！');
+
+                } else {
+
+                    alert('❌ ' + result.error);
+
+                }
+
+            } catch (error) {
+
+                alert('❌ 刪除失敗: ' + error.message);
+
+            }
+
+        }
+
+        // ========== Remote MCP Functions ==========
+
+        function showAddRemoteMcpModal() {
+            const modal = document.getElementById('add-remote-mcp-modal');
+            if (modal) modal.classList.add('active');
+        }
+
+        async function loadRemoteMcps() {
+            const container = document.getElementById('remote-mcps-list');
+            container.innerHTML = '<div class="loading">載入中...</div>';
+
+            try {
+                // 10s timeout to avoid indefinite loading state
+                const controller = new AbortController();
+                const timeoutId = setTimeout(() => controller.abort(), 10000);
+
+                const response = await fetch('/api/remote-mcps', { signal: controller.signal });
+                clearTimeout(timeoutId);
+
+                if (!response.ok) {
+                    const text = await response.text().catch(() => '');
+                    throw new Error(`HTTP ${response.status}: ${text}`);
+                }
+
+                const remotes = await response.json();
+
+                if (!Array.isArray(remotes)) {
+                    throw new Error('Malformed response from server');
+                }
+
+                if (remotes.length === 0) {
+                    container.innerHTML = `
+                                <div class="empty-state">
+                                    <svg fill="currentColor" viewBox="0 0 20 20"><path d="M10 18a8 8 0 100-16 8 8 0 000 16zM9.555 7.168A1 1 0 008 8v4a1 1 0 001.555.832l3-2a1 1 0 000-1.664l-3-2z"></path></svg>
+                                    <p>尚未新增遠端 MCP</p>
+                                    <p>點擊上方「新增 遠端 MCP」按鈕開始設定</p>
+                                </div>
+                            `;
+                    return;
+                }
+
+                container.innerHTML = remotes.map(m => `
+                            <div class="card">
+                                <div class="card-header">
+                                    <div>
+                                        <div class="card-title">${m.name}</div>
+                                        <div class="card-subtitle">${m.remote_mcp_id}</div>
+                                    </div>
+                                    <div class="card-actions">
+                                        <button class="btn btn-danger" onclick="deleteRemoteMcp('${m.remote_mcp_id}')">🗑️ 刪除</button>
+                                    </div>
+                                </div>
+                                <div class="card-body">
+                                    <p><strong>URL:</strong> <a href="${m.url}" target="_blank" rel="noreferrer">${m.url}</a></p>
+                                </div>
+                            </div>
+                        `).join('');
+            } catch (error) {
+                if (error.name === 'AbortError') {
+                    container.innerHTML = `<div class="alert alert-error">載入超時，請稍後再試</div>`;
+                } else {
+                    console.error('loadRemoteMcps error:', error);
+                    container.innerHTML = `<div class="alert alert-error">載入失敗: ${error.message}</div>`;
+                }
+            }
+        }
+
+        const addRemoteForm = document.getElementById('add-remote-mcp-form');
+        if (addRemoteForm) {
+            addRemoteForm.addEventListener('submit', async (e) => {
+                e.preventDefault();
+
+                const data = {
+                    remote_mcp_id: document.getElementById('remote_mcp_id').value,
+                    name: document.getElementById('remote_mcp_name').value,
+                    url: document.getElementById('remote_mcp_url').value,
+                };
+
+                try {
+                    const response = await fetch('/api/remote-mcps', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(data)
+                    });
+
+                    const result = await response.json();
+
+                    if (result.success) {
+                        closeModal('add-remote-mcp-modal');
+                        addRemoteForm.reset();
+                        loadMcpTools();
+                        alert('✅ 遠端 MCP 新增成功！');
+                    } else {
+                        alert('❌ ' + result.error);
+                    }
+                } catch (error) {
+                    alert('❌ 新增失敗: ' + error.message);
+                }
+            });
+        }
+
+        async function deleteRemoteMcp(remoteId) {
+            if (!confirm(`確定要刪除 遠端 MCP "${remoteId}" 嗎？`)) return;
+
+            try {
+                const response = await fetch(`/api/remote-mcps/${remoteId}`, { method: 'DELETE' });
+                const result = await response.json();
+
+                if (result.success) {
+                    loadMcpTools();
+                    alert('✅ 遠端 MCP 刪除成功！');
+                } else {
+                    alert('❌ ' + result.error);
+                }
+            } catch (error) {
+                alert('❌ 刪除失敗: ' + error.message);
+            }
+        }
+
     </script>
+
 </body>
+
+
 
 </html>

@@ -12,16 +12,25 @@ import webbrowser
 
 from internal.services.config_db import (
     AgentModelConfig,
+    McpToolConfig,
     ProviderConfig,
+    add_mcp_tool,
     add_provider,
     delete_agent_config,
+    delete_mcp_tool,
     delete_provider,
     get_agent_config,
     get_provider,
     list_agent_configs,
+    list_mcp_tools,
     list_providers,
     set_agent_config,
+    RemoteMcpConfig,
+    add_remote_mcp,
+    list_remote_mcps,
+    delete_remote_mcp,
 )
+from internal.logger import logger
 from internal.services.github_oauth import authenticate_github
 from internal.services.agent_discovery import discover_agents
 
@@ -463,6 +472,94 @@ def api_delete_subagent_default_config():
         return jsonify({"success": True, "message": "Subagent 整體默認配置刪除成功"})
     else:
         return jsonify({"success": False, "error": "Subagent 整體默認配置刪除失敗"}), 400
+
+
+
+@app.route('/api/mcp-tools', methods=['GET'])
+def api_list_mcp_tools():
+    """List all custom MCP tools"""
+    tools = list_mcp_tools()
+    return jsonify([
+        {
+            "mcp_tool_id": t.mcp_tool_id,
+            "name": t.name,
+            "command": t.command,
+            "args": t.args,
+        }
+        for t in tools
+    ])
+
+
+@app.route('/api/mcp-tools', methods=['POST'])
+def api_add_mcp_tool():
+    """Add or update a custom MCP tool"""
+    data = request.json
+    
+    config = McpToolConfig(
+        mcp_tool_id=data["mcp_tool_id"],
+        name=data["name"],
+        command=data["command"],
+        args=data.get("args"),
+    )
+    
+    if add_mcp_tool(config):
+        return jsonify({"success": True, "message": "MCP 工具新增成功"})
+    else:
+        return jsonify({"success": False, "error": "MCP 工具新增失敗"}), 400
+
+
+@app.route('/api/mcp-tools/<mcp_tool_id>', methods=['DELETE'])
+def api_delete_mcp_tool(mcp_tool_id: str):
+    """Delete a custom MCP tool"""
+    if delete_mcp_tool(mcp_tool_id):
+        return jsonify({"success": True, "message": "MCP 工具刪除成功"})
+    else:
+        return jsonify({"success": False, "error": "MCP 工具刪除失敗"}), 400
+
+
+@app.route('/api/remote-mcps', methods=['GET'])
+def api_list_remote_mcps():
+    """List all remote MCP configurations"""
+    try:
+        mcps = list_remote_mcps()
+        logger.debug(f"api_list_remote_mcps: found {len(mcps)} remote MCP entries")
+        return jsonify([
+            {
+                "remote_mcp_id": m.remote_mcp_id,
+                "name": m.name,
+                "url": m.url,
+            }
+            for m in mcps
+        ])
+    except Exception as e:
+        logger.exception(f"Failed to list remote MCPs: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/api/remote-mcps', methods=['POST'])
+def api_add_remote_mcp():
+    """Add or update a remote MCP configuration"""
+    data = request.json
+    
+    config = RemoteMcpConfig(
+        remote_mcp_id=data["remote_mcp_id"],
+        name=data["name"],
+        url=data["url"],
+    )
+    
+    if add_remote_mcp(config):
+        return jsonify({"success": True, "message": "遠端 MCP 新增成功"})
+    else:
+        return jsonify({"success": False, "error": "遠端 MCP 新增失敗"}), 400
+
+
+@app.route('/api/remote-mcps/<remote_mcp_id>', methods=['DELETE'])
+def api_delete_remote_mcp(remote_mcp_id: str):
+    """Delete a remote MCP configuration"""
+    if delete_remote_mcp(remote_mcp_id):
+        return jsonify({"success": True, "message": "遠端 MCP 刪除成功"})
+    else:
+        return jsonify({"success": False, "error": "遠端 MCP 刪除失敗"}), 400
 
 
 @app.route('/api/github/authenticate', methods=['POST'])

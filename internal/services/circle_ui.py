@@ -2,9 +2,138 @@ import random
 import re
 import string
 import sys
+import io
+import urllib.request
+import concurrent.futures
+import base64
+from io import BytesIO
+try:
+    from PIL import Image
+except Exception:
+    Image = None
 
-from PySide6.QtCore import Qt, QTimer, QVariantAnimation, QPropertyAnimation, QEasingCurve, Property, QMetaObject, Signal, Slot, QEventLoop, QUrl
-from PySide6.QtGui import QColor, QPainter, QPen, QRadialGradient, QKeyEvent
+# Thread pool for downloading/processing images (limit concurrency to avoid resource spikes)
+_image_executor = concurrent.futures.ThreadPoolExecutor(max_workers=4)
+# Max bytes to read for an image (e.g., 8MB)
+_MAX_IMAGE_BYTES = 8 * 1024 * 1024
+# Max dimension (width or height) for images; images larger will be downscaled to this
+_MAX_IMAGE_DIM = 1600
+
+
+def _download_and_encode_image(url: str, max_width: int = 800) -> str:
+    """下載圖片並轉為 base64 data URI
+
+    Args:
+        url: 圖片 URL
+        max_width: 最大寬度
+
+    Returns:
+        data URI 字符串，失敗時返回原 URL
+    """
+    try:
+        # 處理本地文件
+        if url.startswith('file://'):
+            local_path = url[7:]
+            if local_path.startswith('/') and len(local_path) > 3 and local_path[2] == ':':
+                local_path = local_path[1:]
+            with open(local_path, 'rb') as f:
+                raw = f.read(_MAX_IMAGE_BYTES + 1)
+        elif not url.startswith(('http://', 'https://')):
+            # 本地路徑
+            import os
+            if os.path.exists(url):
+                with open(url, 'rb') as f:
+                    raw = f.read(_MAX_IMAGE_BYTES + 1)
+            else:
+                return url
+        else:
+            # 遠程 URL
+            with urllib.request.urlopen(url, timeout=8) as resp:
+                raw = resp.read(_MAX_IMAGE_BYTES + 1)
+
+        if len(raw) > _MAX_IMAGE_BYTES:
+            return url  # 圖片太大，不處理
+
+        # 如果有 PIL，進行壓縮和轉換
+        if Image is not None:
+            try:
+                im = Image.open(BytesIO(raw))
+                im.load()
+
+                # 轉換 RGBA 為 RGB（避免透明度問題）
+                if im.mode in ('RGBA', 'LA', 'P'):
+                    background = Image.new('RGB', im.size, (255, 255, 255))
+                    if im.mode == 'P':
+                        im = im.convert('RGBA')
+                    background.paste(im, mask=im.split()[-1] if im.mode in ('RGBA', 'LA') else None)
+                    im = background
+                elif im.mode != 'RGB':
+                    im = im.convert('RGB')
+
+                # 縮小尺寸
+                w, h = im.size
+                if w > max_width:
+                    h = int(h * max_width / w)
+                    w = max_width
+                    im = im.resize((w, h), Image.Resampling.LANCZOS)
+
+                # 轉為 JPEG（更小）
+                output = BytesIO()
+                im.save(output, format='JPEG', quality=85, optimize=True)
+                data = output.getvalue()
+            except Exception:
+                # PIL 處理失敗，使用原始數據
+                data = raw
+        else:
+            data = raw
+
+        # 編碼為 base64
+        b64 = base64.b64encode(data).decode('ascii')
+        return f'data:image/jpeg;base64,{b64}'
+
+    except Exception as e:
+        logger.debug(f"Failed to download/encode image {url}: {e}")
+        return url  # 返回原 URL
+
+
+def _process_markdown_images(text: str) -> str:
+    """處理 Markdown 中的圖片，將遠程圖片轉為 data URI
+
+    Args:
+        text: Markdown 文本
+
+    Returns:
+        處理後的 Markdown 文本
+    """
+    if not text:
+        return text
+
+    # 匹配 Markdown 圖片語法：![alt](url)
+    md_img = re.compile(r'!\[([^\]]*)\]\(([^)]+)\)')
+
+    def replace_image(match):
+        alt = match.group(1)
+        url = match.group(2).strip()
+
+        # 提取 width 參數（如果有）
+        width_match = re.search(r'=\s*(\d+)', url)
+        if width_match:
+            width = int(width_match.group(1))
+            # 移除 width 參數
+            url = re.sub(r'\s*=\s*\d+', '', url).strip()
+        else:
+            width = 800
+
+        # 下載並轉換
+        data_uri = _download_and_encode_image(url, max_width=width)
+
+        # 返回新的 Markdown
+        return f'![{alt}]({data_uri})'
+
+    return md_img.sub(replace_image, text)
+
+from PySide6.QtCore import Qt, QTimer, QVariantAnimation, QPropertyAnimation, QEasingCurve, Property, QMetaObject, Signal, Slot, QEventLoop, QUrl, QSize, QBuffer, QByteArray, QIODeviceBase
+from PySide6.QtGui import QColor, QPainter, QPen, QRadialGradient, QKeyEvent, QPixmap, QMovie
 
 # QtWebEngine is optional - only import when needed
 try:
@@ -33,6 +162,19 @@ def _autolink_markdown(text: str) -> str:
         return f'[{url}]({url})'
 
     return re.sub(r'https?://[^\s<)]+', repl, text)
+
+
+def _prepare_markdown(text: str) -> str:
+    """準備 Markdown 文本：處理圖片和 autolink"""
+    if not text:
+        return text
+    # 先處理圖片（轉為 data URI）
+    text = _process_markdown_images(text)
+    # 再處理 autolink
+    text = _autolink_markdown(text)
+    return text
+
+
 from PySide6.QtWidgets import (
     QApplication,
     QCompleter,
@@ -423,7 +565,7 @@ class CollapsibleSection(QWidget):
         if is_active and not content.strip():
             self.content.setHtml("<i>Waiting for output...</i>")
         else:
-            self.content.setMarkdown(_autolink_markdown(content))
+            self.content.setMarkdown(_prepare_markdown(content))
         self.content.setOpenExternalLinks(True)
         self.content.setStyleSheet(
             "background: transparent; color: #F0F0F0; font-size: 13px; border-radius: 10px; padding: 8px; border: none;"
@@ -485,7 +627,7 @@ class CollapsibleSection(QWidget):
         if not new_content.strip() and self.is_active:
             self.content.setHtml("<i>Waiting for output...</i>")
         else:
-            self.content.setMarkdown(_autolink_markdown(new_content))
+            self.content.setMarkdown(_prepare_markdown(new_content))
         
         # 強制重新計算高度
         QTimer.singleShot(0, self._recalculate_height)
@@ -648,6 +790,58 @@ class OutputBubble(QWidget):
     def content_height(self) -> int:
         return int(self.container.sizeHint().height())
 
+    def _available_width(self) -> int:
+        """Compute available inner width (accounting for margins)"""
+        try:
+            margins = self.layout.contentsMargins()
+            return max(0, self.width() - (margins.left() + margins.right() + 8))
+        except Exception:
+            return max(0, self.width() - 20)
+
+    def resizeEvent(self, event):
+        """On resize, rescale children (images and text) to avoid horizontal overflow."""
+        super().resizeEvent(event)
+        avail_w = self._available_width()
+        # Ensure container itself doesn't exceed available width
+        try:
+            self.container.setMaximumWidth(avail_w)
+            self.container.setMinimumWidth(0)
+        except Exception:
+            pass
+        # Update text browsers and images throughout the container (recursive)
+        try:
+            for tb in self.container.findChildren(QTextBrowser):
+                try:
+                    tb.setMaximumWidth(avail_w)
+                    tb.setMinimumWidth(0)
+                    tb.document().adjustSize()
+                    doc_size = tb.document().size()
+                    h = max(int(doc_size.height()) + 16, 32)
+                    tb.setMinimumHeight(h)
+                    tb.setMaximumHeight(h)
+                except Exception:
+                    pass
+            for lbl in self.container.findChildren(QLabel):
+                try:
+                    # Static pixmap
+                    if hasattr(lbl, '_orig_pixmap') and lbl._orig_pixmap is not None:
+                        new_pix = lbl._orig_pixmap.scaledToWidth(avail_w, Qt.SmoothTransformation)
+                        lbl.setPixmap(new_pix)
+                        lbl.setMaximumWidth(avail_w)
+                        lbl.setMinimumWidth(0)
+                    # Animated GIF
+                    if getattr(lbl, '_is_gif', False) and hasattr(lbl, '_gif_movie'):
+                        movie = lbl._gif_movie
+                        rect = movie.frameRect()
+                        h = rect.height() or int(avail_w * 0.75)
+                        movie.setScaledSize(QSize(avail_w, h))
+                        lbl.setMaximumWidth(avail_w)
+                        lbl.setMinimumWidth(0)
+                except Exception:
+                    pass
+        except Exception as e:
+            logger.debug(f"Error resizing children recursively: {e}", exc_info=True)
+
     def set_content(self, text: str):
         for i in reversed(range(self.layout.count())):
             item = self.layout.takeAt(i)
@@ -656,22 +850,48 @@ class OutputBubble(QWidget):
                 widget.setParent(None)
 
         segments = self._parse_segments(text or "")
-        for kind, content in segments:
+        for kind, content, is_active in segments:
             if not content.strip():
                 continue
             if kind == "normal":
+                # 使用 _prepare_markdown 處理內容（包括將圖片轉為 data URI）
                 browser = QTextBrowser()
-                browser.setMarkdown(_autolink_markdown(content))
+                browser.setMarkdown(_prepare_markdown(content))
                 browser.setOpenExternalLinks(True)
                 browser.setStyleSheet(
-                    "background: transparent; color: white; font-size: 14px;"
+                    "background: transparent; color: white; font-size: 14px; img { max-width: 100%; height: auto; }"
                 )
                 browser.setFrameShape(QFrame.NoFrame)
                 browser.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
                 browser.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
                 # Allow clicking links as well as text selection
                 browser.setTextInteractionFlags(Qt.TextBrowserInteraction)
-                browser.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+                # Ensure content wraps and doesn't create horizontal scrolling
+                browser.setLineWrapMode(QTextEdit.WidgetWidth)
+                # Force the browser to fill horizontal space but not exceed bubble width
+                # Compute available width taking layout margins into account
+                avail_w = self._available_width()
+                browser.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+                browser.setMinimumWidth(0)
+                browser.setMaximumWidth(avail_w)
+                browser.document().setDocumentMargin(0)
+
+                def update_browser_height(b=browser):
+                    try:
+                        b.document().adjustSize()
+                        doc_size = b.document().size()
+                        h = max(int(doc_size.height()) + 16, 32)
+                        b.setMinimumHeight(h)
+                        b.setMaximumHeight(h)
+                    except RuntimeError:
+                        pass
+
+                try:
+                    browser.textChanged.connect(update_browser_height)
+                    browser.document().contentsChanged.connect(update_browser_height)
+                except Exception:
+                    pass
+                QTimer.singleShot(0, update_browser_height)
                 self.layout.addWidget(browser)
             else:
                 title = "Tool execution" if kind == "tool" else "Discussion"
@@ -965,7 +1185,7 @@ class SiriResponseBubble(QWidget):
                     continue
                 for sub_kind, sub_content in sub_segments:
                     if sub_kind == "spinner":
-                        sub_content = _autolink_markdown(sub_content)
+                        sub_content = _prepare_markdown(sub_content)
                         container = QWidget()
                         h = QHBoxLayout(container)
                         h.setContentsMargins(0, 0, 0, 0)
@@ -976,7 +1196,7 @@ class SiriResponseBubble(QWidget):
                         label = QTextBrowser(container)
                         label.setLineWrapMode(QTextEdit.WidgetWidth)
                         label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-                        label.setMarkdown(_autolink_markdown(sub_content))
+                        label.setMarkdown(sub_content)
                         label.setOpenExternalLinks(True)
                         label.setStyleSheet(
                             "background: transparent; border: none; color: #FFFFFF; font-family: 'Segoe UI', 'Microsoft JhengHei', sans-serif; font-size: 14px; line-height: 1.5;"
@@ -1021,13 +1241,13 @@ class SiriResponseBubble(QWidget):
                                 code_widget = CodeBlockWidget(seg_content, seg_lang)
                                 self.layout.addWidget(code_widget)
                             else:
-                                # Add normal text browser
+                                # 使用 _prepare_markdown 處理內容（包括將圖片轉為 data URI）
                                 browser = QTextBrowser()
-                                browser.setMarkdown(_autolink_markdown(seg_content))
+                                browser.setMarkdown(_prepare_markdown(seg_content))
                                 browser.setOpenExternalLinks(True)
                                 browser.setLineWrapMode(QTextEdit.WidgetWidth)
                                 browser.setStyleSheet(
-                                    "QTextBrowser { color: #FFFFFF; font-family: 'Segoe UI', 'Microsoft JhengHei', sans-serif; font-size: 14px; line-height: 1.5; }"
+                                    "QTextBrowser { color: #FFFFFF; font-family: 'Segoe UI', 'Microsoft JhengHei', sans-serif; font-size: 14px; line-height: 1.5; } img { max-width: 100%; height: auto; }"
                                 )
                                 browser.setFrameShape(QFrame.NoFrame)
                                 browser.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -1434,9 +1654,14 @@ class MainWindow(QMainWindow):
         self.config_webview_window = None  # WebView 窗口引用
 
         self._pending_geometry_refresh = False
-        
+
         # 连接确认信号到槽
         self.confirm_requested.connect(self._handle_confirm_request)
+
+        # 初始化窗口遮罩（點擊穿透）- 多次延遲更新確保完全渲染
+        QTimer.singleShot(0, self._update_window_mask)
+        QTimer.singleShot(100, self._update_window_mask)
+        QTimer.singleShot(300, self._update_window_mask)
 
     def set_input_callback(self, callback):
         """設置輸入回調函數"""
@@ -1567,6 +1792,64 @@ class MainWindow(QMainWindow):
         self.old_pos = None
         event.accept()
 
+    def showEvent(self, event):
+        """窗口顯示時更新遮罩"""
+        super().showEvent(event)
+        # 延遲更新以確保所有子元素都已渲染
+        QTimer.singleShot(100, self._update_window_mask)
+
+    def _update_window_mask(self):
+        """更新窗口遮罩，定義可交互區域（跨平台方案）"""
+        from PySide6.QtGui import QRegion
+        from PySide6.QtCore import QRect
+
+        region = QRegion()
+
+        # 添加輸入框區域（使用更寬鬆的範圍）
+        if self.input_container.isVisible():
+            # 使用整個底部區域，而不是精確的輸入框位置
+            # 這樣可以避免邊緣被截斷
+            bottom_area = QRect(
+                0,
+                self.FIXED_HEIGHT - 150,  # 底部 150 像素（增加高度避免截斷）
+                self.FIXED_WIDTH,
+                150
+            )
+            region = region.united(QRegion(bottom_area))
+        else:
+            # 即使輸入框不可見，也保留一小塊底部區域用於雙擊
+            bottom_area = QRect(
+                0,
+                self.FIXED_HEIGHT - 80,
+                self.FIXED_WIDTH,
+                80
+            )
+            region = region.united(QRegion(bottom_area))
+
+        # 添加氣泡區域
+        if self.speech_bubble.isVisible():
+            bubble_rect = self.speech_bubble.geometry()
+            # 擴大以便於拖拽和完整顯示
+            bubble_rect.adjust(-15, -15, 15, 15)
+            region = region.united(QRegion(bubble_rect))
+
+        # 添加球的區域（圓形）
+        ball_center_x = int(self.FIXED_WIDTH / 2)
+        ball_center_y = int(self.FIXED_HEIGHT - self.BALL_CENTER_FROM_BOTTOM)
+        ball_radius = 120  # 加大半徑
+
+        ball_region = QRegion(
+            ball_center_x - ball_radius,
+            ball_center_y - ball_radius,
+            ball_radius * 2,
+            ball_radius * 2,
+            QRegion.RegionType.Ellipse
+        )
+        region = region.united(ball_region)
+
+        # 設置窗口遮罩
+        self.setMask(region)
+
     def mouseDoubleClickEvent(self, event):
         # 雙擊切換輸入框顯示/隱藏
         if self.input_container.isVisible():
@@ -1581,6 +1864,9 @@ class MainWindow(QMainWindow):
                 self.INPUT_HEIGHT,
             )
             self.input_container.show()
+
+        # 更新窗口遮罩
+        self._update_window_mask()
         event.accept()
 
     def update_speech_bubble(self, text):
@@ -1589,6 +1875,8 @@ class MainWindow(QMainWindow):
 
         # 延遲處理事件，避免阻塞主線程
         QTimer.singleShot(0, self._update_bubble_geometry)
+        # 再次延遲更新遮罩，確保氣泡完全渲染後更新
+        QTimer.singleShot(100, self._update_window_mask)
 
     def start_agent_animation(self):
         """啟動 agent 運行動畫"""
@@ -1645,26 +1933,33 @@ class MainWindow(QMainWindow):
                     self.INPUT_HEIGHT,
                 )
                 self.input_container.show()
+
+            # 更新窗口遮罩
+            self._update_window_mask()
         except Exception as e:
             logger.error(f"Bubble geometry update error: {e}")
 
 
 class ConfigWebViewWindow(QMainWindow):
     """配置頁面 WebView 窗口"""
-    
+
     def __init__(self, url: str, parent=None):
-        super().__init__(parent)
-        
+        # 不傳遞 parent 以避免繼承 always on top 屬性
+        super().__init__(None)
+
         if not HAS_WEBENGINE:
             raise ImportError("PySide6-WebEngine is not installed. Please run: pip install PySide6-WebEngine")
-        
+
         self.setWindowTitle("Agent 配置管理")
         self.setGeometry(100, 100, 1200, 800)
-        
+
+        # 明確設置為普通窗口（不使用 WindowStaysOnTopHint）
+        self.setWindowFlags(Qt.WindowType.Window)
+
         # 創建 WebView
         self.webview = QWebEngineView()
         self.webview.setUrl(QUrl(url))
-        
+
         # 直接將 WebView 設置為中央組件，不添加工具欄
         self.setCentralWidget(self.webview)
 

@@ -30,7 +30,7 @@ from internal.set_tools import add_all_tools
 from internal.skills_loader import SkillRegistry, load_skill_registry
 from internal.sub_agents import SubAgentRegistry, load_sub_agent_registry
 
-from internal.mcp_server_list import all_mcp_servers
+from internal.mcp_server_list import get_all_mcp_servers
 
 PROMPT_KEY = "MAIN_AGENT_PROMPT"
 ENV_PREFIX = "MAIN"
@@ -179,7 +179,7 @@ class MainAgent:
         if sub_agents and not sub_agents.is_empty():
             instructions += "\n\nSub-agents are available via tools: list_sub_agents, ask_sub_agent."
 
-        mcp_servers = all_mcp_servers
+        mcp_servers = get_all_mcp_servers()
 
         # 建立增強的 system prompt（預設自動載入所有可用的 prompts）
         enhanced_system_prompt = cls._build_enhanced_system_prompt(

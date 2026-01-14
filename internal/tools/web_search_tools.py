@@ -17,9 +17,10 @@ def add_web_search_tools(agent: Agent) -> None:
     """
     註冊免費的網路搜索工具到 agent
 
-    提供兩個工具：
+    提供三個工具：
     - web_search: 一般網路搜索（使用 DuckDuckGo）
     - web_search_news: 新聞搜索（使用 DuckDuckGo News）
+    - web_search_images: 圖片搜索（使用 DuckDuckGo Images）
     """
     agent.tool_plain(web_search)
     agent.tool_plain(web_search_news)
