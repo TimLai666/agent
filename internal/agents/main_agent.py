@@ -68,18 +68,62 @@ class MainAgent:
             組合後的 system prompt
         """
         from internal.prompts import list_available_system_prompts
+        from datetime import datetime
+        import platform
 
         # 如果啟用自動載入，載入所有可用的 prompts
         if auto_load_all and additional_prompts is None:
             additional_prompts = list_available_system_prompts()
             logger.info(f"Auto-loading {len(additional_prompts)} system prompts")
 
+        # 獲取當前時間資訊
+        now = datetime.now()
+        weekday_names = {
+            0: "Monday",
+            1: "Tuesday",
+            2: "Wednesday",
+            3: "Thursday",
+            4: "Friday",
+            5: "Saturday",
+            6: "Sunday"
+        }
+        weekday_chinese = {
+            0: "週一",
+            1: "週二",
+            2: "週三",
+            3: "週四",
+            4: "週五",
+            5: "週六",
+            6: "週日"
+        }
+
+        weekday_en = weekday_names[now.weekday()]
+        weekday_zh = weekday_chinese[now.weekday()]
+
+        # 構建時間資訊
+        time_info = f"""
+# Current Date and Time
+
+**IMPORTANT: The current date and time information below is automatically generated at agent initialization.**
+
+- **Current Date**: {now.strftime('%Y-%m-%d')} ({weekday_en} / {weekday_zh})
+- **Current Time**: {now.strftime('%H:%M:%S')}
+- **Full DateTime**: {now.strftime('%Y-%m-%d %H:%M:%S %A')}
+- **Time of Day**: {"Morning (早上)" if 6 <= now.hour < 12 else "Afternoon (下午)" if 12 <= now.hour < 18 else "Evening (晚上)" if 18 <= now.hour < 24 else "Late Night (深夜)"}
+- **System**: {platform.system()}
+
+**Use this information** when responding to user greetings or when time-sensitive context is needed.
+"""
+
+        # 基礎 prompt + 時間資訊
+        base_with_time = SYSTEM_PROMPT + "\n\n" + time_info
+
         if not additional_prompts:
-            return SYSTEM_PROMPT
+            return base_with_time
 
         # 使用 build_combined_system_prompt 組合 prompts
         return build_combined_system_prompt(
-            base_prompt=SYSTEM_PROMPT,
+            base_prompt=base_with_time,
             additional_prompts=additional_prompts,
             separator="\n\n---\n\n",
         )

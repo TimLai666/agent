@@ -5,10 +5,12 @@
 """
 
 import asyncio
-from duckduckgo_search import DDGS
+from ddgs import DDGS
 from internal.logger import logger
 
 from pydantic_ai import Agent
+
+safe_search_default = "off"
 
 
 def add_web_search_tools(agent: Agent) -> None:
@@ -21,6 +23,7 @@ def add_web_search_tools(agent: Agent) -> None:
     """
     agent.tool_plain(web_search)
     agent.tool_plain(web_search_news)
+    agent.tool_plain(web_search_images)
 
 
 async def web_search(
@@ -46,9 +49,11 @@ async def web_search(
         def _search():
             with DDGS() as ddgs:
                 results = list(ddgs.text(
-                    keywords=query,
+                    query=query,
                     region=region,
                     max_results=max_results,
+                    backend="auto",
+                    safesearch=safe_search_default,
                 ))
             return results
 
@@ -114,9 +119,11 @@ async def web_search_news(
         def _search_news():
             with DDGS() as ddgs:
                 results = list(ddgs.news(
-                    keywords=query,
+                    query=query,
                     region=region,
                     max_results=max_results,
+                    backend="auto",
+                    safesearch=safe_search_default,
                 ))
             return results
 
@@ -157,5 +164,59 @@ async def web_search_news(
 
     except Exception as e:
         error_msg = f"新聞搜索時發生錯誤: {str(e)}"
+        logger.error(error_msg, exc_info=e)
+        return error_msg
+
+async def web_search_images(
+    query: str,
+    max_results: int = 5,
+    region: str = "wt-wt",
+) -> str:
+    """
+    搜索圖片（使用 DuckDuckGo Images）
+
+    Args:
+        query: 搜索查詢字串
+        max_results: 最多返回結果數量（默認 5）
+        region: 地區代碼
+        
+    Returns:
+        格式化的圖片搜索結果
+    """
+    
+    try:
+        logger.info(f"Performing DuckDuckGo image search: {query}")
+
+        def _search_images():
+            with DDGS() as ddgs:
+                results = list(ddgs.images(
+                    query=query,
+                    region=region,
+                    max_results=max_results,
+                    backend="auto",
+                    safesearch=safe_search_default,
+                ))
+            return results
+        
+        loop = asyncio.get_event_loop()
+        results = await loop.run_in_executor(None, _search_images)
+        if not results:
+            return f"未找到關於「{query}」的圖片。"
+        formatted_results = []
+        formatted_results.append(f"圖片搜索：{query}\n")
+        formatted_results.append(f"找到 {len(results)} 張圖片：\n")
+        for idx, result in enumerate(results, 1):
+            title = result.get("title", "無標題")
+            url = result.get("image", "")
+            formatted_results.append(f"{idx}. {title}")
+            formatted_results.append(f"   URL: {url}")
+            formatted_results.append("")
+        result_text = "\n".join(formatted_results)
+        result_text += "\n💡 提示：以上圖片結果來自 DuckDuckGo"
+        logger.info(f"Image search completed: {len(results)} results found")
+        await asyncio.sleep(3)  # 避免速率限制
+        return result_text
+    except Exception as e:
+        error_msg = f"圖片搜索時發生錯誤: {str(e)}"
         logger.error(error_msg, exc_info=e)
         return error_msg
