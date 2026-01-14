@@ -743,6 +743,13 @@ class SiriResponseBubble(QWidget):
         self.max_height = 600
         self.preferred_width = 420
         self.setAttribute(Qt.WA_StyledBackground, True)
+
+        # 添加運行狀態動畫相關屬性
+        self._is_running = False
+        self._animation_angle = 0
+        self._animation_timer = QTimer(self)
+        self._animation_timer.timeout.connect(self._update_animation)
+
         # 極致磨砂感：強制背景不繼承並移除內部所有預設邊框
         self.setStyleSheet(
             "SiriResponseBubble { "
@@ -1161,6 +1168,65 @@ class SiriResponseBubble(QWidget):
 
         return segments
 
+    def _update_animation(self):
+        """更新動畫角度並觸發重繪"""
+        self._animation_angle = (self._animation_angle + 2) % 360
+        self.update()  # 觸發 paintEvent
+
+    def start_animation(self):
+        """啟動彩色外框動畫，表示 agent 正在運行"""
+        if not self._is_running:
+            self._is_running = True
+            self._animation_timer.start(16)  # 約 60 FPS
+
+    def stop_animation(self):
+        """停止彩色外框動畫，表示 agent 已完成"""
+        if self._is_running:
+            self._is_running = False
+            self._animation_timer.stop()
+            self.update()  # 最後一次重繪以移除外框
+
+    def paintEvent(self, event):
+        """自定義繪製事件，添加彩色動畫外框"""
+        super().paintEvent(event)
+
+        if not self._is_running:
+            return
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+
+        rect = self.rect()
+
+        # 定義彩色序列（春綠 → 道奇藍 → 熱粉色）
+        colors = [
+            QColor("#00FF7F"),  # 春綠色
+            QColor("#1E90FF"),  # 道奇藍
+            QColor("#FF69B4"),  # 熱粉色
+        ]
+
+        # 根據動畫角度在顏色之間插值
+        progress = self._animation_angle / 360.0
+        color_index = int(progress * len(colors))
+        next_color_index = (color_index + 1) % len(colors)
+        t = (progress * len(colors)) - color_index
+
+        current_color = colors[color_index]
+        next_color = colors[next_color_index]
+
+        r = int(current_color.red() + (next_color.red() - current_color.red()) * t)
+        g = int(current_color.green() + (next_color.green() - current_color.green()) * t)
+        b = int(current_color.blue() + (next_color.blue() - current_color.blue()) * t)
+
+        border_color = QColor(r, g, b, 220)
+
+        # 繪製彩色外框
+        pen = QPen(border_color, 2)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRoundedRect(rect.adjusted(1, 1, -1, -1), 30, 30)
+
 
 class ArcWidget(QWidget):
     def __init__(self):
@@ -1523,6 +1589,14 @@ class MainWindow(QMainWindow):
 
         # 延遲處理事件，避免阻塞主線程
         QTimer.singleShot(0, self._update_bubble_geometry)
+
+    def start_agent_animation(self):
+        """啟動 agent 運行動畫"""
+        self.speech_bubble.start_animation()
+
+    def stop_agent_animation(self):
+        """停止 agent 運行動畫"""
+        self.speech_bubble.stop_animation()
     
     def _update_bubble_geometry(self):
         """更新氣泡幾何形狀（延遲調用以避免阻塞）"""

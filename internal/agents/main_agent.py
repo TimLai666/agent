@@ -16,6 +16,8 @@ from internal.prompts import (
     SYSTEM_PROMPT,
     build_runtime_instructions,
     get_prompt,
+    get_system_prompt_processed,
+    build_combined_system_prompt,
     load_keyword_triggers,
     load_subagent_background_config,
 )
@@ -51,6 +53,38 @@ class MainAgent:
     TOOL_RECOVERY_MAX_ATTEMPTS = 2
 
     @classmethod
+    def _build_enhanced_system_prompt(
+        cls,
+        additional_prompts: list[str] | None = None,
+        auto_load_all: bool = True,
+    ) -> str:
+        """建立增強的 system prompt。
+
+        Args:
+            additional_prompts: 要加入的額外 system prompt 名稱列表
+            auto_load_all: 是否自動載入所有可用的 system prompts（預設 True）
+
+        Returns:
+            組合後的 system prompt
+        """
+        from internal.prompts import list_available_system_prompts
+
+        # 如果啟用自動載入，載入所有可用的 prompts
+        if auto_load_all and additional_prompts is None:
+            additional_prompts = list_available_system_prompts()
+            logger.info(f"Auto-loading {len(additional_prompts)} system prompts")
+
+        if not additional_prompts:
+            return SYSTEM_PROMPT
+
+        # 使用 build_combined_system_prompt 組合 prompts
+        return build_combined_system_prompt(
+            base_prompt=SYSTEM_PROMPT,
+            additional_prompts=additional_prompts,
+            separator="\n\n---\n\n",
+        )
+
+    @classmethod
     def create(
         cls,
         base_config: AgentConfig,
@@ -59,6 +93,8 @@ class MainAgent:
         philosopher: PhilosopherCoAgent,
         sub_agents: SubAgentRegistry | None = None,
         skills: SkillRegistry | None = None,
+        additional_system_prompts: list[str] | None = None,
+        auto_load_all_prompts: bool = True,
     ) -> "MainAgent":
         # Load skills first (so sub-agents can use them)
         if skills is None:
@@ -98,12 +134,18 @@ class MainAgent:
         instructions = build_runtime_instructions(get_prompt(cls.PROMPT_KEY))
         if sub_agents and not sub_agents.is_empty():
             instructions += "\n\nSub-agents are available via tools: list_sub_agents, ask_sub_agent."
-   
+
         mcp_servers = all_mcp_servers
+
+        # 建立增強的 system prompt（預設自動載入所有可用的 prompts）
+        enhanced_system_prompt = cls._build_enhanced_system_prompt(
+            additional_prompts=additional_system_prompts,
+            auto_load_all=auto_load_all_prompts
+        )
 
         agent: Agent[None, str] = Agent(
             model=model,
-            system_prompt=SYSTEM_PROMPT,
+            system_prompt=enhanced_system_prompt,
             instructions=instructions,
             tools=[],
             model_settings={"temperature": config.temperature},
@@ -112,7 +154,7 @@ class MainAgent:
 
         planner_agent: Agent[None, str] = Agent(
             model=model,
-            system_prompt=SYSTEM_PROMPT,
+            system_prompt=enhanced_system_prompt,
             instructions=(
                 "你是嚴格的 JSON 轉換器。"
                 "只負責把主 agent 給你的工具請求轉成 JSON，"
@@ -123,7 +165,7 @@ class MainAgent:
         )
         discussion_agent: Agent[None, str] = Agent(
             model=model,
-            system_prompt=SYSTEM_PROMPT,
+            system_prompt=enhanced_system_prompt,
             instructions=(
                 "You are the main agent in an internal discussion with the philosopher. "
                 "Provide a concise candidate answer for the user and respond to critique. "

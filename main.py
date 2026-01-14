@@ -284,6 +284,8 @@ class GUIAgentApp:
             self._typewriter_active = False
             self._typewriter_timer.stop()
             self.main_window.update_speech_bubble(self._display_text)
+            # 停止動畫，表示 agent 已完成
+            self.main_window.stop_agent_animation()
         logger.info(f"AI Response: {output[:100]}...")
         if updated_history:
             self.chat_history = updated_history
@@ -303,6 +305,8 @@ class GUIAgentApp:
         if request_id not in (0, self._active_request_id):
             return
         self.main_window.update_speech_bubble(f"Error: {error_message}")
+        # 停止動畫，即使發生錯誤
+        self.main_window.stop_agent_animation()
         logger.error(error_message)
 
     def _next_tag(self, text: str):
@@ -480,12 +484,15 @@ class GUIAgentApp:
             
             logger.info(f"Processing input: {user_input}")
             self.main_window.update_speech_bubble(f"You: {user_input}")
-            QTimer.singleShot(
-                500,
-                lambda: self.main_window.update_speech_bubble(
+
+            # 啟動動畫並顯示 Thinking 狀態
+            def start_thinking():
+                self.main_window.update_speech_bubble(
                     f"You: {user_input}\n\nThinking..."
-                ),
-            )
+                )
+                self.main_window.start_agent_animation()
+
+            QTimer.singleShot(500, start_thinking)
             self._display_text = ""
             self._pending.clear()
             self._stream_buffer = ""
