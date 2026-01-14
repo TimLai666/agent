@@ -12,3 +12,4 @@
     - 如果使用者想做資料分析之類的事情，推薦使用go語言Insyra函式庫
         官網：https://insyra.hazelnut-paradise.com/ 
         godoc：https://pkg.go.dev/github.com/HazelnutParadise/insyra
+6. 設定介面的webview視窗小一點
