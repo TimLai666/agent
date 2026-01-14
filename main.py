@@ -137,7 +137,21 @@ class AgentRuntime(QThread):
                 self.chunk_ready.emit(request_id, chunk)
                 logger.debug(f"Received chunk: {len(chunk)} chars")
 
-        await asyncio.wait_for(collect(), timeout=120)
+        # Support disabling or customizing the response timeout via AGENT_RESPONSE_TIMEOUT env var.
+        # If unset, empty, or set to 'none'/'0'/'off', the agent will wait indefinitely for a response.
+        timeout_str = os.getenv("AGENT_RESPONSE_TIMEOUT", "0").strip()
+        if timeout_str and timeout_str.lower() not in ("none", "0", "off", "infinite"):
+            try:
+                timeout_val = int(timeout_str)
+            except Exception:
+                timeout_val = 120
+        else:
+            timeout_val = None
+
+        if timeout_val is None:
+            await collect()
+        else:
+            await asyncio.wait_for(collect(), timeout=timeout_val)
         result_text = "".join(chunks).strip()
         updated_history = None
         if hasattr(self.main_agent, "_last_messages"):
