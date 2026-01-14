@@ -5,6 +5,7 @@ from internal.mcp.fetch import fetch
 from internal.mcp.cook import cook
 from internal.mcp.browser import browser
 from internal.mcp.taiwan_holiday import taiwan_holiday
+from internal.mcp.package_docs import package_docs
 from internal.services.config_db import list_mcp_tools, list_remote_mcps
 from internal.mcp.remote_mcp_loader import load_remote_mcp_from_url
 from internal.logger import logger
@@ -15,6 +16,7 @@ def get_built_in_mcp_servers() -> list[MCPServerStdio]:
     """Returns a fresh list of built-in MCP servers."""
     return [
         time, fetch, cook, browser, taiwan_holiday,
+        package_docs,
     ]
 
 def get_all_mcp_servers() -> list[MCPServerStdio]:
@@ -31,7 +33,7 @@ def get_all_mcp_servers() -> list[MCPServerStdio]:
             try:
                 args = tool_config.args.split() if tool_config.args else []
                 # Prefix tools coming from this MCP with the MCP's id to avoid name collisions
-                tool_prefix = f"{tool_config.mcp_tool_id}-"
+                tool_prefix = f"{tool_config.mcp_tool_id}_"
                 custom_tool_client = McpClient(
                     command=tool_config.command,
                     args=args,
