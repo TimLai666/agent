@@ -35,6 +35,7 @@ class AgentRuntime(QThread):
     chunk_ready = Signal(int, str)
     result_ready = Signal(int, str, list)
     error_occurred = Signal(int, str)
+    tool_event = Signal(object)
 
     def __init__(self, base_config, env: dict[str, str]):
         super().__init__()
@@ -48,6 +49,7 @@ class AgentRuntime(QThread):
         self._ready_event: asyncio.Event | None = None
         self._current_future = None
         self._request_id = 0
+        self._active_request_id = 0
 
     def run(self):
         loop = asyncio.new_event_loop()
@@ -77,6 +79,7 @@ class AgentRuntime(QThread):
             self.main_agent = MainAgent.create(
                 self.base_config, self.env, self.http_client, self.philosopher
             )
+            self.main_agent.set_tool_event_callback(self._emit_tool_event)
             self.mcp_stack = AsyncExitStack()
             try:
                 await self.mcp_stack.enter_async_context(
@@ -98,6 +101,46 @@ class AgentRuntime(QThread):
             if self._ready_event:
                 self._ready_event.set()
             self.error_occurred.emit(0, "Initialization failed. Check logs.")
+
+    def _format_tool_line(self, event: dict) -> str:
+        tool = str(event.get("tool") or "tool")
+        args = event.get("args") or ()
+        kwargs = event.get("kwargs") or {}
+        stage = str(event.get("stage") or "")
+
+        label = tool
+        if isinstance(kwargs, dict):
+            for key in ("command", "path", "url", "query"):
+                value = kwargs.get(key)
+                if isinstance(value, str) and value.strip():
+                    label = value.strip()
+                    break
+        if label == tool and args:
+            try:
+                first = args[0]
+                if isinstance(first, str) and first.strip():
+                    label = f"{tool} {first.strip()}"
+            except Exception:
+                pass
+
+        if stage == "start":
+            return f"???? {label}"
+        if stage == "end":
+            return f"??? {label}"
+        if stage == "error":
+            error = str(event.get("error") or "")
+            suffix = f": {error}" if error else ""
+            return f"???? {label}{suffix}"
+        return f"??? {label}"
+
+    def _emit_tool_event(self, event: dict) -> None:
+        try:
+            line = self._format_tool_line(event)
+        except Exception as exc:
+            logger.debug(f"Tool event format failed: {exc}")
+            return
+        payload = {"request_id": self._active_request_id, "line": line}
+        self.tool_event.emit(payload)
 
     async def _shutdown(self):
         if self.mcp_stack is not None:
@@ -177,6 +220,7 @@ class AgentRuntime(QThread):
             self._current_future.cancel()
         self._request_id += 1
         request_id = self._request_id
+        self._active_request_id = request_id
         future = asyncio.run_coroutine_threadsafe(
             self._run_prompt(request_id, user_input, chat_history), self.loop
         )
@@ -210,6 +254,7 @@ class GUIAgentApp:
         self.runtime_ready = False
         self._active_request_id = 0
         self._display_text = ""
+        self._tool_log_lines: list[str] = []
         self._pending = deque()
         self._stream_buffer = ""
         self._stream_mode = "normal"
@@ -248,6 +293,7 @@ class GUIAgentApp:
         self.runtime.result_ready.connect(self.handle_result)
         self.runtime.chunk_ready.connect(self.handle_chunk)
         self.runtime.error_occurred.connect(self.handle_error)
+        self.runtime.tool_event.connect(self.handle_tool_event)
         self.runtime.start()
 
         self.main_window = MainWindow()
@@ -267,6 +313,28 @@ class GUIAgentApp:
         result = self.main_window.show_confirm_dialog(message, default_choice)
         logger.info(f"_gui_confirm_handler returning: {result}")
         return result
+
+    def _reset_tool_log(self) -> None:
+        self._tool_log_lines = []
+
+    def _compose_display_text(self, base_text: str | None = None) -> str:
+        text = self._display_text if base_text is None else base_text
+        if not self._tool_log_lines:
+            return text
+        tool_block = ("<tool-execution>\n" + "\n".join(self._tool_log_lines) + "\n</tool-execution>")
+        if text:
+            return tool_block + "\n\n" + text
+        return tool_block
+
+    def handle_tool_event(self, payload: dict) -> None:
+        request_id = payload.get("request_id")
+        line = payload.get("line")
+        if request_id != self._active_request_id or not line:
+            return
+        self._tool_log_lines.append(str(line).rstrip())
+        if len(self._tool_log_lines) > 200:
+            self._tool_log_lines = self._tool_log_lines[-200:]
+        self._request_display_update()
 
     def handle_runtime_ready(self):
         self.runtime_ready = True
@@ -300,7 +368,7 @@ class GUIAgentApp:
             self._stream_mode = "normal"
             self._typewriter_active = False
             self._typewriter_timer.stop()
-            self.main_window.update_speech_bubble(self._display_text)
+            self.main_window.update_speech_bubble(self._compose_display_text())
             # 停止動畫，表示 agent 已完成
             self.main_window.stop_agent_animation()
         logger.info(f"AI Response: {output[:100]}...")
@@ -321,7 +389,7 @@ class GUIAgentApp:
     def handle_error(self, request_id, error_message):
         if request_id not in (0, self._active_request_id):
             return
-        self.main_window.update_speech_bubble(f"Error: {error_message}")
+        self.main_window.update_speech_bubble(self._compose_display_text(f"Error: {error_message}"))
         # 停止動畫，即使發生錯誤
         self.main_window.stop_agent_animation()
         logger.error(error_message)
@@ -366,7 +434,7 @@ class GUIAgentApp:
                     try:
                         # Avoid committing preview if nothing to show
                         if self._stream_buffer:
-                            self.main_window.update_speech_bubble(self._display_text + self._stream_buffer)
+                            self.main_window.update_speech_bubble(self._compose_display_text(self._display_text + self._stream_buffer))
                     except Exception:
                         pass
                     break
@@ -429,7 +497,7 @@ class GUIAgentApp:
         """執行實際的顯示更新"""
         if self._pending_display_update:
             try:
-                self.main_window.update_speech_bubble(self._display_text)
+                self.main_window.update_speech_bubble(self._compose_display_text())
                 self._pending_display_update = False
             except Exception as e:
                 logger.error(f"Display update error: {e}")
@@ -447,7 +515,7 @@ class GUIAgentApp:
                 formatted = text.replace("\n", "\n\n")
             else:
                 formatted = text
-            self.main_window.update_speech_bubble(formatted)
+            self.main_window.update_speech_bubble(self._compose_display_text(formatted))
 
     def show_input_container(self):
         """Show input container."""
@@ -511,6 +579,7 @@ class GUIAgentApp:
 
             QTimer.singleShot(500, start_thinking)
             self._display_text = ""
+            self._reset_tool_log()
             self._pending.clear()
             self._stream_buffer = ""
             self._stream_mode = "normal"

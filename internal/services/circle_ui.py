@@ -1420,9 +1420,10 @@ class SiriResponseBubble(QWidget):
 
         # 定義彩色序列（春綠 → 道奇藍 → 熱粉色）
         colors = [
-            QColor("#00FF7F"),  # 春綠色
-            QColor("#1E90FF"),  # 道奇藍
-            QColor("#FF69B4"),  # 熱粉色
+            QColor("#6FD3C5"),  # muted teal
+            QColor("#6B8FE5"),  # soft blue
+            QColor("#9B8FEA"),  # lavender
+            QColor("#6ED0B2"),  # seafoam
         ]
 
         # 根據動畫角度在顏色之間插值
@@ -1438,10 +1439,11 @@ class SiriResponseBubble(QWidget):
         g = int(current_color.green() + (next_color.green() - current_color.green()) * t)
         b = int(current_color.blue() + (next_color.blue() - current_color.blue()) * t)
 
-        border_color = QColor(r, g, b, 220)
+        border_color = QColor(r, g, b, 190)
 
         # 繪製彩色外框
-        pen = QPen(border_color, 2)
+        pen = QPen(border_color)
+        pen.setWidthF(1.6)
         pen.setCapStyle(Qt.PenCapStyle.RoundCap)
         painter.setPen(pen)
         painter.setBrush(Qt.BrushStyle.NoBrush)
@@ -1635,13 +1637,13 @@ class MainWindow(QMainWindow):
         self.send_button.setFixedSize(60, 35)
         self.send_button.setStyleSheet(
             "QPushButton { "
-            "background-color: #007AFF; "
-            "color: white; "
+            "background-color: #00FF7F; "
+            "color: #003322; "
             "border: none; "
             "border-radius: 15px; "
             "font-weight: bold; "
             "}"
-            "QPushButton:hover { background-color: #0063CC; }"
+            "QPushButton:hover { background-color: #00E676; }"
         )
         self.send_button.clicked.connect(self.on_input_submitted)
 

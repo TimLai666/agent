@@ -250,6 +250,12 @@ class MainAgent:
 
                     @functools.wraps(func)
                     async def wrapped_async(*args, **kwargs):
+                        callback = getattr(agent, "_tool_event_callback", None)
+                        if callback:
+                            try:
+                                callback({"stage": "start", "tool": func.__name__, "args": args, "kwargs": kwargs})
+                            except Exception as exc:
+                                logger.debug("Tool event callback failed on start.", exc_info=True)
                         logger.info(
                             "Tool call start: %s args=%s kwargs=%s",
                             func.__name__,
@@ -261,11 +267,21 @@ class MainAgent:
                             logger.info(
                                 "Tool call end: %s result=%s", func.__name__, res
                             )
+                            if callback:
+                                try:
+                                    callback({"stage": "end", "tool": func.__name__, "args": args, "kwargs": kwargs, "result": res})
+                                except Exception as exc:
+                                    logger.debug("Tool event callback failed on end.", exc_info=True)
                             return res
-                        except Exception:
+                        except Exception as exc:
                             logger.exception(
                                 "Tool %s raised an exception", func.__name__
                             )
+                            if callback:
+                                try:
+                                    callback({"stage": "error", "tool": func.__name__, "args": args, "kwargs": kwargs, "error": str(exc)})
+                                except Exception as exc:
+                                    logger.debug("Tool event callback failed on error.", exc_info=True)
                             raise
 
                     wrapped_callable = wrapped_async
@@ -273,6 +289,12 @@ class MainAgent:
 
                     @functools.wraps(func)
                     def wrapped_sync(*args, **kwargs):
+                        callback = getattr(agent, "_tool_event_callback", None)
+                        if callback:
+                            try:
+                                callback({"stage": "start", "tool": func.__name__, "args": args, "kwargs": kwargs})
+                            except Exception as exc:
+                                logger.debug("Tool event callback failed on start.", exc_info=True)
                         logger.info(
                             "Tool call start: %s args=%s kwargs=%s",
                             func.__name__,
@@ -284,11 +306,21 @@ class MainAgent:
                             logger.info(
                                 "Tool call end: %s result=%s", func.__name__, res
                             )
+                            if callback:
+                                try:
+                                    callback({"stage": "end", "tool": func.__name__, "args": args, "kwargs": kwargs, "result": res})
+                                except Exception as exc:
+                                    logger.debug("Tool event callback failed on end.", exc_info=True)
                             return res
-                        except Exception:
+                        except Exception as exc:
                             logger.exception(
                                 "Tool %s raised an exception", func.__name__
                             )
+                            if callback:
+                                try:
+                                    callback({"stage": "error", "tool": func.__name__, "args": args, "kwargs": kwargs, "error": str(exc)})
+                                except Exception as exc:
+                                    logger.debug("Tool event callback failed on error.", exc_info=True)
                             raise
 
                     wrapped_callable = wrapped_sync
@@ -355,7 +387,12 @@ class MainAgent:
         self._last_assistant_reply: str | None = None
         self._mcp_tool_names: set[str] | None = None  # 緩存 MCP 工具名稱列表
         self._http_client = http_client  # 保存以便重載 model
+        setattr(self.agent, "_tool_event_callback", None)
         # tools are registered via add_all_tools during create()
+
+    def set_tool_event_callback(self, callback) -> None:
+        """Register a callback for tool execution events."""
+        setattr(self.agent, "_tool_event_callback", callback)
 
     def _reload_model_from_db(self) -> None:
         """從資料庫重新載入配置並更新 model。
