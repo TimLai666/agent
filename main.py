@@ -85,9 +85,12 @@ class AgentRuntime(QThread):
                 logger.info("MCP servers started in AgentRuntime")
             except Exception as exc:
                 logger.warning(
-                    "MCP servers failed to start in AgentRuntime; continuing.",
+                    "MCP servers failed to start in AgentRuntime; clearing toolsets and continuing.",
                     exc_info=exc,
                 )
+                # 清除已註冊的 MCP toolsets 以防止 agent 嘗試調用不可用的工具
+                self.main_agent.agent._user_toolsets = []
+                logger.info("Cleared MCP toolsets from agent to prevent tool call failures")
             self._ready_event.set()
             self.ready.emit()
         except Exception as e:

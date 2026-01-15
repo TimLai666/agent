@@ -1,11 +1,17 @@
 # 默認配置功能說明
 
+> 最後更新：2026-01-15
+
 ## 概述
 
-默認配置功能提供**兩級默認配置系統**，讓您能靈活地為所有 Agent 或特定類別的 Subagent 設置默認配置：
+默認配置功能提供**多級默認配置系統**，讓您能靈活地為不同層級的 Agent 設置默認配置：
 
-1. **全域默認配置** (`default`) - 所有未配置 Agent 的後備選項
-2. **類別默認配置** (`default:{category}`) - 特定類別 Subagent 的專用配置
+1. **全域默認配置** (`default`) - 所有未配置 Agent 的最終後備選項
+2. **Agent 類型預設** - 針對 Core、Co-Agent、Sub-Agent 的專屬預設
+   - `default:core` - Core agents (如 main)
+   - `default:co-agents` - Co-agents (如 philosopher)
+   - `default:subagents` - 所有 Sub-agents
+3. **類別默認配置** (`default:{category}`) - 特定類別的專用配置 (如 marketing、testing)
 
 ## 配置優先級
 
@@ -16,19 +22,37 @@
    ↓ (未找到)
 2. 繼承配置 (inherit_from)
    ↓ (未找到)
-3. 類別默認配置 (default:{category})
+3. 類別默認配置 (default:{category})  ← 如 default:marketing
    ↓ (未找到)
-4. 全域默認配置 (default)
+4. Agent 類型預設
+   - Core agents → default:core
+   - Co-agents → default:co-agents
+   - Sub-agents → default:subagents
    ↓ (未找到)
-5. None (無配置)
+5. 全域默認配置 (default)
+   ↓ (未找到)
+6. None (無配置)
 ```
 
 ## 功能特點
 
-### 1. 兩級默認配置
-- **全域默認**：適用於所有未配置的 Agent
-- **類別默認**：為特定類別（marketing、testing、design 等）設置專用配置
-- **自動回退**：類別默認 → 全域默認
+### 1. 多級默認配置
+
+**Agent 類型層級** (新增✨):
+- `default:core` - Core agents 專用預設 (如 main agent)
+- `default:co-agents` - Co-agents 專用預設 (如 philosopher)
+- `default:subagents` - 所有 Sub-agents 的預設
+
+**類別層級**:
+- `default:marketing` - Marketing sub-agents 專用
+- `default:testing` - Testing sub-agents 專用
+- `default:design` - Design sub-agents 專用
+- 等等...
+
+**全域層級**:
+- `default` - 所有未配置 Agent 的最終後備
+
+**自動回退**：類別預設 → Agent類型預設 → 全域預設
 
 ### 2. Web UI 管理
 在新的 **"⚙️ 默認配置"** 標籤頁中：

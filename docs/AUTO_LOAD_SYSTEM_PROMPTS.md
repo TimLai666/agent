@@ -308,8 +308,8 @@ print(f"每次請求預估成本: ${cost_per_request:.4f}")
 
 ## 相關文檔
 
-- [SYSTEM_PROMPTS_INTEGRATION.md](./SYSTEM_PROMPTS_INTEGRATION.md) - 完整的使用指南
-- [SYSTEM_PROMPTS_MIGRATION_SUMMARY.md](./SYSTEM_PROMPTS_MIGRATION_SUMMARY.md) - 遷移總結
+- [SYSTEM_PROMPTS_INTEGRATION.md](./SYSTEM_PROMPTS_INTEGRATION.md) - 完整的 API 使用指南
+- [README.md](./README.md) - 文檔索引
 
 ## 回饋與改進
 

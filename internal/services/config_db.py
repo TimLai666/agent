@@ -264,20 +264,23 @@ def get_agent_config(agent_name: str, use_default: bool = True, category: Option
     """
     Get configuration for a specific agent.
     Follows inheritance chain if agent inherits from another.
-    Falls back to category default, subagent default, or global default if not found and use_default=True.
-    
+    Falls back to category default or global default if not found and use_default=True.
+
     Fallback order:
     1. Direct agent configuration
     2. Inherited configuration
-    3. Category default (default:{category})
-    4. Subagent default (default:subagents) - for all subagents
+    3. Category default (default:{category}) - for specific categories (e.g., default:marketing)
+    4. Category-level defaults:
+       - default:subagents (for sub-agent/* categories)
+       - default:core (for core category)
+       - default:co-agents (for co-agent category)
     5. Global default (default) - for all agents
-    
+
     Args:
         agent_name: Name of the agent
         use_default: Whether to fall back to default config if not found
-        category: Category of the agent (for category-specific defaults)
-        
+        category: Category of the agent (e.g., "core", "co-agent", "sub-agent/marketing")
+
     Returns:
         AgentModelConfig with resolved configuration, or None if not found
     """
@@ -302,19 +305,42 @@ def get_agent_config(agent_name: str, use_default: bool = True, category: Option
                                 inherit_from=f"default:{category}",
                             )
                     
-                    # 2. 如果是 subagent，嘗試 subagent 整體默認配置
-                    # core 和 co-agent 不是 subagent，只有 sub-agent/* 才是
-                    if category and category.startswith("sub-agent/"):
-                        subagent_default = get_agent_config("default:subagents", use_default=False)
-                        if subagent_default:
-                            return AgentModelConfig(
-                                agent_name=agent_name,
-                                provider_id=subagent_default.provider_id,
-                                model_name=subagent_default.model_name,
-                                temperature=subagent_default.temperature,
-                                inherit_from="default:subagents",
-                            )
-                    
+                    # 2. 嘗試 category 整體默認配置
+                    if category:
+                        # Sub-agents: default:subagents
+                        if category.startswith("sub-agent/"):
+                            category_default = get_agent_config("default:subagents", use_default=False)
+                            if category_default:
+                                return AgentModelConfig(
+                                    agent_name=agent_name,
+                                    provider_id=category_default.provider_id,
+                                    model_name=category_default.model_name,
+                                    temperature=category_default.temperature,
+                                    inherit_from="default:subagents",
+                                )
+                        # Core agents: default:core
+                        elif category == "core":
+                            category_default = get_agent_config("default:core", use_default=False)
+                            if category_default:
+                                return AgentModelConfig(
+                                    agent_name=agent_name,
+                                    provider_id=category_default.provider_id,
+                                    model_name=category_default.model_name,
+                                    temperature=category_default.temperature,
+                                    inherit_from="default:core",
+                                )
+                        # Co-agents: default:co-agents
+                        elif category == "co-agent":
+                            category_default = get_agent_config("default:co-agents", use_default=False)
+                            if category_default:
+                                return AgentModelConfig(
+                                    agent_name=agent_name,
+                                    provider_id=category_default.provider_id,
+                                    model_name=category_default.model_name,
+                                    temperature=category_default.temperature,
+                                    inherit_from="default:co-agents",
+                                )
+
                     # 3. 最後嘗試全域默認配置
                     default_config = get_agent_config("default", use_default=False)
                     if default_config:
@@ -504,6 +530,28 @@ def delete_remote_mcp(remote_mcp_id: str) -> bool:
     except Exception as e:
         logger.error(f"Failed to delete remote MCP: {e}")
         return False
+
+
+def get_mcp_last_updated() -> Optional[str]:
+    """
+    Get the most recent update timestamp from MCP configurations.
+    Returns the latest updated_at timestamp from either mcp_tools or remote_mcps tables.
+    """
+    try:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT MAX(updated_at) as last_updated FROM (
+                    SELECT updated_at FROM mcp_tools
+                    UNION ALL
+                    SELECT updated_at FROM remote_mcps
+                )
+            """)
+            row = cursor.fetchone()
+            return row["last_updated"] if row and row["last_updated"] else None
+    except Exception as e:
+        logger.error(f"Failed to get MCP last updated timestamp: {e}")
+        return None
 
 
 # Initialize database on module import

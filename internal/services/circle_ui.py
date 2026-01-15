@@ -568,7 +568,7 @@ class CollapsibleSection(QWidget):
             self.content.setMarkdown(_prepare_markdown(content))
         self.content.setOpenExternalLinks(True)
         self.content.setStyleSheet(
-            "background: transparent; color: #F0F0F0; font-size: 13px; border-radius: 10px; padding: 8px; border: none;"
+            "background: transparent; color: #F0F0F0; font-size: 13px; border-radius: 10px; padding: 8px; border: none; img { max-width: 100%; height: auto; }"
         )
         self.content.setFrameShape(QFrame.NoFrame)
         self.content.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -1199,7 +1199,7 @@ class SiriResponseBubble(QWidget):
                         label.setMarkdown(sub_content)
                         label.setOpenExternalLinks(True)
                         label.setStyleSheet(
-                            "background: transparent; border: none; color: #FFFFFF; font-family: 'Segoe UI', 'Microsoft JhengHei', sans-serif; font-size: 14px; line-height: 1.5;"
+                            "background: transparent; border: none; color: #FFFFFF; font-family: 'Segoe UI', 'Microsoft JhengHei', sans-serif; font-size: 14px; line-height: 1.5; img { max-width: 100%; height: auto; }"
                         )
                         label.setFrameShape(QFrame.NoFrame)
                         label.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -1951,7 +1951,7 @@ class ConfigWebViewWindow(QMainWindow):
             raise ImportError("PySide6-WebEngine is not installed. Please run: pip install PySide6-WebEngine")
 
         self.setWindowTitle("Agent 配置管理")
-        self.setGeometry(100, 100, 1200, 800)
+        self.setGeometry(100, 100, 1000, 700)
 
         # 明確設置為普通窗口（不使用 WindowStaysOnTopHint）
         self.setWindowFlags(Qt.WindowType.Window)
