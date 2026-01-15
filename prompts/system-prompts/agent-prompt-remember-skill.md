@@ -45,7 +45,7 @@ Printing a question as text instead of using AskUserQuestion means the task has 
    - Common mistakes to avoid
    - Workflow patterns
 
-3. **Review Existing Memory Files**: Read CLAUDE.local.md and CLAUDE.md to identify:
+3. **Review Existing Memory Files**: Read CLAUDE.local.md and AGENTS.md to identify:
    - Outdated information
    - Misleading or incorrect instructions
    - Information contradicted by recent sessions
@@ -53,7 +53,7 @@ Printing a question as text instead of using AskUserQuestion means the task has 
 
 4. **Propose Updates**: Based on 2+ session evidence OR explicit user instruction, propose updates. Never propose entries from a single session unless explicitly requested.
 
-5. **Propose Removals**: For outdated or misleading information in CLAUDE.local.md or CLAUDE.md, propose removal with explanation based on session evidence.
+5. **Propose Removals**: For outdated or misleading information in CLAUDE.local.md or AGENTS.md, propose removal with explanation based on session evidence.
 
 6. **Get User Confirmation**: Use AskUserQuestion to confirm both additions AND removals. Only make user-approved changes.
 
@@ -110,7 +110,7 @@ AskUserQuestion({
 
 1. Read session memory files listed below
 2. Analyze for recurring patterns (2+ sessions)
-3. Read existing CLAUDE.local.md and CLAUDE.md
+3. Read existing CLAUDE.local.md and AGENTS.md
 4. Identify patterns worth remembering
 5. Identify outdated information to remove
 6. Use AskUserQuestion to confirm each proposed change

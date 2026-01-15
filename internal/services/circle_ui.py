@@ -1,4 +1,5 @@
 import random
+import math
 import re
 import string
 import sys
@@ -133,7 +134,7 @@ def _process_markdown_images(text: str) -> str:
     return md_img.sub(replace_image, text)
 
 from PySide6.QtCore import Qt, QTimer, QVariantAnimation, QPropertyAnimation, QEasingCurve, Property, QMetaObject, Signal, Slot, QEventLoop, QUrl, QSize, QBuffer, QByteArray, QIODeviceBase
-from PySide6.QtGui import QColor, QPainter, QPen, QRadialGradient, QKeyEvent, QPixmap, QMovie
+from PySide6.QtGui import QColor, QPainter, QPen, QRadialGradient, QKeyEvent, QPixmap, QMovie, QGuiApplication, QCursor, QConicalGradient, QLinearGradient
 
 # QtWebEngine is optional - only import when needed
 try:
@@ -196,6 +197,8 @@ from PySide6.QtWidgets import (
 )
 
 from internal.logger import logger
+
+DEBUG_LAYOUT = True
 
 
 class CodeBlockWidget(QWidget):
@@ -265,6 +268,8 @@ class CodeBlockWidget(QWidget):
         code_browser.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         code_browser.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         code_browser.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard)
+        code_browser.setViewportMargins(0, 0, 0, 0)
+        code_browser.setContentsMargins(0, 0, 0, 0)
         code_browser.document().setDocumentMargin(0)
         code_browser.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         
@@ -568,23 +573,31 @@ class CollapsibleSection(QWidget):
             self.content.setMarkdown(_prepare_markdown(content))
         self.content.setOpenExternalLinks(True)
         self.content.setStyleSheet(
-            "background: transparent; color: #F0F0F0; font-size: 13px; border-radius: 10px; padding: 8px; border: none; img { max-width: 100%; height: auto; }"
-        )
+    "background: transparent; color: #F0F0F0; font-size: 13px; border-radius: 10px; border: none; margin: 0; padding: 0;"
+)
+        self.content.setLineWrapMode(QTextEdit.WidgetWidth)
+        # 設定圖片樣式以防止橫向捲動
+        self.content.document().setDefaultStyleSheet("img { max-width: 208px; height: auto; }")
         self.content.setFrameShape(QFrame.NoFrame)
         self.content.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.content.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
 
         # Ensure content doesn't scroll internally and compute size changes
+        self.content.setViewportMargins(0, 0, 0, 0)
+        self.content.setContentsMargins(0, 0, 0, 0)
         self.content.document().setDocumentMargin(0)
 
         def adjust():
             try:
                 if self.content is None:
                     return
+                self.content.document().adjustSize()
                 h = self.content.document().size().height()
                 # Ensure a sensible minimum height so active blocks are visible
                 min_h = 28 if self.is_active else 10
-                self.content.setFixedHeight(max(int(h) + 16, min_h))
+                new_height = max(int(h) + 16, min_h)
+                self._content_height = new_height
+                self.content.setFixedHeight(new_height)
                 if self.layout():
                     self.layout().activate()
             except RuntimeError:
@@ -814,6 +827,7 @@ class OutputBubble(QWidget):
                 try:
                     tb.setMaximumWidth(avail_w)
                     tb.setMinimumWidth(0)
+                    tb.document().setTextWidth(avail_w)
                     tb.document().adjustSize()
                     doc_size = tb.document().size()
                     h = max(int(doc_size.height()) + 16, 32)
@@ -859,8 +873,10 @@ class OutputBubble(QWidget):
                 browser.setMarkdown(_prepare_markdown(content))
                 browser.setOpenExternalLinks(True)
                 browser.setStyleSheet(
-                    "background: transparent; color: white; font-size: 14px; img { max-width: 100%; height: auto; }"
+                    "background: transparent; color: white; font-size: 14px;"
                 )
+                # 設定圖片樣式以防止橫向捲動
+                browser.document().setDefaultStyleSheet("img { max-width: 208px; height: auto; }")
                 browser.setFrameShape(QFrame.NoFrame)
                 browser.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
                 browser.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -874,6 +890,8 @@ class OutputBubble(QWidget):
                 browser.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
                 browser.setMinimumWidth(0)
                 browser.setMaximumWidth(avail_w)
+                browser.setViewportMargins(0, 0, 0, 0)
+                browser.setContentsMargins(0, 0, 0, 0)
                 browser.document().setDocumentMargin(0)
 
                 def update_browser_height(b=browser):
@@ -961,7 +979,7 @@ class SiriResponseBubble(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.max_height = 600
-        self.preferred_width = 420
+        self.preferred_width = 340
         self.setAttribute(Qt.WA_StyledBackground, True)
 
         # 添加運行狀態動畫相關屬性
@@ -979,30 +997,55 @@ class SiriResponseBubble(QWidget):
             "} "
             "QTextBrowser { background: transparent; border: none; } "
             "QScrollArea { background: transparent; border: none; } "
-            "QWidget#container { background: transparent; border: none; }"
+            "QWidget#container { background: transparent; border: none; }" "QTextBrowser::viewport { padding: 0px; margin: 0px; border: none; }"
         )
 
         self.scroll = QScrollArea(self)
         self.scroll.setWidgetResizable(True)
         self.scroll.setFrameShape(QFrame.NoFrame)
         self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.scroll.setViewportMargins(0, 0, 0, 0)
+        self.scroll.setContentsMargins(0, 0, 0, 0)
+        self.scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self._debug_layout = DEBUG_LAYOUT
+        if self._debug_layout:
+            scroll_root = "QScrollArea { background: transparent; border: 1px dashed rgba(0, 200, 255, 90); } "
+        else:
+            scroll_root = "QScrollArea { background: transparent; } "
         self.scroll.setStyleSheet(
-            "QScrollArea { background: transparent; } "
-            "QScrollBar:vertical { border: none; background: transparent; width: 3px; margin: 12px 0 12px 0; } "
-            "QScrollBar::handle:vertical { background: rgba(255, 255, 255, 40); min-height: 25px; border-radius: 1.5px; } "
-            "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; }"
+            scroll_root
+            + "QScrollBar:vertical { border: none; background: transparent; width: 3px; margin: 12px 0 12px 0; } "
+            + "QScrollBar::handle:vertical { background: rgba(255, 255, 255, 40); min-height: 25px; border-radius: 1.5px; } "
+            + "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; }"
         )
 
         self.container = QWidget()
         self.container.setObjectName("container")
+        self.container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        if self._debug_layout:
+            self.container.setStyleSheet("background: transparent; border: 1px dashed rgba(255, 200, 0, 120);")
+        else:
+            self.container.setStyleSheet("background: transparent; border: none;")
         self.layout = QVBoxLayout(self.container)
         self.layout.setContentsMargins(12, 12, 12, 12)
+        self.layout.setAlignment(Qt.AlignLeft | Qt.AlignTop)
         self.layout.setSpacing(8)
         self.scroll.setWidget(self.container)
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.addWidget(self.scroll)
+
+        if self._debug_layout:
+            self._debug_label = QLabel(self)
+            self._debug_label.setStyleSheet(
+                "color: #BFEAFF; font-size: 10px; background: rgba(0, 0, 0, 150); "
+                "padding: 2px 4px; border-radius: 3px;"
+            )
+            self._debug_label.setAttribute(Qt.WA_TransparentForMouseEvents)
+            self._debug_label.setWordWrap(True)
+            self._debug_label.setText("")
+            self._debug_label.move(10, 6)
 
     def _refresh_layout_metrics(self, process_events: bool = True) -> None:
         try:
@@ -1060,7 +1103,8 @@ class SiriResponseBubble(QWidget):
             
             # Recalculate and apply size
             padding = 30
-            bubble_width = min(max(bubble.preferred_width, 240), main_window.FIXED_WIDTH - 40)
+            bubble_width = main_window.FIXED_WIDTH - 20
+            main_window._current_bubble_width = bubble_width
             needed_height = bubble.content_height() + padding
             max_bubble_height = main_window.FIXED_HEIGHT - 200
             bubble_height = min(max(needed_height, 80), max_bubble_height)
@@ -1078,6 +1122,78 @@ class SiriResponseBubble(QWidget):
             bubble.move(bubble_x, bubble_y)
         except Exception as e:
             logger.debug(f"Failed to trigger bubble resize: {e}")
+
+    def _recalculate_child_heights(self) -> None:
+        try:
+            margins = self.layout.contentsMargins()
+            viewport_w = self.scroll.viewport().width()
+            self.container.setMinimumWidth(viewport_w)
+            self.container.setMaximumWidth(viewport_w)
+            avail_w = max(0, viewport_w - (margins.left() + margins.right()))
+            for tb in self.container.findChildren(QTextBrowser):
+                try:
+                    tb.setMaximumWidth(avail_w)
+                    tb.setMinimumWidth(0)
+                    tb.setViewportMargins(0, 0, 0, 0)
+                    tb.setContentsMargins(0, 0, 0, 0)
+                    try:
+                        tb.viewport().setContentsMargins(0, 0, 0, 0)
+                    except Exception:
+                        pass
+                    tb.setStyleSheet(tb.styleSheet() + " padding: 0; margin: 0; ")
+                    tb.document().setDocumentMargin(0)
+                    viewport_w = max(0, tb.viewport().width())
+                    wrap_w = viewport_w if viewport_w > 0 else avail_w
+                    tb.setLineWrapMode(QTextEdit.FixedPixelWidth)
+                    tb.setLineWrapColumnOrWidth(wrap_w)
+                    tb.document().setTextWidth(wrap_w)
+                    tb.document().adjustSize()
+                    doc_size = tb.document().size()
+                    h = max(int(doc_size.height()) + 16, 32)
+                    tb.setMinimumHeight(h)
+                    tb.setMaximumHeight(h)
+                    if self._debug_layout and not getattr(tb, "_debug_border_applied", False):
+                        tb.setStyleSheet(tb.styleSheet() + " border: 1px dashed rgba(255, 80, 80, 120);")
+                        tb._debug_border_applied = True
+                except Exception:
+                    pass
+            for section in self.container.findChildren(CollapsibleSection):
+                try:
+                    section._recalculate_height()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        if self._debug_layout:
+            try:
+                tb_widths = [tb.width() for tb in self.container.findChildren(QTextBrowser)]
+                if tb_widths:
+                    tb_info = f"{min(tb_widths)}-{max(tb_widths)}"
+                else:
+                    tb_info = "n/a"
+                viewport_w = (
+                    self.container.findChildren(QTextBrowser)[0].viewport().width()
+                    if self.container.findChildren(QTextBrowser)
+                    else "n/a"
+                )
+                label = (
+                    f"scroll {self.scroll.viewport().width()}px | "
+                    f"container {self.container.width()}px\n"
+                    f"text {tb_info}px | viewport {viewport_w}px"
+                )
+                self._debug_label.setText(label)
+                self._debug_label.setFixedWidth(max(100, self.width() - 20))
+                self._debug_label.adjustSize()
+            except Exception:
+                pass
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        # Force scroll area to fill the bubble width/height
+        self.scroll.setGeometry(self.rect())
+        self._recalculate_child_heights()
+        QTimer.singleShot(0, self._delayed_layout_refresh)
+        QTimer.singleShot(50, self._recalculate_child_heights)
 
     def _split_normal_segments(self, content: str):
         segments = []
@@ -1199,13 +1315,17 @@ class SiriResponseBubble(QWidget):
                         label.setMarkdown(sub_content)
                         label.setOpenExternalLinks(True)
                         label.setStyleSheet(
-                            "background: transparent; border: none; color: #FFFFFF; font-family: 'Segoe UI', 'Microsoft JhengHei', sans-serif; font-size: 14px; line-height: 1.5; img { max-width: 100%; height: auto; }"
+                            "background: transparent; border: none; color: #FFFFFF; font-family: 'Segoe UI', 'Microsoft JhengHei', sans-serif; font-size: 14px; line-height: 1.5;"
                         )
+                        # 設定圖片樣式以防止橫向捲動
+                        label.document().setDefaultStyleSheet("img { max-width: 208px; height: auto; }")
                         label.setFrameShape(QFrame.NoFrame)
                         label.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
                         label.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
                         # Allow clicking links inside spinner labels
                         label.setTextInteractionFlags(Qt.TextBrowserInteraction)
+                        label.setViewportMargins(0, 0, 0, 0)
+                        label.setContentsMargins(0, 0, 0, 0)
                         label.document().setDocumentMargin(0)
 
                         def update_spinner_label_height(b=label):
@@ -1247,13 +1367,17 @@ class SiriResponseBubble(QWidget):
                                 browser.setOpenExternalLinks(True)
                                 browser.setLineWrapMode(QTextEdit.WidgetWidth)
                                 browser.setStyleSheet(
-                                    "QTextBrowser { color: #FFFFFF; font-family: 'Segoe UI', 'Microsoft JhengHei', sans-serif; font-size: 14px; line-height: 1.5; } img { max-width: 100%; height: auto; }"
+                                    "QTextBrowser { color: #FFFFFF; font-family: 'Segoe UI', 'Microsoft JhengHei', sans-serif; font-size: 14px; line-height: 1.5; }"
                                 )
+                                # 設定圖片樣式以防止橫向捲動
+                                browser.document().setDefaultStyleSheet("img { max-width: 208px; height: auto; }")
                                 browser.setFrameShape(QFrame.NoFrame)
                                 browser.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
                                 browser.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
                                 # Allow clicking links inside sub-sections
                                 browser.setTextInteractionFlags(Qt.TextBrowserInteraction)
+                                browser.setViewportMargins(0, 0, 0, 0)
+                                browser.setContentsMargins(0, 0, 0, 0)
                                 browser.document().setDocumentMargin(0)
                                 browser.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
 
@@ -1310,6 +1434,7 @@ class SiriResponseBubble(QWidget):
 
         # 延遲批量處理布局更新，減少重繪
         QTimer.singleShot(0, self._delayed_layout_refresh)
+        QTimer.singleShot(50, self._recalculate_child_heights)
 
     def _parse_segments(self, text: str):
         tags = {
@@ -1562,15 +1687,212 @@ class ArcWidget(QWidget):
             self.startAnime()
 
 
+class EdgeHandle(QWidget):
+    def __init__(self, on_activate=None):
+        super().__init__(None)
+        self._on_activate = on_activate
+        self._collapsed_width = 16
+        self._expanded_width = 24
+        self._height = 180
+        self._screen_geo = None
+        self._side = "right"
+        self._hovered = False
+        self._active_glow = False
+        self._glow_angle = 0
+        self._glow_timer = QTimer(self)
+        self._glow_timer.setInterval(30)
+        self._glow_timer.timeout.connect(self._tick_glow)
+        self._dragging = False
+        self._drag_start_global = None
+        self._drag_offset = None
+        self._last_y = None
+        self.setFixedSize(self._collapsed_width, self._height)
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.Tool
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, False)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setStyleSheet("")
+
+    def _resolve_screen_geometry(self, reference=None):
+        screen = None
+        if reference is not None:
+            try:
+                screen = reference.screen()
+            except Exception:
+                screen = None
+            if screen is None:
+                try:
+                    handle = reference.windowHandle()
+                    if handle is not None:
+                        screen = handle.screen()
+                except Exception:
+                    screen = None
+        if screen is None:
+            try:
+                screen = QGuiApplication.screenAt(QCursor.pos())
+            except Exception:
+                screen = None
+        if screen is None:
+            screen = QGuiApplication.primaryScreen()
+        if screen is None:
+            return None
+        return screen.availableGeometry()
+
+    def _snap_to_edge(self, geo):
+        width = self._expanded_width if self._hovered else self._collapsed_width
+        self.setFixedSize(width, self._height)
+        if self._side == "left":
+            x = geo.left()
+        else:
+            x = geo.right() - width + 1
+        y = self.y()
+        y = max(geo.top(), min(y, geo.bottom() - self._height))
+        self.setGeometry(x, y, width, self._height)
+        self._last_y = y
+
+    def show_at_edge(self, reference=None):
+        geo = self._resolve_screen_geometry(reference)
+        if geo is None:
+            return
+        self._screen_geo = geo
+        self._hovered = False
+        if self._last_y is None:
+            y = geo.bottom() - self._height
+        else:
+            y = self._last_y
+        y = max(geo.top(), min(y, geo.bottom() - self._height))
+        self.move(self.x(), y)
+        self._snap_to_edge(geo)
+        self.show()
+        self.raise_()
+
+    def set_active_glow(self, active: bool) -> None:
+        if self._active_glow == active:
+            return
+        self._active_glow = active
+        if active:
+            if not self._glow_timer.isActive():
+                self._glow_timer.start()
+        else:
+            if self._glow_timer.isActive():
+                self._glow_timer.stop()
+        self.update()
+
+    def _tick_glow(self):
+        self._glow_angle = (self._glow_angle + 6) % 360
+        self.update()
+
+    def enterEvent(self, event):
+        self._hovered = True
+        geo = self._screen_geo or self._resolve_screen_geometry(None)
+        if geo is None:
+            return
+        self._snap_to_edge(geo)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._hovered = False
+        geo = self._screen_geo or self._resolve_screen_geometry(None)
+        if geo is None:
+            return
+        self._snap_to_edge(geo)
+        super().leaveEvent(event)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._dragging = True
+            self._drag_start_global = event.globalPosition().toPoint()
+            self._drag_offset = event.pos()
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if not self._dragging:
+            return
+        geo = self._resolve_screen_geometry(None)
+        if geo is None:
+            return
+        self._screen_geo = geo
+        new_x = event.globalPosition().toPoint().x() - self._drag_offset.x()
+        new_y = event.globalPosition().toPoint().y() - self._drag_offset.y()
+        new_y = max(geo.top(), min(new_y, geo.bottom() - self._height))
+        self.move(new_x, new_y)
+
+    def mouseReleaseEvent(self, event):
+        if not self._dragging:
+            return
+        self._dragging = False
+        end_pos = event.globalPosition().toPoint()
+        moved = (end_pos - self._drag_start_global).manhattanLength() if self._drag_start_global else 0
+        geo = self._resolve_screen_geometry(None)
+        if geo is not None:
+            self._screen_geo = geo
+            mid_x = self.geometry().center().x()
+            if abs(mid_x - geo.left()) < abs(geo.right() - mid_x):
+                self._side = "left"
+            else:
+                self._side = "right"
+            self._hovered = False
+            self._snap_to_edge(geo)
+            self._last_y = self.y()
+        if moved < 4 and self._on_activate:
+            self._on_activate()
+        super().mouseReleaseEvent(event)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        rect = self.rect().adjusted(1, 1, -1, -1)
+
+        base_color = QColor(32, 32, 32, 220)
+        border_color = QColor(120, 255, 180, 200) if self._active_glow else QColor(255, 255, 255, 90)
+
+        # Glow (animated when active)
+        if self._active_glow:
+            gradient = QConicalGradient(rect.center(), self._glow_angle)
+            gradient.setColorAt(0.0, QColor(120, 255, 180, 0))
+            gradient.setColorAt(0.05, QColor(120, 255, 180, 200))
+            gradient.setColorAt(0.15, QColor(120, 255, 180, 0))
+            gradient.setColorAt(1.0, QColor(120, 255, 180, 0))
+            glow_pen = QPen(gradient, 6)
+        else:
+            glow_pen = QPen(QColor(160, 160, 160, 60), 4)
+        glow_pen.setCapStyle(Qt.RoundCap)
+        painter.setPen(glow_pen)
+        painter.setBrush(Qt.NoBrush)
+        painter.drawRoundedRect(rect.adjusted(2, 2, -2, -2), 9, 9)
+
+        # Body with a soft dark mid-band
+        mid_dark = QColor(18, 18, 18, 230)
+        edge_soft = QColor(38, 38, 38, 220)
+        grad = QLinearGradient(rect.topLeft(), rect.bottomLeft())
+        if self._active_glow:
+            wave = math.sin(math.radians(self._glow_angle))
+            mid_pos = 0.45 + (wave * 0.06)
+        else:
+            mid_pos = 0.45
+        grad.setColorAt(0.0, edge_soft)
+        grad.setColorAt(max(0.2, min(0.8, mid_pos)), mid_dark)
+        grad.setColorAt(1.0, edge_soft)
+
+        painter.setPen(QPen(border_color, 1.5))
+        painter.setBrush(grad)
+        painter.drawRoundedRect(rect, 9, 9)
+
+
 class MainWindow(QMainWindow):
     # 信号：请求显示确认对话框
     confirm_requested = Signal(str, str, object)  # message, default_choice, result_container
+    collapse_state_changed = Signal(bool)
     
     def __init__(self):
         super().__init__()
         self.setWindowTitle("AI Assistant")
-        # 固定視窗大小
-        self.FIXED_WIDTH = 380
+        # 固定視窗大小（調整為較窄寬度）
+        self.FIXED_WIDTH = 300
         self.FIXED_HEIGHT = 800
         self.setGeometry(100, 100, self.FIXED_WIDTH, self.FIXED_HEIGHT)
         self.setFixedSize(self.FIXED_WIDTH, self.FIXED_HEIGHT)
@@ -1594,7 +1916,7 @@ class MainWindow(QMainWindow):
         # 創建講話框 - 改用新設計的 SiriResponseBubble
         self.speech_bubble = SiriResponseBubble()
         self.speech_bubble.setParent(self)
-        self.speech_bubble.setFixedSize(220, 160)
+        self.speech_bubble.setFixedSize(140, 160)
         self.speech_bubble.show()  # 初始顯示
 
         # 創建輸入區域
@@ -1637,21 +1959,41 @@ class MainWindow(QMainWindow):
         self.send_button.setFixedSize(60, 35)
         self.send_button.setStyleSheet(
             "QPushButton { "
-            "background-color: #00FF7F; "
-            "color: #003322; "
+            "background-color: #2FBF71; "
+            "color: #FFFFFF; "
             "border: none; "
             "border-radius: 15px; "
             "font-weight: bold; "
             "}"
-            "QPushButton:hover { background-color: #00E676; }"
+            "QPushButton:hover { background-color: #28A862; }"
         )
         self.send_button.clicked.connect(self.on_input_submitted)
+        self.collapse_button = QPushButton("收合", self)
+        self.collapse_button.setFixedSize(60, 22)
+        self.collapse_button.setStyleSheet(
+            "QPushButton { "
+            "background-color: rgba(45, 45, 45, 200); "
+            "color: #FFFFFF; "
+            "border: 1px solid rgba(255, 255, 255, 60); "
+            "border-radius: 11px; "
+            "font-size: 11px; "
+            "}"
+            "QPushButton:hover { background-color: rgba(70, 70, 70, 220); }"
+        )
+        self.collapse_button.clicked.connect(self.collapse_to_edge)
+        self.collapse_button.hide()
+
 
         self.input_layout.addWidget(self.voice_button)
         self.input_layout.addWidget(self.input_field)
         self.input_layout.addWidget(self.send_button)
 
         self.input_container.hide()  # 初始隱藏
+
+        self.edge_handle = EdgeHandle(on_activate=self.expand_from_edge)
+        self._input_visible_before_collapse = False
+        self._collapsed = False
+
 
         self.config_webview_window = None  # WebView 窗口引用
 
@@ -1761,6 +2103,67 @@ class MainWindow(QMainWindow):
         logger.info(f"[工作线程] Dialog closed, returning: {result_container.result}")
         return result_container.result
 
+    def _position_input_container(self) -> None:
+        bubble_width = getattr(self, "_current_bubble_width", None)
+        if bubble_width:
+            input_width = min(bubble_width, self.FIXED_WIDTH - 40)
+        else:
+            input_width = min(self.FIXED_WIDTH - 40, 500)
+        self.input_container.setGeometry(
+            (self.FIXED_WIDTH - input_width) // 2,
+            self.FIXED_HEIGHT - self.INPUT_HEIGHT - self.INPUT_FROM_BOTTOM,
+            input_width,
+            self.INPUT_HEIGHT,
+        )
+        self._position_collapse_button()
+
+    def _position_collapse_button(self) -> None:
+        btn_w = self.collapse_button.width()
+        btn_h = self.collapse_button.height()
+        input_rect = self.input_container.geometry()
+        x = input_rect.center().x() - (btn_w // 2)
+        y = max(10, input_rect.y() - btn_h - 6)
+        self.collapse_button.setGeometry(x, y, btn_w, btn_h)
+
+    def show_input_container(self) -> None:
+        self._position_input_container()
+        self.input_container.show()
+        self.collapse_button.show()
+        self._update_window_mask()
+
+    def hide_input_container(self) -> None:
+        self.input_container.hide()
+        self.collapse_button.hide()
+        self._update_window_mask()
+
+    def toggle_input_container(self) -> None:
+        if self.input_container.isVisible():
+            self.hide_input_container()
+        else:
+            self.show_input_container()
+
+    def collapse_to_edge(self) -> None:
+        if self._collapsed:
+            return
+        self._input_visible_before_collapse = self.input_container.isVisible()
+        self.edge_handle.show_at_edge(self)
+        self.edge_handle.raise_()
+        self.hide()
+        self._collapsed = True
+        self.collapse_state_changed.emit(True)
+
+    def expand_from_edge(self) -> None:
+        if not self._collapsed:
+            return
+        self.edge_handle.hide()
+        self.show()
+        self.raise_()
+        self.activateWindow()
+        if self._input_visible_before_collapse:
+            self.show_input_container()
+        self._update_window_mask()
+        self._collapsed = False
+
     def on_input_submitted(self):
         """處理文字輸入提交"""
         text = self.input_field.text().strip()
@@ -1829,6 +2232,11 @@ class MainWindow(QMainWindow):
             region = region.united(QRegion(bottom_area))
 
         # 添加氣泡區域
+        if self.collapse_button.isVisible():
+            btn_rect = self.collapse_button.geometry()
+            btn_rect.adjust(-6, -6, 6, 6)
+            region = region.united(QRegion(btn_rect))
+
         if self.speech_bubble.isVisible():
             bubble_rect = self.speech_bubble.geometry()
             # 擴大以便於拖拽和完整顯示
@@ -1853,22 +2261,7 @@ class MainWindow(QMainWindow):
         self.setMask(region)
 
     def mouseDoubleClickEvent(self, event):
-        # 雙擊切換輸入框顯示/隱藏
-        if self.input_container.isVisible():
-            self.input_container.hide()
-        else:
-            # 設置輸入框位置（固定在視窗底部）
-            input_width = min(self.FIXED_WIDTH - 40, 500)
-            self.input_container.setGeometry(
-                (self.FIXED_WIDTH - input_width) // 2,
-                self.FIXED_HEIGHT - self.INPUT_HEIGHT - self.INPUT_FROM_BOTTOM,
-                input_width,
-                self.INPUT_HEIGHT,
-            )
-            self.input_container.show()
-
-        # 更新窗口遮罩
-        self._update_window_mask()
+        self.toggle_input_container()
         event.accept()
 
     def update_speech_bubble(self, text):
@@ -1883,18 +2276,21 @@ class MainWindow(QMainWindow):
     def start_agent_animation(self):
         """啟動 agent 運行動畫"""
         self.speech_bubble.start_animation()
+        self.edge_handle.set_active_glow(True)
 
     def stop_agent_animation(self):
         """停止 agent 運行動畫"""
         self.speech_bubble.stop_animation()
+        self.edge_handle.set_active_glow(False)
     
     def _update_bubble_geometry(self):
         """更新氣泡幾何形狀（延遲調用以避免阻塞）"""
         try:
             # 計算氣泡大小
             padding = 60
-            bubble_width = min(max(self.speech_bubble.preferred_width, 240), self.FIXED_WIDTH - 40)
-            
+            bubble_width = self.FIXED_WIDTH - 20
+            self._current_bubble_width = bubble_width
+
             # 計算內容需要的高度
             needed_height = self.speech_bubble.content_height() + padding
             # 氣泡最大高度限制

@@ -124,14 +124,14 @@ class AgentRuntime(QThread):
                 pass
 
         if stage == "start":
-            return f"???? {label}"
+            return f"[>] {label}"
         if stage == "end":
-            return f"??? {label}"
+            return f"[OK] {label}"
         if stage == "error":
             error = str(event.get("error") or "")
             suffix = f": {error}" if error else ""
-            return f"???? {label}{suffix}"
-        return f"??? {label}"
+            return f"[ERR] {label}{suffix}"
+        return f"[*] {label}"
 
     def _emit_tool_event(self, event: dict) -> None:
         try:
@@ -255,6 +255,13 @@ class GUIAgentApp:
         self._active_request_id = 0
         self._display_text = ""
         self._tool_log_lines: list[str] = []
+        self._ui_collapsed = False
+        self._waiting_response = False
+        self._auto_expand_on_result = False
+        self._idle_timeout_ms = 60000
+        self._idle_timer = QTimer()
+        self._idle_timer.setSingleShot(True)
+        self._idle_timer.timeout.connect(self._on_idle_timeout)
         self._pending = deque()
         self._stream_buffer = ""
         self._stream_mode = "normal"
@@ -298,6 +305,7 @@ class GUIAgentApp:
 
         self.main_window = MainWindow()
         self.main_window.set_input_callback(self.process_input)
+        self.main_window.collapse_state_changed.connect(self._on_collapse_state_changed)
         self.main_window.show()
 
         self.main_window.update_speech_bubble("Initializing...")
@@ -335,6 +343,37 @@ class GUIAgentApp:
         if len(self._tool_log_lines) > 200:
             self._tool_log_lines = self._tool_log_lines[-200:]
         self._request_display_update()
+        self._reset_idle_timer()
+
+    def _reset_idle_timer(self) -> None:
+        if self._ui_collapsed or self._waiting_response:
+            return
+        self._idle_timer.start(self._idle_timeout_ms)
+
+    def _on_idle_timeout(self) -> None:
+        if self._waiting_response or self._ui_collapsed:
+            return
+        self._collapse_ui()
+
+    def _collapse_ui(self) -> None:
+        if self._ui_collapsed:
+            return
+        self.main_window.collapse_to_edge()
+
+    def _expand_ui(self) -> None:
+        if not self._ui_collapsed:
+            return
+        self.main_window.expand_from_edge()
+
+    def _on_collapse_state_changed(self, collapsed: bool) -> None:
+        self._ui_collapsed = collapsed
+        if collapsed:
+            self._idle_timer.stop()
+            if self._waiting_response:
+                self._auto_expand_on_result = True
+        else:
+            self._auto_expand_on_result = False
+            self._reset_idle_timer()
 
     def handle_runtime_ready(self):
         self.runtime_ready = True
@@ -351,6 +390,7 @@ class GUIAgentApp:
         
         self.main_window.update_speech_bubble("AI ready. Double-click to show input.")
         QTimer.singleShot(500, self.show_input_container)
+        self._reset_idle_timer()
 
     def handle_result(self, request_id, output, updated_history):
         if request_id != self._active_request_id:
@@ -368,7 +408,9 @@ class GUIAgentApp:
             self._stream_mode = "normal"
             self._typewriter_active = False
             self._typewriter_timer.stop()
-            self.main_window.update_speech_bubble(self._compose_display_text())
+            # 直接使用原始文字，讓 circle_ui 處理圖片
+            final_text = self._compose_display_text()
+            self.main_window.update_speech_bubble(final_text)
             # 停止動畫，表示 agent 已完成
             self.main_window.stop_agent_animation()
         logger.info(f"AI Response: {output[:100]}...")
@@ -379,6 +421,12 @@ class GUIAgentApp:
                 self._gui_history.append((self._last_user_input, output or ""))
                 if len(self._gui_history) > HISTORY_LIMIT:
                     self._gui_history = self._gui_history[-HISTORY_LIMIT:]
+
+        self._waiting_response = False
+        if self._auto_expand_on_result:
+            self._expand_ui()
+        self._reset_idle_timer()
+
 
     def handle_chunk(self, request_id, chunk):
         if request_id != self._active_request_id:
@@ -392,6 +440,10 @@ class GUIAgentApp:
         self.main_window.update_speech_bubble(self._compose_display_text(f"Error: {error_message}"))
         # 停止動畫，即使發生錯誤
         self.main_window.stop_agent_animation()
+        self._waiting_response = False
+        if self._auto_expand_on_result:
+            self._expand_ui()
+        self._reset_idle_timer()
         logger.error(error_message)
 
     def _next_tag(self, text: str):
@@ -460,6 +512,7 @@ class GUIAgentApp:
         if updated:
             # 使用節流更新
             self._request_display_update()
+        self._reset_idle_timer()
 
         if self._pending and not self._typewriter_active:
             self._typewriter_active = True
@@ -481,6 +534,7 @@ class GUIAgentApp:
         self._display_text += ch
         # 使用節流更新而非直接更新
         self._request_display_update()
+        self._reset_idle_timer()
 
         speed_factor = 1.0 / (1.0 + (backlog_len / BACKLOG_SCALE))
         delay = max(BASE_DELAY * MIN_FACTOR, BASE_DELAY * speed_factor)
@@ -497,7 +551,9 @@ class GUIAgentApp:
         """執行實際的顯示更新"""
         if self._pending_display_update:
             try:
-                self.main_window.update_speech_bubble(self._compose_display_text())
+                # 直接使用原始文字，讓 circle_ui 處理圖片
+                display_text = self._compose_display_text()
+                self.main_window.update_speech_bubble(display_text)
                 self._pending_display_update = False
             except Exception as e:
                 logger.error(f"Display update error: {e}")
@@ -515,19 +571,13 @@ class GUIAgentApp:
                 formatted = text.replace("\n", "\n\n")
             else:
                 formatted = text
+            # 直接使用原始文字，讓 circle_ui 處理圖片
             self.main_window.update_speech_bubble(self._compose_display_text(formatted))
+        self._reset_idle_timer()
 
     def show_input_container(self):
         """Show input container."""
-        input_width = min(self.main_window.width() - 40, 500)
-        input_height = 45
-        self.main_window.input_container.setGeometry(
-            (self.main_window.width() - input_width) // 2,
-            self.main_window.height() - input_height - 20,
-            input_width,
-            input_height,
-        )
-        self.main_window.input_container.show()
+        self.main_window.show_input_container()
 
     def process_input(self, user_input: str | None = None):
         """Handle user input (text or speech)."""
@@ -585,6 +635,8 @@ class GUIAgentApp:
             self._stream_mode = "normal"
             self._typewriter_active = False
             self._typewriter_timer.stop()
+            self._waiting_response = True
+            self._idle_timer.stop()
             request_id = self.runtime.submit(user_input, self.chat_history)
             if request_id:
                 self._active_request_id = request_id
