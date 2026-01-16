@@ -4,6 +4,7 @@ import re
 import string
 import sys
 import io
+import os
 import urllib.request
 import concurrent.futures
 import base64
@@ -134,7 +135,7 @@ def _process_markdown_images(text: str) -> str:
     return md_img.sub(replace_image, text)
 
 from PySide6.QtCore import Qt, QTimer, QVariantAnimation, QPropertyAnimation, QEasingCurve, Property, QMetaObject, Signal, Slot, QEventLoop, QUrl, QSize, QSizeF, QBuffer, QByteArray, QIODeviceBase
-from PySide6.QtGui import QColor, QPainter, QPen, QRadialGradient, QKeyEvent, QPixmap, QMovie, QGuiApplication, QCursor, QConicalGradient, QLinearGradient
+from PySide6.QtGui import QColor, QPainter, QPen, QRadialGradient, QKeyEvent, QPixmap, QMovie, QGuiApplication, QCursor, QConicalGradient, QLinearGradient, QImage, QTextCursor, QTextDocument, QTextImageFormat
 
 # QtWebEngine is optional - only import when needed
 try:
@@ -184,6 +185,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QFileDialog,
     QLineEdit,
     QMainWindow,
     QPushButton,
@@ -204,6 +206,10 @@ class AutoWrapTextBrowser(QTextBrowser):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._image_max_width = None
+        self._constrain_images_active = False
+        self._image_buttons = []
+        self._refresh_image_buttons_pending = False
         try:
             self.document().contentsChanged.connect(self._on_contents_changed)
         except Exception:
@@ -211,6 +217,216 @@ class AutoWrapTextBrowser(QTextBrowser):
 
     def _on_contents_changed(self):
         self.update_wrap_width()
+        self._schedule_refresh_image_buttons()
+
+    def _schedule_refresh_image_buttons(self):
+        if self._refresh_image_buttons_pending:
+            return
+        self._refresh_image_buttons_pending = True
+        QTimer.singleShot(0, self._refresh_image_buttons)
+
+    def _clear_image_buttons(self):
+        for btn in self._image_buttons:
+            try:
+                btn.deleteLater()
+            except Exception:
+                pass
+        self._image_buttons = []
+
+    def _resolve_image_resource(self, name: str):
+        try:
+            resource = self.document().resource(QTextDocument.ImageResource, QUrl(name))
+            if isinstance(resource, (QPixmap, QImage)):
+                return resource
+        except Exception:
+            resource = None
+
+        if name.startswith("data:image/"):
+            try:
+                header, b64data = name.split(",", 1)
+                raw = base64.b64decode(b64data)
+                image = QImage.fromData(raw)
+                if not image.isNull():
+                    return image
+            except Exception:
+                return None
+
+        try:
+            if name.startswith("file://"):
+                local_path = name[7:]
+                if local_path.startswith("/") and len(local_path) > 3 and local_path[2] == ":":
+                    local_path = local_path[1:]
+                if os.path.exists(local_path):
+                    with open(local_path, "rb") as f:
+                        raw = f.read(_MAX_IMAGE_BYTES + 1)
+                    image = QImage.fromData(raw)
+                    if not image.isNull():
+                        return image
+            elif name.startswith(("http://", "https://")):
+                with urllib.request.urlopen(name, timeout=8) as resp:
+                    raw = resp.read(_MAX_IMAGE_BYTES + 1)
+                image = QImage.fromData(raw)
+                if not image.isNull():
+                    return image
+        except Exception:
+            return None
+        return None
+
+    def _save_image(self, name: str) -> None:
+        resource = self._resolve_image_resource(name)
+        if resource is None:
+            return
+        if isinstance(resource, QPixmap):
+            image = resource.toImage()
+        else:
+            image = resource
+        if image.isNull():
+            return
+
+        default_dir = os.path.expanduser("~")
+        default_path = os.path.join(default_dir, "image.png")
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save Image",
+            default_path,
+            "Images (*.png *.jpg *.jpeg *.bmp)",
+        )
+        if not path:
+            return
+        image.save(path)
+
+    def _create_image_button(self, image_name: str):
+        btn = QToolButton(self.viewport())
+        btn.setText("Save")
+        btn.setCursor(Qt.PointingHandCursor)
+        btn.setAutoRaise(True)
+        btn.setStyleSheet(
+            "QToolButton { "
+            "background-color: rgba(0, 0, 0, 140); "
+            "color: white; "
+            "border: 1px solid rgba(255, 255, 255, 80); "
+            "border-radius: 6px; "
+            "padding: 2px 6px; "
+            "font-size: 10px; "
+            "}"
+            "QToolButton:hover { background-color: rgba(0, 0, 0, 180); }"
+        )
+        btn.clicked.connect(lambda _=False, name=image_name: self._save_image(name))
+        btn.adjustSize()
+        return btn
+
+    def _refresh_image_buttons(self):
+        self._refresh_image_buttons_pending = False
+        self._clear_image_buttons()
+
+        try:
+            doc = self.document()
+            layout = doc.documentLayout()
+            offset = self.contentOffset()
+            viewport_h = self.viewport().height()
+
+            block = doc.begin()
+            while block.isValid():
+                block_layout = block.layout()
+                if block_layout is None:
+                    block = block.next()
+                    continue
+                block_rect = layout.blockBoundingRect(block)
+                it = block.begin()
+                while not it.atEnd():
+                    fragment = it.fragment()
+                    if fragment.isValid():
+                        fmt = fragment.charFormat()
+                        if fmt.isImageFormat():
+                            img_fmt = QTextImageFormat(fmt)
+                            pos_in_block = fragment.position() - block.position()
+                            line = block_layout.lineForTextPosition(pos_in_block)
+                            if not line.isValid():
+                                it += 1
+                                continue
+                            x = block_rect.left() + line.x() + line.cursorToX(pos_in_block)
+                            y = block_rect.top() + line.y()
+                            img_w = img_fmt.width() or 0
+                            img_h = img_fmt.height() or 0
+                            if img_w <= 0 or img_h <= 0:
+                                res = self._resolve_image_resource(img_fmt.name())
+                                if isinstance(res, QPixmap):
+                                    img_w = res.width()
+                                    img_h = res.height()
+                                elif isinstance(res, QImage):
+                                    img_w = res.width()
+                                    img_h = res.height()
+                            if img_w <= 0 or img_h <= 0:
+                                it += 1
+                                continue
+
+                            view_x = int(x - offset.x())
+                            view_y = int(y - offset.y())
+                            if view_y + img_h < 0 or view_y > viewport_h:
+                                it += 1
+                                continue
+
+                            btn = self._create_image_button(img_fmt.name())
+                            btn.move(max(0, view_x + 6), max(0, view_y + 6))
+                            btn.show()
+                            btn.raise_()
+                            self._image_buttons.append(btn)
+                    it += 1
+                block = block.next()
+        except Exception:
+            pass
+
+    def _constrain_images(self, max_width: int) -> None:
+        if self._constrain_images_active:
+            return
+        if not max_width or max_width <= 0:
+            return
+        self._constrain_images_active = True
+        try:
+            doc = self.document()
+            cursor = QTextCursor(doc)
+            block = doc.begin()
+            while block.isValid():
+                it = block.begin()
+                while not it.atEnd():
+                    fragment = it.fragment()
+                    if fragment.isValid():
+                        fmt = fragment.charFormat()
+                        if fmt.isImageFormat():
+                            img_fmt = QTextImageFormat(fmt)
+                            current_w = img_fmt.width()
+                            if current_w and current_w <= max_width:
+                                it += 1
+                                continue
+                            resource = doc.resource(
+                                QTextDocument.ImageResource, QUrl(img_fmt.name())
+                            )
+                            if isinstance(resource, QPixmap):
+                                iw = resource.width()
+                                ih = resource.height()
+                            elif isinstance(resource, QImage):
+                                iw = resource.width()
+                                ih = resource.height()
+                            else:
+                                iw = img_fmt.width()
+                                ih = img_fmt.height()
+                            if iw and iw > max_width:
+                                scale = max_width / iw
+                                img_fmt.setWidth(max_width)
+                                if ih:
+                                    img_fmt.setHeight(int(ih * scale))
+                                cursor.setPosition(fragment.position())
+                                cursor.setPosition(
+                                    fragment.position() + fragment.length(),
+                                    QTextCursor.KeepAnchor,
+                                )
+                                cursor.setCharFormat(img_fmt)
+                    it += 1
+                block = block.next()
+        except Exception:
+            pass
+        finally:
+            self._constrain_images_active = False
 
     def update_wrap_width(self, width: float | None = None) -> None:
         try:
@@ -218,6 +434,7 @@ class AutoWrapTextBrowser(QTextBrowser):
             if not w:
                 return
             w = max(1, int(w))
+            self._image_max_width = w
             doc = self.document()
             doc.setUseDesignMetrics(False)
             doc.setTextWidth(w)
@@ -225,12 +442,15 @@ class AutoWrapTextBrowser(QTextBrowser):
                 if self.lineWrapMode() != QTextEdit.FixedPixelWidth:
                     self.setLineWrapMode(QTextEdit.FixedPixelWidth)
                 self.setLineWrapColumnOrWidth(w)
+            self._constrain_images(w)
+            self._schedule_refresh_image_buttons()
         except Exception:
             pass
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self.update_wrap_width()
+        self._schedule_refresh_image_buttons()
 
 
 class CodeBlockWidget(QWidget):
@@ -1046,15 +1266,30 @@ class SiriResponseBubble(QWidget):
         self.layout.setContentsMargins(12, 12, 12, 12)
         self.layout.setSpacing(8)
 
+        self.scroll = QScrollArea(self)
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setFrameShape(QFrame.NoFrame)
+        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.scroll.setStyleSheet(
+            "QScrollArea { background: transparent; } "
+            "QScrollBar:vertical { border: none; background: transparent; width: 4px; margin: 6px 0 6px 0; } "
+            "QScrollBar::handle:vertical { background: rgba(255, 255, 255, 40); min-height: 20px; border-radius: 2px; } "
+            "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; }"
+        )
+        self.scroll.setWidget(self.container)
+
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
-        outer.addWidget(self.container)
+        outer.addWidget(self.scroll)
 
 
     def _available_width(self) -> int:
         try:
             margins = self.layout.contentsMargins()
             container_w = self.container.width() or self.width()
+            if hasattr(self, "scroll"):
+                container_w = self.scroll.viewport().width() or container_w
             return max(0, container_w - (margins.left() + margins.right()))
         except Exception:
             return max(0, self.width() - 20)
@@ -1121,8 +1356,11 @@ class SiriResponseBubble(QWidget):
     def _recalculate_child_heights(self) -> None:
         try:
             avail_w = self._available_width()
-            self.container.setMinimumWidth(self.width())
-            self.container.setMaximumWidth(self.width())
+            container_w = self.width()
+            if hasattr(self, "scroll"):
+                container_w = self.scroll.viewport().width() or container_w
+            self.container.setMinimumWidth(container_w)
+            self.container.setMaximumWidth(container_w)
             for tb in self.container.findChildren(QTextBrowser):
                 try:
                     if avail_w > 0:
