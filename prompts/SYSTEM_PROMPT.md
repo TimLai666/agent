@@ -36,6 +36,7 @@ User has granted full execution authority:
    - Write → `write_file` (NOT `echo >`/`cat <<EOF`)
    - Search files → `list_files` (NOT `find`/`ls`)
    - Search content → `search_files` (NOT `grep`/`rg`)
+   - **Read before edit** → Before editing or modifying ANY file, **ALWAYS** read it completely using `read_file`. **NEVER** modify a file that you have not read.
 
 2. **Bash Commands** (ONLY for):
    - System operations (`git`/`npm`/`docker`/`python`)

@@ -133,7 +133,7 @@ def _process_markdown_images(text: str) -> str:
 
     return md_img.sub(replace_image, text)
 
-from PySide6.QtCore import Qt, QTimer, QVariantAnimation, QPropertyAnimation, QEasingCurve, Property, QMetaObject, Signal, Slot, QEventLoop, QUrl, QSize, QBuffer, QByteArray, QIODeviceBase
+from PySide6.QtCore import Qt, QTimer, QVariantAnimation, QPropertyAnimation, QEasingCurve, Property, QMetaObject, Signal, Slot, QEventLoop, QUrl, QSize, QSizeF, QBuffer, QByteArray, QIODeviceBase
 from PySide6.QtGui import QColor, QPainter, QPen, QRadialGradient, QKeyEvent, QPixmap, QMovie, QGuiApplication, QCursor, QConicalGradient, QLinearGradient
 
 # QtWebEngine is optional - only import when needed
@@ -198,7 +198,39 @@ from PySide6.QtWidgets import (
 
 from internal.logger import logger
 
-DEBUG_LAYOUT = True
+
+class AutoWrapTextBrowser(QTextBrowser):
+    """QTextBrowser that keeps document width aligned to viewport width."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        try:
+            self.document().contentsChanged.connect(self._on_contents_changed)
+        except Exception:
+            pass
+
+    def _on_contents_changed(self):
+        self.update_wrap_width()
+
+    def update_wrap_width(self, width: float | None = None) -> None:
+        try:
+            w = width if width is not None else self.viewport().width()
+            if not w:
+                return
+            w = max(1, int(w))
+            doc = self.document()
+            doc.setUseDesignMetrics(False)
+            doc.setTextWidth(w)
+            if self.lineWrapMode() != QTextEdit.NoWrap:
+                if self.lineWrapMode() != QTextEdit.FixedPixelWidth:
+                    self.setLineWrapMode(QTextEdit.FixedPixelWidth)
+                self.setLineWrapColumnOrWidth(w)
+        except Exception:
+            pass
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.update_wrap_width()
 
 
 class CodeBlockWidget(QWidget):
@@ -249,7 +281,7 @@ class CodeBlockWidget(QWidget):
         header_layout.addWidget(copy_btn)
         
         # Code content
-        code_browser = QTextBrowser()
+        code_browser = AutoWrapTextBrowser()
         code_browser.setPlainText(code)
         code_browser.setStyleSheet(
             "QTextBrowser { "
@@ -272,6 +304,7 @@ class CodeBlockWidget(QWidget):
         code_browser.setContentsMargins(0, 0, 0, 0)
         code_browser.document().setDocumentMargin(0)
         code_browser.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        code_browser.update_wrap_width()
         
         def adjust_height():
             try:
@@ -565,19 +598,20 @@ class CollapsibleSection(QWidget):
         head_layout.addStretch(1)
 
         # Content area
-        self.content = QTextBrowser()
+        self.content = AutoWrapTextBrowser()
         # If the section is active but empty, provide a small placeholder so the section is visible
         if is_active and not content.strip():
             self.content.setHtml("<i>Waiting for output...</i>")
         else:
             self.content.setMarkdown(_prepare_markdown(content))
         self.content.setOpenExternalLinks(True)
+        self.content.update_wrap_width()
         self.content.setStyleSheet(
     "background: transparent; color: #F0F0F0; font-size: 13px; border-radius: 10px; border: none; margin: 0; padding: 0;"
 )
         self.content.setLineWrapMode(QTextEdit.WidgetWidth)
         # 設定圖片樣式以防止橫向捲動
-        self.content.document().setDefaultStyleSheet("img { max-width: 208px; height: auto; }")
+        self.content.document().setDefaultStyleSheet("img { max-width: 251px; width: 100%; height: auto; display: block; }")
         self.content.setFrameShape(QFrame.NoFrame)
         self.content.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.content.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -591,8 +625,10 @@ class CollapsibleSection(QWidget):
             try:
                 if self.content is None:
                     return
-                self.content.document().adjustSize()
-                h = self.content.document().size().height()
+                self.content.update_wrap_width()
+                doc = self.content.document()
+                doc_size = doc.documentLayout().documentSize()
+                h = doc_size.height()
                 # Ensure a sensible minimum height so active blocks are visible
                 min_h = 28 if self.is_active else 10
                 new_height = max(int(h) + 16, min_h)
@@ -641,6 +677,7 @@ class CollapsibleSection(QWidget):
             self.content.setHtml("<i>Waiting for output...</i>")
         else:
             self.content.setMarkdown(_prepare_markdown(new_content))
+        self.content.update_wrap_width()
         
         # 強制重新計算高度
         QTimer.singleShot(0, self._recalculate_height)
@@ -651,8 +688,10 @@ class CollapsibleSection(QWidget):
         try:
             if self.content is None:
                 return
-            self.content.document().adjustSize()
-            h = self.content.document().size().height()
+            self.content.update_wrap_width()
+            doc = self.content.document()
+            doc_size = doc.documentLayout().documentSize()
+            h = doc_size.height()
             min_h = 28 if self.is_active else 10
             new_height = max(int(h) + 16, min_h)
             self._content_height = new_height
@@ -679,8 +718,9 @@ class CollapsibleSection(QWidget):
             if not self.content.toPlainText().strip():
                 self.content.setHtml("<i>Waiting for output...</i>")
             
-            self.content.document().adjustSize()
-            target_height = max(int(self.content.document().size().height()) + 16, 28)
+            self.content.update_wrap_width()
+            doc_size = self.content.document().documentLayout().documentSize()
+            target_height = max(int(doc_size.height()) + 16, 28)
             
             if animate and self._content_height == 0:
                 self.content.setVisible(True)
@@ -717,8 +757,9 @@ class CollapsibleSection(QWidget):
         
         if expanded:
             # 展開
-            self.content.document().adjustSize()
-            target_height = max(int(self.content.document().size().height()) + 16, 28)
+            self.content.update_wrap_width()
+            doc_size = self.content.document().documentLayout().documentSize()
+            target_height = max(int(doc_size.height()) + 16, 28)
             
             def on_expand_finish():
                 self.content.setVisible(True)
@@ -766,8 +807,6 @@ class CollapsibleSection(QWidget):
 class OutputBubble(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.max_height = 500
-        self.preferred_width = 340
         self.setAttribute(Qt.WA_StyledBackground, True)
         self.setStyleSheet(
             "OutputBubble { "
@@ -827,9 +866,9 @@ class OutputBubble(QWidget):
                 try:
                     tb.setMaximumWidth(avail_w)
                     tb.setMinimumWidth(0)
-                    tb.document().setTextWidth(avail_w)
-                    tb.document().adjustSize()
-                    doc_size = tb.document().size()
+                    tb.update_wrap_width(avail_w)
+                    doc = tb.document()
+                    doc_size = doc.documentLayout().documentSize()
                     h = max(int(doc_size.height()) + 16, 32)
                     tb.setMinimumHeight(h)
                     tb.setMaximumHeight(h)
@@ -869,14 +908,14 @@ class OutputBubble(QWidget):
                 continue
             if kind == "normal":
                 # 使用 _prepare_markdown 處理內容（包括將圖片轉為 data URI）
-                browser = QTextBrowser()
+                browser = AutoWrapTextBrowser()
                 browser.setMarkdown(_prepare_markdown(content))
                 browser.setOpenExternalLinks(True)
                 browser.setStyleSheet(
                     "background: transparent; color: white; font-size: 14px;"
                 )
                 # 設定圖片樣式以防止橫向捲動
-                browser.document().setDefaultStyleSheet("img { max-width: 208px; height: auto; }")
+                browser.document().setDefaultStyleSheet("img { max-width: 251px; width: 100%; height: auto; display: block; }")
                 browser.setFrameShape(QFrame.NoFrame)
                 browser.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
                 browser.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -896,8 +935,8 @@ class OutputBubble(QWidget):
 
                 def update_browser_height(b=browser):
                     try:
-                        b.document().adjustSize()
-                        doc_size = b.document().size()
+                        b.update_wrap_width(avail_w)
+                        doc_size = b.document().documentLayout().documentSize()
                         h = max(int(doc_size.height()) + 16, 32)
                         b.setMinimumHeight(h)
                         b.setMaximumHeight(h)
@@ -970,25 +1009,24 @@ class OutputBubble(QWidget):
         return segments
 
 
+
+
 class SiriResponseBubble(QWidget):
     SPINNER_PATTERN = re.compile(
-        r"^\s*(?:[-*>\u2022]\s*)?(?:still\s+|currently\s+)?(?P<status>thinking|listening)(?:\s*(?:\.{3,}|…))?\s*$",
+        r"^\s*(?:[-*>]\s*)?(?:still\s+|currently\s+)?(?P<status>thinking|listening)(?:\s*(?:\.{3,}|\?\?)?\s*)$",
         re.IGNORECASE,
     )
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.max_height = 600
-        self.preferred_width = 340
         self.setAttribute(Qt.WA_StyledBackground, True)
 
-        # 添加運行狀態動畫相關屬性
+        # Animation state for the active border
         self._is_running = False
         self._animation_angle = 0
         self._animation_timer = QTimer(self)
         self._animation_timer.timeout.connect(self._update_animation)
 
-        # 極致磨砂感：強制背景不繼承並移除內部所有預設邊框
         self.setStyleSheet(
             "SiriResponseBubble { "
             "background-color: rgba(20, 20, 20, 205); "
@@ -996,144 +1034,103 @@ class SiriResponseBubble(QWidget):
             "border-radius: 30px;"
             "} "
             "QTextBrowser { background: transparent; border: none; } "
-            "QScrollArea { background: transparent; border: none; } "
-            "QWidget#container { background: transparent; border: none; }" "QTextBrowser::viewport { padding: 0px; margin: 0px; border: none; }"
-        )
-
-        self.scroll = QScrollArea(self)
-        self.scroll.setWidgetResizable(True)
-        self.scroll.setFrameShape(QFrame.NoFrame)
-        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.scroll.setViewportMargins(0, 0, 0, 0)
-        self.scroll.setContentsMargins(0, 0, 0, 0)
-        self.scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self._debug_layout = DEBUG_LAYOUT
-        if self._debug_layout:
-            scroll_root = "QScrollArea { background: transparent; border: 1px dashed rgba(0, 200, 255, 90); } "
-        else:
-            scroll_root = "QScrollArea { background: transparent; } "
-        self.scroll.setStyleSheet(
-            scroll_root
-            + "QScrollBar:vertical { border: none; background: transparent; width: 3px; margin: 12px 0 12px 0; } "
-            + "QScrollBar::handle:vertical { background: rgba(255, 255, 255, 40); min-height: 25px; border-radius: 1.5px; } "
-            + "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; }"
+            "QTextBrowser::viewport { padding: 0px; margin: 0px; border: none; }"
         )
 
         self.container = QWidget()
         self.container.setObjectName("container")
         self.container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        if self._debug_layout:
-            self.container.setStyleSheet("background: transparent; border: 1px dashed rgba(255, 200, 0, 120);")
-        else:
-            self.container.setStyleSheet("background: transparent; border: none;")
+        self.container.setStyleSheet("background: transparent; border: none;")
+
         self.layout = QVBoxLayout(self.container)
         self.layout.setContentsMargins(12, 12, 12, 12)
-        self.layout.setAlignment(Qt.AlignLeft | Qt.AlignTop)
         self.layout.setSpacing(8)
-        self.scroll.setWidget(self.container)
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
-        outer.addWidget(self.scroll)
+        outer.addWidget(self.container)
 
-        if self._debug_layout:
-            self._debug_label = QLabel(self)
-            self._debug_label.setStyleSheet(
-                "color: #BFEAFF; font-size: 10px; background: rgba(0, 0, 0, 150); "
-                "padding: 2px 4px; border-radius: 3px;"
-            )
-            self._debug_label.setAttribute(Qt.WA_TransparentForMouseEvents)
-            self._debug_label.setWordWrap(True)
-            self._debug_label.setText("")
-            self._debug_label.move(10, 6)
+
+    def _available_width(self) -> int:
+        try:
+            margins = self.layout.contentsMargins()
+            container_w = self.container.width() or self.width()
+            return max(0, container_w - (margins.left() + margins.right()))
+        except Exception:
+            return max(0, self.width() - 20)
 
     def _refresh_layout_metrics(self, process_events: bool = True) -> None:
         try:
             self.layout.activate()
             self.container.adjustSize()
-            if self.scroll.widget():
-                self.scroll.widget().adjustSize()
             if process_events:
                 QApplication.processEvents()
         except Exception:
             pass
-    
-    def _delayed_layout_refresh(self):
-        """延遲批量處理布局刷新，減少重繪"""
+
+    def _delayed_layout_refresh(self) -> None:
         try:
             self._refresh_layout_metrics(process_events=False)
-            # 滾動到頂部（僅在需要時）
-            scrollbar = self.scroll.verticalScrollBar()
-            if scrollbar.value() > 50:  # 只有當用戶沒有向下滾動時才自動回頂
-                scrollbar.setValue(0)
-            # 延遲處理事件，避免阻塞
-            QTimer.singleShot(100, lambda: QApplication.processEvents())
+            QTimer.singleShot(50, lambda: QApplication.processEvents())
         except Exception as e:
             logger.debug(f"Delayed layout refresh error: {e}")
-    
+
     def _request_parent_update(self):
-        """Request parent (MainWindow) to update speech bubble size after section toggle."""
+        # Request parent (MainWindow) to update speech bubble size after section toggle.
         try:
-            # Force layout recalculation first
             self._refresh_layout_metrics()
-            
-            # Trigger size recalculation by getting current height
             QTimer.singleShot(0, lambda: self._refresh_layout_metrics(process_events=True))
-            
-            # Find the speech bubble widget and force it to recalculate
+
             parent_widget = self.parent()
             while parent_widget:
-                # Look for MainWindow that contains this bubble
-                if hasattr(parent_widget, 'speech_bubble') and parent_widget.speech_bubble == self.parent():
-                    # Found MainWindow - trigger its update by re-measuring bubble content
-                    QTimer.singleShot(100, lambda p=parent_widget: self._trigger_bubble_resize(p))
+                if hasattr(parent_widget, 'speech_bubble') and parent_widget.speech_bubble == self:
+                    QTimer.singleShot(50, lambda p=parent_widget: self._trigger_bubble_resize(p))
                     break
                 parent_widget = parent_widget.parent()
         except Exception as e:
             logger.debug(f"Failed to request parent update: {e}")
-    
+
     def _trigger_bubble_resize(self, main_window):
-        """Helper to trigger bubble resize in MainWindow."""
+        # Helper to trigger bubble resize in MainWindow.
         try:
             bubble = main_window.speech_bubble
-            # Force layout refresh
             bubble.layout.activate()
             bubble.container.adjustSize()
             QApplication.processEvents()
-            
-            # Recalculate and apply size
+
             padding = 30
             bubble_width = main_window.FIXED_WIDTH - 20
             main_window._current_bubble_width = bubble_width
             needed_height = bubble.content_height() + padding
             max_bubble_height = main_window.FIXED_HEIGHT - 200
             bubble_height = min(max(needed_height, 80), max_bubble_height)
-            
+
             bubble.setFixedSize(bubble_width, bubble_height)
-            
-            # Recalculate position
+
             window_center_x = main_window.FIXED_WIDTH // 2
             ball_center_y = main_window.FIXED_HEIGHT - main_window.BALL_CENTER_FROM_BOTTOM
             bubble_x = window_center_x - bubble_width // 2
             bubble_y = ball_center_y - bubble_height
             bubble_x = max(10, min(bubble_x, main_window.FIXED_WIDTH - bubble_width - 10))
             bubble_y = max(20, min(bubble_y, main_window.FIXED_HEIGHT - bubble_height - 80))
-            
+
             bubble.move(bubble_x, bubble_y)
         except Exception as e:
             logger.debug(f"Failed to trigger bubble resize: {e}")
 
     def _recalculate_child_heights(self) -> None:
         try:
-            margins = self.layout.contentsMargins()
-            viewport_w = self.scroll.viewport().width()
-            self.container.setMinimumWidth(viewport_w)
-            self.container.setMaximumWidth(viewport_w)
-            avail_w = max(0, viewport_w - (margins.left() + margins.right()))
+            avail_w = self._available_width()
+            self.container.setMinimumWidth(self.width())
+            self.container.setMaximumWidth(self.width())
             for tb in self.container.findChildren(QTextBrowser):
                 try:
-                    tb.setMaximumWidth(avail_w)
-                    tb.setMinimumWidth(0)
+                    if avail_w > 0:
+                        tb.setMinimumWidth(avail_w)
+                        tb.setMaximumWidth(avail_w)
+                    else:
+                        tb.setMinimumWidth(0)
+                        tb.setMaximumWidth(0)
                     tb.setViewportMargins(0, 0, 0, 0)
                     tb.setContentsMargins(0, 0, 0, 0)
                     try:
@@ -1142,19 +1139,13 @@ class SiriResponseBubble(QWidget):
                         pass
                     tb.setStyleSheet(tb.styleSheet() + " padding: 0; margin: 0; ")
                     tb.document().setDocumentMargin(0)
-                    viewport_w = max(0, tb.viewport().width())
-                    wrap_w = viewport_w if viewport_w > 0 else avail_w
-                    tb.setLineWrapMode(QTextEdit.FixedPixelWidth)
-                    tb.setLineWrapColumnOrWidth(wrap_w)
-                    tb.document().setTextWidth(wrap_w)
-                    tb.document().adjustSize()
-                    doc_size = tb.document().size()
+                    tb.setLineWrapMode(QTextEdit.WidgetWidth)
+                    tb.update_wrap_width(avail_w)
+                    doc = tb.document()
+                    doc_size = doc.documentLayout().documentSize()
                     h = max(int(doc_size.height()) + 16, 32)
                     tb.setMinimumHeight(h)
                     tb.setMaximumHeight(h)
-                    if self._debug_layout and not getattr(tb, "_debug_border_applied", False):
-                        tb.setStyleSheet(tb.styleSheet() + " border: 1px dashed rgba(255, 80, 80, 120);")
-                        tb._debug_border_applied = True
                 except Exception:
                     pass
             for section in self.container.findChildren(CollapsibleSection):
@@ -1164,33 +1155,9 @@ class SiriResponseBubble(QWidget):
                     pass
         except Exception:
             pass
-        if self._debug_layout:
-            try:
-                tb_widths = [tb.width() for tb in self.container.findChildren(QTextBrowser)]
-                if tb_widths:
-                    tb_info = f"{min(tb_widths)}-{max(tb_widths)}"
-                else:
-                    tb_info = "n/a"
-                viewport_w = (
-                    self.container.findChildren(QTextBrowser)[0].viewport().width()
-                    if self.container.findChildren(QTextBrowser)
-                    else "n/a"
-                )
-                label = (
-                    f"scroll {self.scroll.viewport().width()}px | "
-                    f"container {self.container.width()}px\n"
-                    f"text {tb_info}px | viewport {viewport_w}px"
-                )
-                self._debug_label.setText(label)
-                self._debug_label.setFixedWidth(max(100, self.width() - 20))
-                self._debug_label.adjustSize()
-            except Exception:
-                pass
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        # Force scroll area to fill the bubble width/height
-        self.scroll.setGeometry(self.rect())
         self._recalculate_child_heights()
         QTimer.singleShot(0, self._delayed_layout_refresh)
         QTimer.singleShot(50, self._recalculate_child_heights)
@@ -1199,7 +1166,6 @@ class SiriResponseBubble(QWidget):
         segments = []
         buffer = []
         lines = content.splitlines(keepends=True)
-        total = len(lines)
         for idx, line in enumerate(lines):
             stripped = line.strip()
             match = self.SPINNER_PATTERN.match(stripped)
@@ -1229,6 +1195,26 @@ class SiriResponseBubble(QWidget):
             segments.append(("text", content))
         return segments
 
+    def _normalize_soft_wrap(self, text: str) -> str:
+        """Merge likely soft-wrapped lines into a single paragraph."""
+        if not text:
+            return text
+        lines = text.splitlines()
+        if len(lines) < 2:
+            return text
+        for line in lines:
+            stripped = line.lstrip()
+            if not stripped:
+                return text
+            if stripped.startswith(("- ", "* ", "+ ", "> ", "#", "```", "| ")):
+                return text
+            if line.startswith(("    ", "\t")):
+                return text
+        avg_len = sum(len(line) for line in lines) / max(len(lines), 1)
+        if avg_len < 40:
+            return text
+        return " ".join(line.strip() for line in lines)
+
     def content_height(self) -> int:
         self._refresh_layout_metrics()
         container_hint = self.container.sizeHint().height()
@@ -1236,41 +1222,34 @@ class SiriResponseBubble(QWidget):
         return int(max(container_hint, layout_hint))
 
     def _extract_code_blocks(self, text: str) -> list[tuple[str, str, str]]:
-        """Extract code blocks from markdown text.
-        Returns list of (type, content, language) where type is 'text' or 'code'."""
+        # Extract code blocks from markdown text.
         segments = []
         pos = 0
-        
-        # Pattern for fenced code blocks
+
         pattern = re.compile(r'^```(\w*)\n(.*?)^```', re.MULTILINE | re.DOTALL)
-        
+
         for match in pattern.finditer(text):
-            # Add text before code block
             if match.start() > pos:
                 text_before = text[pos:match.start()]
                 if text_before.strip():
                     segments.append(('text', text_before, ''))
-            
-            # Add code block
+
             language = match.group(1) or ''
-            code = match.group(2).rstrip('\\n')
+            code = match.group(2).rstrip('\n')
             segments.append(('code', code, language))
             pos = match.end()
-        
-        # Add remaining text
+
         if pos < len(text):
             text_after = text[pos:]
             if text_after.strip():
                 segments.append(('text', text_after, ''))
-        
-        # If no code blocks found, return entire text as text segment
+
         if not segments and text.strip():
             segments.append(('text', text, ''))
-        
+
         return segments
 
     def set_content(self, text: str):
-        # Check if we should update existing sections instead of recreating
         existing_sections = {}
         for i in range(self.layout.count()):
             item = self.layout.itemAt(i)
@@ -1278,14 +1257,10 @@ class SiriResponseBubble(QWidget):
             if isinstance(widget, CollapsibleSection):
                 title = widget.base_title
                 existing_sections[title] = widget
-        
-        # Parse new segments
+
         segments = self._parse_segments(text or "")
-        
-        # Track which sections we've seen in this update
         seen_sections = set()
-        
-        # Clear ALL widgets to rebuild cleanly
+
         for i in reversed(range(self.layout.count())):
             item = self.layout.takeAt(i)
             widget = item.widget()
@@ -1293,7 +1268,6 @@ class SiriResponseBubble(QWidget):
                 widget.setParent(None)
                 widget.deleteLater()
 
-        # Process segments
         for kind, content, is_active in segments:
             if kind == "normal":
                 sub_segments = self._split_normal_segments(content)
@@ -1309,20 +1283,22 @@ class SiriResponseBubble(QWidget):
                         spinner = SpinnerLabel(container, base_text="")
                         spinner.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Minimum)
                         spinner.start()
-                        label = QTextBrowser(container)
+                        label = AutoWrapTextBrowser(container)
                         label.setLineWrapMode(QTextEdit.WidgetWidth)
                         label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
                         label.setMarkdown(sub_content)
                         label.setOpenExternalLinks(True)
                         label.setStyleSheet(
-                            "background: transparent; border: none; color: #FFFFFF; font-family: 'Segoe UI', 'Microsoft JhengHei', sans-serif; font-size: 14px; line-height: 1.5;"
+                            "background: transparent; border: none; color: #FFFFFF; "
+                            "font-family: 'Segoe UI', 'Microsoft JhengHei', sans-serif; "
+                            "font-size: 14px; line-height: 1.5;"
                         )
-                        # 設定圖片樣式以防止橫向捲動
-                        label.document().setDefaultStyleSheet("img { max-width: 208px; height: auto; }")
+                        label.document().setDefaultStyleSheet(
+                            "img { max-width: 100%; height: auto; display: block; }"
+                        )
                         label.setFrameShape(QFrame.NoFrame)
                         label.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
                         label.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-                        # Allow clicking links inside spinner labels
                         label.setTextInteractionFlags(Qt.TextBrowserInteraction)
                         label.setViewportMargins(0, 0, 0, 0)
                         label.setContentsMargins(0, 0, 0, 0)
@@ -1330,9 +1306,9 @@ class SiriResponseBubble(QWidget):
 
                         def update_spinner_label_height(b=label):
                             try:
-                                # 強制更新文件布局
-                                b.document().adjustSize()
-                                height = b.document().size().height()
+                                b.update_wrap_width(self._available_width())
+                                doc_size = b.document().documentLayout().documentSize()
+                                height = doc_size.height()
                                 min_height = max(int(height) + 16, 32)
                                 b.setMinimumHeight(min_height)
                                 b.setMaximumHeight(min_height)
@@ -1353,28 +1329,27 @@ class SiriResponseBubble(QWidget):
                     else:
                         if not sub_content.strip():
                             continue
-                        # Process code blocks in text segments
                         code_segments = self._extract_code_blocks(sub_content)
                         for seg_type, seg_content, seg_lang in code_segments:
                             if seg_type == 'code':
-                                # Add code block widget
                                 code_widget = CodeBlockWidget(seg_content, seg_lang)
                                 self.layout.addWidget(code_widget)
                             else:
-                                # 使用 _prepare_markdown 處理內容（包括將圖片轉為 data URI）
-                                browser = QTextBrowser()
+                                seg_content = self._normalize_soft_wrap(seg_content)
+                                browser = AutoWrapTextBrowser()
                                 browser.setMarkdown(_prepare_markdown(seg_content))
                                 browser.setOpenExternalLinks(True)
                                 browser.setLineWrapMode(QTextEdit.WidgetWidth)
                                 browser.setStyleSheet(
-                                    "QTextBrowser { color: #FFFFFF; font-family: 'Segoe UI', 'Microsoft JhengHei', sans-serif; font-size: 14px; line-height: 1.5; }"
+                                    "QTextBrowser { color: #FFFFFF; font-family: 'Segoe UI', 'Microsoft JhengHei', sans-serif; "
+                                    "font-size: 14px; line-height: 1.5; }"
                                 )
-                                # 設定圖片樣式以防止橫向捲動
-                                browser.document().setDefaultStyleSheet("img { max-width: 208px; height: auto; }")
+                                browser.document().setDefaultStyleSheet(
+                                    "img { max-width: 100%; height: auto; display: block; }"
+                                )
                                 browser.setFrameShape(QFrame.NoFrame)
                                 browser.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
                                 browser.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-                                # Allow clicking links inside sub-sections
                                 browser.setTextInteractionFlags(Qt.TextBrowserInteraction)
                                 browser.setViewportMargins(0, 0, 0, 0)
                                 browser.setContentsMargins(0, 0, 0, 0)
@@ -1383,8 +1358,14 @@ class SiriResponseBubble(QWidget):
 
                                 def update_browser_height(b=browser):
                                     try:
-                                        b.document().adjustSize()
-                                        doc_size = b.document().size()
+                                        avail_w = self._available_width()
+                                        if avail_w > 0:
+                                            b.setMinimumWidth(avail_w)
+                                            b.setMaximumWidth(avail_w)
+                                        b.setLineWrapMode(QTextEdit.WidgetWidth)
+                                        b.update_wrap_width(avail_w)
+                                        doc = b.document()
+                                        doc_size = doc.documentLayout().documentSize()
                                         h2 = doc_size.height()
                                         min_height = max(int(h2) + 16, 32)
                                         b.setMinimumHeight(min_height)
@@ -1400,20 +1381,16 @@ class SiriResponseBubble(QWidget):
                                 QTimer.singleShot(0, update_browser_height)
                                 self.layout.addWidget(browser)
             elif kind in ("tool", "discussion"):
-                title = "🛠️ Tool execution" if kind == "tool" else "💭 Discussion"
+                title = "Tool execution" if kind == "tool" else "Discussion"
                 seen_sections.add(title)
-                
-                # 如果section已存在，更新其內容
+
                 if title in existing_sections:
                     section = existing_sections[title]
-                    # 更新內容
                     content_for_section = content if content.strip() else "<i>Waiting for results...</i>"
                     section.update_content(content_for_section)
                     section.set_active(is_active)
-                    # 確保section在layout中
                     self.layout.addWidget(section)
                 else:
-                    # 創建新的section
                     content_for_section = content
                     if is_active and not content.strip():
                         content_for_section = "<i>Waiting for results...</i>"
@@ -1423,16 +1400,13 @@ class SiriResponseBubble(QWidget):
                     )
                     self.layout.addWidget(section)
                     existing_sections[title] = section
-        
-        # 移除不再需要的sections
+
         for title, section in list(existing_sections.items()):
             if title not in seen_sections:
                 section.setParent(None)
                 section.deleteLater()
 
         self.layout.addStretch(1)
-
-        # 延遲批量處理布局更新，減少重繪
         QTimer.singleShot(0, self._delayed_layout_refresh)
         QTimer.singleShot(50, self._recalculate_child_heights)
 
@@ -1445,13 +1419,10 @@ class SiriResponseBubble(QWidget):
         }
 
         open_tags = {"<tool-execution>", "<discussion>"}
-
         close_tags = {"</tool-execution>", "</discussion>"}
 
         segments = []  # List of (kind, content, is_active)
-
         stack = ["normal"]
-
         pos = 0
 
         def add_segment(kind: str, chunk: str, active: bool = False) -> None:
@@ -1475,12 +1446,10 @@ class SiriResponseBubble(QWidget):
 
                 if next_pos is None or idx < next_pos:
                     next_pos = idx
-
                     next_tag = tag
 
             if next_pos is None:
                 add_segment(stack[-1], text[pos:])
-
                 break
 
             if next_pos > pos:
@@ -1488,11 +1457,8 @@ class SiriResponseBubble(QWidget):
 
             if next_tag in open_tags:
                 new_kind = tags[next_tag]
-
                 stack.append(new_kind)
-
                 add_segment(new_kind, "", True)
-
             elif next_tag in close_tags and len(stack) > 1:
                 closing_kind = stack.pop()
                 for idx in range(len(segments) - 1, -1, -1):
@@ -1506,7 +1472,6 @@ class SiriResponseBubble(QWidget):
             current_kind = stack[-1]
             if segments and segments[-1][0] == current_kind:
                 seg_kind, seg_chunk, seg_active = segments[-1]
-
                 segments[-1] = (seg_kind, seg_chunk, True)
             else:
                 segments.append((current_kind, "", True))
@@ -1514,25 +1479,25 @@ class SiriResponseBubble(QWidget):
         return segments
 
     def _update_animation(self):
-        """更新動畫角度並觸發重繪"""
+        # Update animation angle and repaint.
         self._animation_angle = (self._animation_angle + 2) % 360
-        self.update()  # 觸發 paintEvent
+        self.update()
 
     def start_animation(self):
-        """啟動彩色外框動畫，表示 agent 正在運行"""
+        # Start animated border to show agent is thinking.
         if not self._is_running:
             self._is_running = True
-            self._animation_timer.start(16)  # 約 60 FPS
+            self._animation_timer.start(16)
 
     def stop_animation(self):
-        """停止彩色外框動畫，表示 agent 已完成"""
+        # Stop animated border to show agent is idle.
         if self._is_running:
             self._is_running = False
             self._animation_timer.stop()
-            self.update()  # 最後一次重繪以移除外框
+            self.update()
 
     def paintEvent(self, event):
-        """自定義繪製事件，添加彩色動畫外框"""
+        # Custom paint to add animated outer ring.
         super().paintEvent(event)
 
         if not self._is_running:
@@ -1543,15 +1508,13 @@ class SiriResponseBubble(QWidget):
 
         rect = self.rect()
 
-        # 定義彩色序列（春綠 → 道奇藍 → 熱粉色）
         colors = [
-            QColor("#6FD3C5"),  # muted teal
-            QColor("#6B8FE5"),  # soft blue
-            QColor("#9B8FEA"),  # lavender
-            QColor("#6ED0B2"),  # seafoam
+            QColor("#6FD3C5"),
+            QColor("#6B8FE5"),
+            QColor("#9B8FEA"),
+            QColor("#6ED0B2"),
         ]
 
-        # 根據動畫角度在顏色之間插值
         progress = self._animation_angle / 360.0
         color_index = int(progress * len(colors))
         next_color_index = (color_index + 1) % len(colors)
@@ -1566,7 +1529,6 @@ class SiriResponseBubble(QWidget):
 
         border_color = QColor(r, g, b, 190)
 
-        # 繪製彩色外框
         pen = QPen(border_color)
         pen.setWidthF(1.6)
         pen.setCapStyle(Qt.PenCapStyle.RoundCap)
@@ -1887,6 +1849,8 @@ class MainWindow(QMainWindow):
     # 信号：请求显示确认对话框
     confirm_requested = Signal(str, str, object)  # message, default_choice, result_container
     collapse_state_changed = Signal(bool)
+    # 當使用者正在編輯輸入框（鍵入文字）時發出
+    typing = Signal()
     
     def __init__(self):
         super().__init__()
@@ -1940,6 +1904,12 @@ class MainWindow(QMainWindow):
             "}"
         )
         self.input_field.returnPressed.connect(self.on_input_submitted)
+        # 當使用者正在輸入時，發出 typing 信號（用於重置閒置計時）
+        try:
+            self.input_field.textEdited.connect(self._handle_user_typing)
+        except Exception:
+            # fallback to textChanged if textEdited not available
+            self.input_field.textChanged.connect(self._handle_user_typing)
 
         self.voice_button = QPushButton("🎤")
         self.voice_button.setFixedSize(35, 35)
@@ -2130,6 +2100,14 @@ class MainWindow(QMainWindow):
         self.input_container.show()
         self.collapse_button.show()
         self._update_window_mask()
+
+    def _handle_user_typing(self, *_args):
+        """Slot: triggered when the user edits the input field.
+        Emits the `typing` signal for external consumers to reset idle timers."""
+        try:
+            self.typing.emit()
+        except Exception:
+            pass
 
     def hide_input_container(self) -> None:
         self.input_container.hide()

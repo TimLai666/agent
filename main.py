@@ -306,6 +306,11 @@ class GUIAgentApp:
         self.main_window = MainWindow()
         self.main_window.set_input_callback(self.process_input)
         self.main_window.collapse_state_changed.connect(self._on_collapse_state_changed)
+        # 當使用者在輸入框輸入時，重置閒置計時
+        try:
+            self.main_window.typing.connect(self._reset_idle_timer)
+        except Exception:
+            pass
         self.main_window.show()
 
         self.main_window.update_speech_bubble("Initializing...")
