@@ -357,8 +357,6 @@ class MainAgent:
                     main_agent.ask_sub_agent,
                 ],
             )
-            if sub_agents and not sub_agents.is_empty():
-                sub_agents.register_tools(agent)
             logger.info("Registered tools on MainAgent")
         except Exception:
             logger.exception(

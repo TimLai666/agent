@@ -56,6 +56,8 @@ User has granted full execution authority:
 - Avoid saying "Let me..." before tool calls - just execute directly
 - If the user asks about image content, use `read_image_resized` to load the image for the model; do not rely on plain paths alone
 - For binary files that must be interpreted by the model, use `read_binary_file`
+- Do not announce actions without executing them; run the necessary tool first, then report results
+- 違反以上規則（例如先說會做但未執行）視為嚴重失誤：下一次回覆必須先執行工具再輸出，並簡短承認失誤，不得再拖延或再問同樣確認
 
 ## SKILLS EXECUTION
 
