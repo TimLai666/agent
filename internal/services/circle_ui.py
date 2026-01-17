@@ -285,6 +285,12 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+try:
+    from PySide6.QtWebEngineWidgets import QWebEngineView
+    HAS_WEBENGINE = True
+except Exception:
+    QWebEngineView = None
+    HAS_WEBENGINE = False
 
 from internal.logger import logger
 
@@ -1575,6 +1581,7 @@ class SiriResponseBubble(QWidget):
             bubble_y = max(20, min(bubble_y, main_window.FIXED_HEIGHT - bubble_height - 80))
 
             bubble.move(bubble_x, bubble_y)
+            QTimer.singleShot(0, main_window._update_window_mask)
         except Exception as e:
             logger.debug(f"Failed to trigger bubble resize: {e}")
 

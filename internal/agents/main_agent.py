@@ -8,7 +8,13 @@ from typing import Any, cast
 
 from httpx import AsyncClient
 from pydantic_ai import Agent
-from pydantic_ai.messages import ModelRequest, ModelResponse
+from pydantic_ai.messages import (
+    BinaryContent,
+    ImageUrl,
+    ModelRequest,
+    ModelResponse,
+    UserContent,
+)
 
 from internal.co_agents.philosopher import PhilosopherCoAgent
 from internal.logger import logger
@@ -51,6 +57,8 @@ class MainAgent:
     PROMPT_KEY = PROMPT_KEY
     ENV_PREFIX = ENV_PREFIX
     TOOL_RECOVERY_MAX_ATTEMPTS = 2
+    _IMAGE_DIRECTIVE_RE = re.compile(r"(?mi)^\s*(?:image|img)\s*:\s*(?P<target>.+?)\s*$")
+    _IMAGE_MARKDOWN_RE = re.compile(r"!\[(?P<alt>[^\]]*)\]\((?P<target>[^)]+)\)")
 
     @classmethod
     def _build_enhanced_system_prompt(
@@ -1392,6 +1400,78 @@ class MainAgent:
         text = re.sub(r"```[\s\S]*?```", "", text)
         return re.sub(r"`[^`]+`", "", text)
 
+    def _normalize_image_directives(self, prompt: str) -> str:
+        if not prompt:
+            return prompt
+
+        def replace_directive(match: re.Match) -> str:
+            target = match.group("target").strip()
+            return f"![image]({target})"
+
+        return self._IMAGE_DIRECTIVE_RE.sub(replace_directive, prompt)
+
+    def _resolve_image_content(self, target: str) -> tuple[UserContent | None, str | None]:
+        raw_target = (target or "").strip()
+        if not raw_target:
+            return None, "圖片參照為空。"
+        if raw_target.startswith("<") and raw_target.endswith(">"):
+            raw_target = raw_target[1:-1].strip()
+        raw_target = raw_target.strip().strip("\"'").strip()
+
+        if raw_target.startswith("data:"):
+            try:
+                content = BinaryContent.from_data_uri(raw_target)
+            except Exception as exc:
+                return None, f"圖片 data URI 無效：{exc}"
+            if not content.is_image:
+                return None, "Data URI 不是圖片格式。"
+            return content, None
+
+        if re.match(r"^https?://", raw_target, flags=re.IGNORECASE):
+            return ImageUrl(raw_target), None
+
+        if raw_target.lower().startswith("file://"):
+            raw_target = raw_target[7:]
+
+        try:
+            content = BinaryContent.from_path(raw_target)
+        except Exception as exc:
+            return None, f"無法讀取圖片 '{raw_target}': {exc}"
+        if not content.is_image:
+            return None, f"不支援的圖片格式 '{raw_target}' (media_type={content.media_type})."
+        return content, None
+
+    def _build_user_prompt_content(self, prompt: str) -> tuple[list[UserContent], list[str]]:
+        normalized = self._normalize_image_directives(prompt)
+        parts: list[UserContent] = []
+        errors: list[str] = []
+        last = 0
+        for match in self._IMAGE_MARKDOWN_RE.finditer(normalized):
+            if match.start() > last:
+                parts.append(normalized[last:match.start()])
+            target = match.group("target")
+            content, error = self._resolve_image_content(target)
+            if error:
+                errors.append(error)
+                parts.append(match.group(0))
+            elif content is not None:
+                parts.append(content)
+            last = match.end()
+        if last < len(normalized):
+            parts.append(normalized[last:])
+        if not parts:
+            parts = [normalized]
+        if errors:
+            parts.append("\n\n[圖片載入錯誤]\n" + "\n".join(errors))
+        return parts, errors
+
+    def _append_error_to_user_content(
+        self,
+        content: list[UserContent],
+        error_context: str,
+    ) -> list[UserContent]:
+        return [*content, error_context]
+
     def _apply_keyword_triggers(self, prompt: str) -> tuple[str, dict[str, Any]]:
         triggers = load_keyword_triggers()
         if not triggers or not prompt:
@@ -1733,9 +1813,10 @@ class MainAgent:
                         exec_text = "\n".join(parallel_results)
                         prompt = f"{prompt}\n\nSub-agent results:\n{exec_text}"
             
+            user_content, _ = self._build_user_prompt_content(prompt)
             # 直接調用 agent.run()，捕獲 MCP 工具錯誤
             try:
-                result = await self.agent.run(prompt, message_history=message_history)
+                result = await self.agent.run(user_content, message_history=message_history)
                 try:
                     self._last_messages = result.all_messages()
                 except Exception:
@@ -1756,7 +1837,12 @@ class MainAgent:
                 
                 # 重新調用 agent.run()，這次不呼叫工具，只是讓 LLM 看到錯誤並生成回應
                 try:
-                    result = await self.agent.run(prompt + error_context, message_history=message_history)
+                    user_content_with_error = self._append_error_to_user_content(
+                        user_content, error_context
+                    )
+                    result = await self.agent.run(
+                        user_content_with_error, message_history=message_history
+                    )
                     try:
                         self._last_messages = result.all_messages()
                     except Exception:
@@ -1834,7 +1920,8 @@ class MainAgent:
         if exec_results:
             exec_text = "\n".join(exec_results)
             prompt = f"{prompt}\n\nTool execution results:\n{exec_text}"
-        result = await self.agent.run(prompt, message_history=message_history)
+        user_content, _ = self._build_user_prompt_content(prompt)
+        result = await self.agent.run(user_content, message_history=message_history)
         try:
             self._last_messages = result.all_messages()
         except Exception:
@@ -1878,10 +1965,11 @@ class MainAgent:
                         exec_text = "\n".join(parallel_results)
                         prompt = f"{prompt}\n\nSub-agent results:\n{exec_text}"
             
+            user_content, _ = self._build_user_prompt_content(prompt)
             # 直接調用 agent.run_stream()，捕獲 MCP 工具錯誤
             try:
                 async with self.agent.run_stream(
-                    user_prompt=prompt, message_history=message_history
+                    user_prompt=user_content, message_history=message_history
                 ) as result:
                     collected = ""
                     try:
@@ -1922,8 +2010,11 @@ class MainAgent:
                 
                 # 重新調用 agent.run_stream()，這次不呼叫工具，只是讓 LLM 看到錯誤並生成回應
                 try:
+                    user_content_with_error = self._append_error_to_user_content(
+                        user_content, error_context
+                    )
                     async with self.agent.run_stream(
-                        user_prompt=prompt + error_context, message_history=message_history
+                        user_prompt=user_content_with_error, message_history=message_history
                     ) as result:
                         collected = ""
                         async for chunk in result.stream_text(delta=True):
@@ -2035,8 +2126,9 @@ class MainAgent:
         
         # 捕獲最終 agent.run_stream() 的錯誤（包括 MCP 工具錯誤）
         try:
+            user_content, _ = self._build_user_prompt_content(prompt)
             async with self.agent.run_stream(
-                user_prompt=prompt, message_history=message_history
+                user_prompt=user_content, message_history=message_history
             ) as result:
                 collected = ""
                 try:

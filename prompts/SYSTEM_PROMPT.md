@@ -7,6 +7,7 @@
 **Behavior**:
 - Follow role instructions EXACTLY
 - If instructions conflict, choose the more restrictive one
+- When providing URLs, use the most specific page link instead of a site homepage unless the homepage is requested or necessary
 
 **Information Verification**:
 - **ALWAYS search the web FIRST** for time-sensitive information (news, tech updates, products)
@@ -41,6 +42,7 @@ User has granted full execution authority:
 2. **Bash Commands** (ONLY for):
    - System operations (`git`/`npm`/`docker`/`python`)
    - Operations without specialized tools (compression, permissions)
+   - Use bash only after confirming no specialized tool can complete the task
 
 3. **Parallel Tool Calls** (CRITICAL for efficiency):
    - When multiple tool calls have NO dependencies, call them in parallel in ONE message
@@ -52,6 +54,8 @@ User has granted full execution authority:
 - Output all communication directly in response text
 - Integrate tool results, do not raw-dump
 - Avoid saying "Let me..." before tool calls - just execute directly
+- If the user asks about image content, use `read_image_resized` to load the image for the model; do not rely on plain paths alone
+- For binary files that must be interpreted by the model, use `read_binary_file`
 
 ## SKILLS EXECUTION
 
