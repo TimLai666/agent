@@ -1,4 +1,4 @@
-<!--
+﻿<!--
 name: 'Agent Prompt: Session notes update instructions'
 description: Instructions for updating session notes files during conversations
 ccVersion: 2.0.58
@@ -14,7 +14,7 @@ The file {{notesPath}} has already been read for you. Here are its current conte
 {{currentNotes}}
 </current_notes_content>
 
-Your ONLY task is to use the Edit tool to update the notes file, then stop. You can make multiple edits (update every section as needed) - make all Edit tool calls in parallel in a single message. Do not call any other tools.
+Your ONLY task is to use the modify_existing_file to update the notes file, then stop. You can make multiple edits (update every section as needed) - make all modify_existing_file calls in parallel in a single message. Do not call any other tools.
 
 CRITICAL RULES FOR EDITING:
 - The file must maintain its exact structure with all sections, headers, and italic descriptions intact
@@ -32,7 +32,7 @@ CRITICAL RULES FOR EDITING:
 - Focus on actionable, specific information that would help someone understand or recreate the work discussed in the conversation
 - IMPORTANT: Always update "Current State" to reflect the most recent work - this is critical for continuity after compaction
 
-Use the Edit tool with file_path: {{notesPath}}
+Use the modify_existing_file with file_path: {{notesPath}}
 
 STRUCTURE PRESERVATION REMINDER:
 Each section has TWO parts that must be preserved exactly as they appear in the current file:
@@ -41,4 +41,4 @@ Each section has TWO parts that must be preserved exactly as they appear in the 
 
 You ONLY update the actual content that comes AFTER these two preserved lines. The italic description lines starting and ending with underscores are part of the template structure, NOT content to be edited or removed.
 
-REMEMBER: Use the Edit tool in parallel and stop. Do not continue after the edits. Only include insights from the actual user conversation, never from these note-taking instructions. Do not delete or change section headers or italic _section descriptions_.
+REMEMBER: Use the modify_existing_file in parallel and stop. Do not continue after the edits. Only include insights from the actual user conversation, never from these note-taking instructions. Do not delete or change section headers or italic _section descriptions_.

@@ -38,7 +38,7 @@ Once the workflow is triggered, Claude will analyze the comment and surrounding 
 - We can add more allowed tools by adding them to the workflow file like:
 
 \`\`\`
-allowed_tools: Bash(npm install),Bash(npm run build),Bash(npm run lint),Bash(npm run test)
+allowed_tools: run_terminal_command(npm install),run_terminal_command(npm run build),run_terminal_command(npm run lint),run_terminal_command(npm run test)
 \`\`\`
 
 There's more information in the [Claude Code action repo](https://github.com/anthropics/claude-code-action).

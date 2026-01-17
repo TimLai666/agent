@@ -4,7 +4,7 @@ description: Comprehensive security review prompt for analyzing code changes wit
 ccVersion: 2.0.70
 -->
 ---
-allowed-tools: Bash(git diff:*), Bash(git status:*), Bash(git log:*), Bash(git show:*), Bash(git remote show:*), Read, Glob, Grep, LS, Task
+allowed-tools: run_terminal_command(git diff:*), run_terminal_command(git status:*), run_terminal_command(git log:*), run_terminal_command(git show:*), run_terminal_command(git remote show:*), read_file, list_files_in_directory, find_files_with_fragment, find_all_lines_in_file_with_fragment
 description: Complete a security review of the pending changes on the current branch
 ---
 

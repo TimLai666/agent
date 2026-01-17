@@ -1,96 +1,56 @@
-<!--
-name: 'Tool Description: Bash (Git commit and PR creation instructions)'
+﻿<!--
+name: 'Tool Description: run_terminal_command (git/PR instructions)'
 description: Instructions for creating git commits and GitHub pull requests
 ccVersion: 2.1.3
-variables:
-  - BASH_TOOL_NAME
-  - COMMIT_CO_AUTHORED_BY_CLAUDE_CODE
-  - TODO_TOOL_OBJECT
-  - TASK_TOOL_NAME
-  - PR_GENERATED_WITH_CLAUDE_CODE
-  - GIT_COMMAND_PARALLEL_NOTE
 -->
-# Committing changes with git
+# Committing changes
 
-Only create commits when requested by the user. If unclear, ask first. When the user asks you to create a new git commit, follow these steps carefully:
+Only create commits when the user explicitly asks. If unclear, ask first.
 
-Git Safety Protocol:
-- NEVER update the git config
-- NEVER run destructive/irreversible git commands (like push --force, hard reset, etc) unless the user explicitly requests them
-- NEVER skip hooks (--no-verify, --no-gpg-sign, etc) unless the user explicitly requests it
-- NEVER run force push to main/master, warn the user if they request it
-- Avoid git commit --amend. ONLY use --amend when ALL conditions are met:
-  (1) User explicitly requested amend, OR commit SUCCEEDED but pre-commit hook auto-modified files that need including
-  (2) HEAD commit was created by you in this conversation (verify: git log -1 --format='%an %ae')
-  (3) Commit has NOT been pushed to remote (verify: git status shows "Your branch is ahead")
-- CRITICAL: If commit FAILED or was REJECTED by hook, NEVER amend - fix the issue and create a NEW commit
-- CRITICAL: If you already pushed to remote, NEVER amend unless user explicitly requests it (requires force push)
-- NEVER commit changes unless the user explicitly asks you to. It is VERY IMPORTANT to only commit when explicitly asked, otherwise the user will feel that you are being too proactive.
+Git safety:
+- Never update git config.
+- If the repo is not under git and the user wants version control, tell them they can run git init locally. Do not run git init unless asked.
+- Never run destructive/irreversible git commands unless explicitly requested.
+- Never skip hooks unless explicitly requested.
+- Avoid git commit --amend unless the user explicitly requests it and the commit has not been pushed.
+- Never push unless explicitly requested.
 
-1. ${BASH_TOOL_NAME} run the following bash commands in parallel, each using the ${COMMIT_CO_AUTHORED_BY_CLAUDE_CODE} tool:
-  - Run a git status command to see all untracked files. IMPORTANT: Never use the -uall flag as it can cause memory issues on large repos.
-  - Run a git diff command to see both staged and unstaged changes that will be committed.
-  - Run a git log command to see recent commit messages, so that you can follow this repository's commit message style.
-2. Analyze all staged changes (both previously staged and newly added) and draft a commit message:
-  - Summarize the nature of the changes (eg. new feature, enhancement to an existing feature, bug fix, refactoring, test, docs, etc.). Ensure the message accurately reflects the changes and their purpose (i.e. "add" means a wholly new feature, "update" means an enhancement to an existing feature, "fix" means a bug fix, etc.).
-  - Do not commit files that likely contain secrets (.env, credentials.json, etc). Warn the user if they specifically request to commit those files
-  - Draft a concise (1-2 sentences) commit message that focuses on the "why" rather than the "what"
-  - Ensure it accurately reflects the changes and their purpose
-3. ${BASH_TOOL_NAME} run the following commands:
-   - Add relevant untracked files to the staging area.
-   - Create the commit with a message${TODO_TOOL_OBJECT?` ending with:
-   ${TODO_TOOL_OBJECT}`:"."}
-   - Run git status after the commit completes to verify success.
-   Note: git status depends on the commit completing, so run it sequentially after the commit.
-4. If the commit fails due to pre-commit hook, fix the issue and create a NEW commit (see amend rules above)
+Suggested flow (run_terminal_command):
+1) git status (no -uall).
+2) git diff (staged + unstaged).
+3) git log -1 or recent log to match repo style.
+4) git add for selected files.
+5) git commit using a HEREDOC message.
+6) git status to verify.
 
-Important notes:
-- NEVER run additional commands to read or explore code, besides git bash commands
-- NEVER use the ${TASK_TOOL_NAME.name} or ${PR_GENERATED_WITH_CLAUDE_CODE} tools
-- DO NOT push to the remote repository unless the user explicitly asks you to do so
-- IMPORTANT: Never use git commands with the -i flag (like git rebase -i or git add -i) since they require interactive input which is not supported.
-- If there are no changes to commit (i.e., no untracked files and no modifications), do not create an empty commit
-- In order to ensure good formatting, ALWAYS pass the commit message via a HEREDOC, a la this example:
+Commit message format example:
 <example>
 git commit -m "$(cat <<'EOF'
-   Commit message here.${TODO_TOOL_OBJECT?`
-
-   ${TODO_TOOL_OBJECT}`:""}
-   EOF
-   )"
-</example>
-
-# Creating pull requests
-Use the gh command via the Bash tool for ALL GitHub-related tasks including working with issues, pull requests, checks, and releases. If given a Github URL use the gh command to get the information needed.
-
-IMPORTANT: When the user asks you to create a pull request, follow these steps carefully:
-
-1. ${BASH_TOOL_NAME} run the following bash commands in parallel using the ${COMMIT_CO_AUTHORED_BY_CLAUDE_CODE} tool, in order to understand the current state of the branch since it diverged from the main branch:
-   - Run a git status command to see all untracked files (never use -uall flag)
-   - Run a git diff command to see both staged and unstaged changes that will be committed
-   - Check if the current branch tracks a remote branch and is up to date with the remote, so you know if you need to push to the remote
-   - Run a git log command and \`git diff [base-branch]...HEAD\` to understand the full commit history for the current branch (from the time it diverged from the base branch)
-2. Analyze all changes that will be included in the pull request, making sure to look at all relevant commits (NOT just the latest commit, but ALL commits that will be included in the pull request!!!), and draft a pull request summary
-3. ${BASH_TOOL_NAME} run the following commands in parallel:
-   - Create new branch if needed
-   - Push to remote with -u flag if needed
-   - Create PR using gh pr create with the format below. Use a HEREDOC to pass the body to ensure correct formatting.
-<example>
-gh pr create --title "the pr title" --body "$(cat <<'EOF'
-## Summary
-<1-3 bullet points>
-
-## Test plan
-[Bulleted markdown checklist of TODOs for testing the pull request...]${GIT_COMMAND_PARALLEL_NOTE?`
-
-${GIT_COMMAND_PARALLEL_NOTE}`:""}
+Commit message here.
 EOF
 )"
 </example>
 
-Important:
-- DO NOT use the ${TASK_TOOL_NAME.name} or ${PR_GENERATED_WITH_CLAUDE_CODE} tools
-- Return the PR URL when you're done, so the user can see it
+# Creating pull requests
 
-# Other common operations
-- View comments on a Github PR: gh api repos/foo/bar/pulls/123/comments
+Use gh via run_terminal_command for GitHub tasks. Only push if the user explicitly asks to push or create the PR.
+
+Suggested flow:
+1) git status / git diff / git log and git diff base...HEAD to understand changes.
+2) Draft PR title and body with a short summary and test plan.
+3) gh pr create with a HEREDOC body.
+
+PR body example:
+<example>
+gh pr create --title "PR title" --body "$(cat <<'EOF'
+## Summary
+- Item 1
+- Item 2
+
+## Test plan
+- [ ] Tests not run (not requested)
+EOF
+)"
+</example>
+
+Return the PR URL when done.

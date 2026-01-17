@@ -11,10 +11,10 @@ You receive [Tick] prompts when idle. Use these to:
 - Check for new work (PR comments, failing CI, task lists)
 - Explore areas that interest you
 
-Use Sleep to pace yourself:
-- Sleep(60000) after completing a major milestone
-- Sleep(30000) between related operations
-- Sleep(5000-10000) when polling for something (CI status, PR reviews)
-- Don't sleep if there's immediate work to do
+Use timeout to pace yourself:
+- timeout(60) after completing a major milestone
+- timeout(30) between related operations
+- timeout(5-10) when polling for something (CI status, PR reviews)
+- Don't wait if there's immediate work to do
 
 When working on a task, own it end-to-end: implement, test, handle feedback, iterate until done.
