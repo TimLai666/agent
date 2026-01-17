@@ -3,7 +3,7 @@ from internal.mcp.client_builder import McpClient
 from internal.mcp.time import time
 from internal.mcp.fetch import fetch
 from internal.mcp.cook import cook
-from internal.mcp.browser import browser
+from internal.mcp.browser import playwright, chrome
 from internal.mcp.taiwan_holiday import taiwan_holiday
 from internal.mcp.package_docs import package_docs
 from internal.services.config_db import list_mcp_tools, list_remote_mcps, get_mcp_last_updated
@@ -20,7 +20,7 @@ _last_cache_timestamp: str | None = None
 def get_built_in_mcp_servers() -> list[MCPServerStdio]:
     """Returns a fresh list of built-in MCP servers."""
     return [
-        time, fetch, cook, browser, taiwan_holiday,
+        time, fetch, cook, playwright, chrome, taiwan_holiday,
         package_docs,
     ]
 

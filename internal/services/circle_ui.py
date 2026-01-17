@@ -5,6 +5,8 @@ import string
 import sys
 import io
 import os
+import html
+import weakref
 import urllib.request
 import concurrent.futures
 import base64
@@ -16,6 +18,10 @@ except Exception:
 
 # Thread pool for downloading/processing images (limit concurrency to avoid resource spikes)
 _image_executor = concurrent.futures.ThreadPoolExecutor(max_workers=4)
+# Cache for downloaded images: (url, max_width) -> data_uri or ""
+_image_data_cache: dict[tuple[str, int], str] = {}
+_image_inflight: set[tuple[str, int]] = set()
+_image_failures: dict[tuple[str, int], int] = {}
 # Max bytes to read for an image (e.g., 8MB)
 _MAX_IMAGE_BYTES = 8 * 1024 * 1024
 # Max dimension (width or height) for images; images larger will be downscaled to this
@@ -114,71 +120,95 @@ def _download_and_encode_image(url: str, max_width: int = 800) -> str:
         return url  # 返回原 URL
 
 
-def _process_markdown_images(text: str) -> str:
-    """處理 Markdown 中的圖片，將遠程圖片轉為 data URI
+def _render_image_block(data_uri: str, alt: str, source_url: str | None = None) -> str:
+    safe_alt = html.escape(alt) if alt else ""
+    action_links = (
+        f'<a href="{data_uri}" '
+        f'style="display: inline-block; padding: 2px 6px; '
+        f'background: rgba(0, 0, 0, 0.55); color: #CFE9FF; text-decoration: none; '
+        f'border-radius: 6px; font-size: 10px;">Save</a>'
+    )
+    if source_url:
+        safe_src = html.escape(source_url, quote=True)
+        action_links += (
+            f' <a href="{safe_src}" '
+            f'style="display: inline-block; padding: 2px 6px; '
+            f'background: rgba(0, 0, 0, 0.35); color: #CFE9FF; text-decoration: none; '
+            f'border-radius: 6px; font-size: 10px;">Open</a>'
+        )
+    return (
+        f'<div style="margin: 6px 0 10px 0;">'
+        f'<img src="{data_uri}" alt="{safe_alt}" '
+        f'style="max-width: 100%; height: auto; display: block; margin: 0 0 4px 0;" />'
+        f'{action_links}'
+        f'</div>'
+    )
 
-    Args:
-        text: Markdown 文本
 
-    Returns:
-        處理後的 Markdown 文本
-    """
+def _render_image_placeholder(alt: str) -> str:
+    label = alt if alt else "Loading image..."
+    return (
+        f'<div style="margin: 6px 0; color: rgba(255, 255, 255, 0.7); '
+        f'font-size: 11px;">{label}</div>'
+    )
+
+
+def _render_image_link(url: str, alt: str) -> str:
+    label = alt if alt else "image"
+    return f"[{label}]({url})"
+
+
+def _process_markdown_images_async(text: str) -> tuple[str, list[tuple[str, int]]]:
+    """Replace markdown images with cached data URIs; return pending downloads."""
     if not text:
-        return text
+        return text, []
 
-    # 匹配 Markdown 圖片語法：![alt](url)
     md_img = re.compile(r'!\[([^\]]*)\]\((<[^>]+>|[^)]+)\)')
+    md_link = re.compile(r'(?<!\!)\[([^\]]*)\]\((<[^>]+>|[^)]+)\)')
+    pending: list[tuple[str, int]] = []
+
+    def is_image_url(url: str) -> bool:
+        return bool(re.search(r'\.(png|jpe?g|gif|webp|bmp|svg)(?:\?|#|$)', url, re.IGNORECASE))
+
+    def promote_image_links(raw_text: str) -> str:
+        def replace_link(match):
+            label = match.group(1)
+            url = match.group(2).strip()
+            if url.startswith('<') and url.endswith('>'):
+                url = url[1:-1].strip()
+            if not url or not is_image_url(url):
+                return match.group(0)
+            return f"![{label}]({url})"
+
+        return md_link.sub(replace_link, raw_text)
 
     def replace_image(match):
         alt = match.group(1)
         url = match.group(2).strip()
-        if url.startswith("<") and url.endswith(">"):
+        if url.startswith('<') and url.endswith('>'):
             url = url[1:-1].strip()
 
-        # 提取 width 參數（如果有）
         width_match = re.search(r'=\s*(\d+)', url)
         if width_match:
             width = int(width_match.group(1))
-            # 移除 width 參數
             url = re.sub(r'\s*=\s*\d+', '', url).strip()
         else:
             width = 800
 
-        # 下載並轉換
-        data_uri = _download_and_encode_image(url, max_width=width)
-        if not data_uri.startswith("data:image/"):
-            label = alt if alt else "image"
-            if url:
-                return f"[{label}]({url})"
-            return ""
+        if url.startswith('data:image/'):
+            return _render_image_block(url, alt)
 
-        safe_alt = alt.replace('"', '\\"') if alt else ""
-        return (
-            f'<div style="margin: 6px 0 10px 0;">'
-            f'<img src="{data_uri}" alt="{safe_alt}" '
-            f'style="max-width: 100%; height: auto; display: block; margin: 0 0 4px 0;" />'
-            f'<a href="{data_uri}" '
-            f'style="display: inline-block; padding: 2px 6px; '
-            f'background: rgba(0, 0, 0, 0.55); color: #CFE9FF; text-decoration: none; '
-            f'border-radius: 6px; font-size: 10px;">Save</a>'
-            f'</div>'
-        )
+        key = (url, width)
+        cached = _image_data_cache.get(key)
+        if cached:
+            return _render_image_block(cached, alt, url)
+        if cached == "" or _image_failures.get(key, 0) >= 2:
+            return _render_image_link(url, alt) if url else ""
 
-    return md_img.sub(replace_image, text)
+        pending.append(key)
+        return _render_image_placeholder(alt)
 
-from PySide6.QtCore import Qt, QTimer, QVariantAnimation, QPropertyAnimation, QEasingCurve, Property, QMetaObject, Signal, Slot, QEventLoop, QUrl, QSize, QSizeF, QBuffer, QByteArray, QIODeviceBase
-from PySide6.QtGui import QColor, QPainter, QPen, QRadialGradient, QKeyEvent, QPixmap, QMovie, QGuiApplication, QCursor, QConicalGradient, QLinearGradient, QImage, QTextCursor, QTextDocument, QTextImageFormat, QDesktopServices
-
-# QtWebEngine is optional - only import when needed
-try:
-    from PySide6.QtWebEngineWidgets import QWebEngineView
-    HAS_WEBENGINE = True
-except ImportError:
-    HAS_WEBENGINE = False
-    QWebEngineView = None  # type: ignore
-
-# Convert bare URLs in markdown/plain text into markdown links so QTextBrowser renders them as clickable
-import re
+    return md_img.sub(replace_image, promote_image_links(text)), pending
 
 def _autolink_markdown(text: str) -> str:
     if not text:
@@ -199,16 +229,42 @@ def _autolink_markdown(text: str) -> str:
 
 
 def _prepare_markdown(text: str) -> str:
-    """準備 Markdown 文本：處理圖片和 autolink"""
+    """Normalize markdown: autolink only."""
     if not text:
         return text
-    # 先處理圖片（轉為 data URI）
-    text = _process_markdown_images(text)
-    # 再處理 autolink
-    text = _autolink_markdown(text)
-    return text
+    return _autolink_markdown(text)
 
-
+from PySide6.QtCore import (
+    QEventLoop,
+    QMetaObject,
+    Property,
+    QSize,
+    Signal,
+    QTimer,
+    Qt,
+    QUrl,
+    QEasingCurve,
+    QPropertyAnimation,
+    QVariantAnimation,
+    Slot,
+)
+from PySide6.QtGui import (
+    QColor,
+    QConicalGradient,
+    QCursor,
+    QDesktopServices,
+    QGuiApplication,
+    QImage,
+    QKeyEvent,
+    QLinearGradient,
+    QPainter,
+    QPen,
+    QPixmap,
+    QRadialGradient,
+    QTextCursor,
+    QTextDocument,
+    QTextImageFormat,
+)
 from PySide6.QtWidgets import (
     QApplication,
     QCompleter,
@@ -238,6 +294,9 @@ class AutoWrapTextBrowser(QTextBrowser):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._raw_markdown = None
+        self._last_rendered_markdown = None
+        self._markdown_refresh_pending = False
         self._image_max_width = None
         self._constrain_images_active = False
         self._image_buttons = []
@@ -254,12 +313,88 @@ class AutoWrapTextBrowser(QTextBrowser):
         except Exception:
             pass
 
+    def setMarkdown(self, text: str) -> None:
+        self._raw_markdown = text or ""
+        self._last_rendered_markdown = None
+        self._apply_markdown_with_images()
+
+    def _apply_markdown_with_images(self) -> None:
+        raw = self._raw_markdown
+        if raw is None:
+            QTextBrowser.setMarkdown(self, raw)
+            return
+        processed, pending = _process_markdown_images_async(raw)
+        if processed != self._last_rendered_markdown:
+            self._last_rendered_markdown = processed
+            QTextBrowser.setMarkdown(self, processed)
+        if pending:
+            self._queue_image_downloads(pending)
+
+    @Slot()
+    def _schedule_markdown_refresh(self) -> None:
+        if self._markdown_refresh_pending:
+            return
+        self._markdown_refresh_pending = True
+        QTimer.singleShot(0, self._refresh_markdown)
+
+    def _refresh_markdown(self) -> None:
+        self._markdown_refresh_pending = False
+        if self._raw_markdown is None:
+            return
+        self._apply_markdown_with_images()
+
+    def _queue_image_downloads(self, pending: list[tuple[str, int]]) -> None:
+        if not pending:
+            return
+        self_ref = weakref.ref(self)
+
+        def done_callback(future, key):
+            try:
+                data_uri = future.result()
+            except Exception:
+                data_uri = ""
+            if not isinstance(data_uri, str) or not data_uri.startswith("data:image/"):
+                data_uri = ""
+            if data_uri:
+                _image_data_cache[key] = data_uri
+                _image_failures.pop(key, None)
+            else:
+                _image_failures[key] = _image_failures.get(key, 0) + 1
+            _image_inflight.discard(key)
+            widget = self_ref()
+            if widget is None:
+                return
+            try:
+                QMetaObject.invokeMethod(
+                    widget,
+                    "_schedule_markdown_refresh",
+                    Qt.QueuedConnection,
+                )
+            except Exception:
+                try:
+                    QTimer.singleShot(0, widget._schedule_markdown_refresh)
+                except Exception:
+                    pass
+
+        for key in dict.fromkeys(pending):
+            if key in _image_inflight:
+                continue
+            _image_inflight.add(key)
+            url, width = key
+            future = _image_executor.submit(_download_and_encode_image, url, width)
+            future.add_done_callback(lambda fut, k=key: done_callback(fut, k))
+
     def _on_contents_changed(self):
         self.update_wrap_width()
         self._schedule_refresh_image_buttons()
 
     def _on_resource_loaded(self, *_args):
+        self.update_wrap_width()
         self._schedule_refresh_image_buttons()
+        try:
+            self.textChanged.emit()
+        except Exception:
+            pass
 
     def setOpenExternalLinks(self, open_external: bool) -> None:
         super().setOpenExternalLinks(False)
