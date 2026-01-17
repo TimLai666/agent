@@ -22,6 +22,22 @@ _MAX_IMAGE_BYTES = 8 * 1024 * 1024
 _MAX_IMAGE_DIM = 1600
 
 
+def _detect_image_mime(data: bytes) -> str | None:
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if data.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if data.startswith(b"GIF87a") or data.startswith(b"GIF89a"):
+        return "image/gif"
+    if data.startswith(b"RIFF") and data[8:12] == b"WEBP":
+        return "image/webp"
+    if data.startswith(b"BM"):
+        return "image/bmp"
+    if data.startswith(b"\x00\x00\x01\x00"):
+        return "image/x-icon"
+    return None
+
+
 def _download_and_encode_image(url: str, max_width: int = 800) -> str:
     """下載圖片並轉為 base64 data URI
 
@@ -111,11 +127,13 @@ def _process_markdown_images(text: str) -> str:
         return text
 
     # 匹配 Markdown 圖片語法：![alt](url)
-    md_img = re.compile(r'!\[([^\]]*)\]\(([^)]+)\)')
+    md_img = re.compile(r'!\[([^\]]*)\]\((<[^>]+>|[^)]+)\)')
 
     def replace_image(match):
         alt = match.group(1)
         url = match.group(2).strip()
+        if url.startswith("<") and url.endswith(">"):
+            url = url[1:-1].strip()
 
         # 提取 width 參數（如果有）
         width_match = re.search(r'=\s*(\d+)', url)
@@ -128,14 +146,28 @@ def _process_markdown_images(text: str) -> str:
 
         # 下載並轉換
         data_uri = _download_and_encode_image(url, max_width=width)
+        if not data_uri.startswith("data:image/"):
+            label = alt if alt else "image"
+            if url:
+                return f"[{label}]({url})"
+            return ""
 
-        # 返回新的 Markdown
-        return f'![{alt}]({data_uri})'
+        safe_alt = alt.replace('"', '\\"') if alt else ""
+        return (
+            f'<div style="margin: 6px 0 10px 0;">'
+            f'<img src="{data_uri}" alt="{safe_alt}" '
+            f'style="max-width: 100%; height: auto; display: block; margin: 0 0 4px 0;" />'
+            f'<a href="{data_uri}" '
+            f'style="display: inline-block; padding: 2px 6px; '
+            f'background: rgba(0, 0, 0, 0.55); color: #CFE9FF; text-decoration: none; '
+            f'border-radius: 6px; font-size: 10px;">Save</a>'
+            f'</div>'
+        )
 
     return md_img.sub(replace_image, text)
 
 from PySide6.QtCore import Qt, QTimer, QVariantAnimation, QPropertyAnimation, QEasingCurve, Property, QMetaObject, Signal, Slot, QEventLoop, QUrl, QSize, QSizeF, QBuffer, QByteArray, QIODeviceBase
-from PySide6.QtGui import QColor, QPainter, QPen, QRadialGradient, QKeyEvent, QPixmap, QMovie, QGuiApplication, QCursor, QConicalGradient, QLinearGradient, QImage, QTextCursor, QTextDocument, QTextImageFormat
+from PySide6.QtGui import QColor, QPainter, QPen, QRadialGradient, QKeyEvent, QPixmap, QMovie, QGuiApplication, QCursor, QConicalGradient, QLinearGradient, QImage, QTextCursor, QTextDocument, QTextImageFormat, QDesktopServices
 
 # QtWebEngine is optional - only import when needed
 try:
@@ -212,6 +244,13 @@ class AutoWrapTextBrowser(QTextBrowser):
         self._refresh_image_buttons_pending = False
         try:
             self.document().contentsChanged.connect(self._on_contents_changed)
+            self.document().resourceLoaded.connect(self._on_resource_loaded)
+        except Exception:
+            pass
+        self.setOpenLinks(False)
+        self.setOpenExternalLinks(False)
+        try:
+            self.anchorClicked.connect(self._handle_anchor_clicked)
         except Exception:
             pass
 
@@ -219,11 +258,55 @@ class AutoWrapTextBrowser(QTextBrowser):
         self.update_wrap_width()
         self._schedule_refresh_image_buttons()
 
+    def _on_resource_loaded(self, *_args):
+        self._schedule_refresh_image_buttons()
+
+    def setOpenExternalLinks(self, open_external: bool) -> None:
+        super().setOpenExternalLinks(False)
+
+    def _handle_anchor_clicked(self, url: QUrl) -> None:
+        try:
+            url_str = url.toString()
+            if url.scheme() == "data" and url_str.startswith("data:image/"):
+                self._save_data_uri(url_str)
+                return
+        except Exception:
+            pass
+        QDesktopServices.openUrl(url)
+
+    def _save_data_uri(self, data_uri: str) -> None:
+        try:
+            if not data_uri.startswith("data:image/"):
+                return
+            header, b64data = data_uri.split(",", 1)
+            mime_part = header.split(";", 1)[0]
+            ext = "png"
+            if "/" in mime_part:
+                ext = mime_part.split("/", 1)[1] or "png"
+            raw = base64.b64decode(b64data)
+            image = QImage.fromData(raw)
+            if image.isNull():
+                return
+            default_dir = os.path.expanduser("~")
+            default_path = os.path.join(default_dir, f"image.{ext}")
+            path, _ = QFileDialog.getSaveFileName(
+                self,
+                "Save Image",
+                default_path,
+                "Images (*.png *.jpg *.jpeg *.bmp)",
+            )
+            if not path:
+                return
+            image.save(path)
+        except Exception:
+            pass
+
     def _schedule_refresh_image_buttons(self):
         if self._refresh_image_buttons_pending:
             return
         self._refresh_image_buttons_pending = True
         QTimer.singleShot(0, self._refresh_image_buttons)
+        QTimer.singleShot(60, self._refresh_image_buttons)
 
     def _clear_image_buttons(self):
         for btn in self._image_buttons:
@@ -328,9 +411,6 @@ class AutoWrapTextBrowser(QTextBrowser):
             block = doc.begin()
             while block.isValid():
                 block_layout = block.layout()
-                if block_layout is None:
-                    block = block.next()
-                    continue
                 block_rect = layout.blockBoundingRect(block)
                 it = block.begin()
                 while not it.atEnd():
@@ -340,12 +420,19 @@ class AutoWrapTextBrowser(QTextBrowser):
                         if fmt.isImageFormat():
                             img_fmt = QTextImageFormat(fmt)
                             pos_in_block = fragment.position() - block.position()
-                            line = block_layout.lineForTextPosition(pos_in_block)
-                            if not line.isValid():
-                                it += 1
-                                continue
-                            x = block_rect.left() + line.x() + line.cursorToX(pos_in_block)
-                            y = block_rect.top() + line.y()
+                            line_y = 0.0
+                            line_doc_x = block_rect.left()
+                            if block_layout is not None:
+                                line = block_layout.lineForTextPosition(pos_in_block)
+                                if line.isValid():
+                                    line_doc_x = (
+                                        block_rect.left()
+                                        + line.x()
+                                        + line.cursorToX(pos_in_block)
+                                    )
+                                    line_y = line.y()
+                            x = line_doc_x
+                            y = block_rect.top() + line_y
                             img_w = img_fmt.width() or 0
                             img_h = img_fmt.height() or 0
                             if img_w <= 0 or img_h <= 0:
@@ -357,8 +444,7 @@ class AutoWrapTextBrowser(QTextBrowser):
                                     img_w = res.width()
                                     img_h = res.height()
                             if img_w <= 0 or img_h <= 0:
-                                it += 1
-                                continue
+                                img_h = 1
 
                             view_x = int(x - offset.x())
                             view_y = int(y - offset.y())
@@ -450,6 +536,10 @@ class AutoWrapTextBrowser(QTextBrowser):
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self.update_wrap_width()
+        self._schedule_refresh_image_buttons()
+
+    def showEvent(self, event):
+        super().showEvent(event)
         self._schedule_refresh_image_buttons()
 
 
@@ -1893,7 +1983,7 @@ class EdgeHandle(QWidget):
         self._on_activate = on_activate
         self._collapsed_width = 16
         self._expanded_width = 24
-        self._height = 180
+        self._height = 140
         self._screen_geo = None
         self._side = "right"
         self._hovered = False
@@ -2065,18 +2155,26 @@ class EdgeHandle(QWidget):
         painter.setBrush(Qt.NoBrush)
         painter.drawRoundedRect(rect.adjusted(2, 2, -2, -2), 9, 9)
 
-        # Body with a soft dark mid-band
-        mid_dark = QColor(18, 18, 18, 230)
-        edge_soft = QColor(38, 38, 38, 220)
-        grad = QLinearGradient(rect.topLeft(), rect.bottomLeft())
-        if self._active_glow:
-            wave = math.sin(math.radians(self._glow_angle))
-            mid_pos = 0.45 + (wave * 0.06)
+        # Body fill
+        if self._hovered:
+            grad = QLinearGradient(rect.topLeft(), rect.bottomLeft())
+            grad.setColorAt(0.0, QColor(18, 24, 34, 235))
+            grad.setColorAt(0.35, QColor(22, 42, 60, 240))
+            grad.setColorAt(0.6, QColor(30, 74, 92, 245))
+            grad.setColorAt(0.82, QColor(44, 110, 120, 245))
+            grad.setColorAt(1.0, QColor(64, 132, 140, 245))
         else:
-            mid_pos = 0.45
-        grad.setColorAt(0.0, edge_soft)
-        grad.setColorAt(max(0.2, min(0.8, mid_pos)), mid_dark)
-        grad.setColorAt(1.0, edge_soft)
+            mid_dark = QColor(18, 18, 18, 230)
+            edge_soft = QColor(38, 38, 38, 220)
+            grad = QLinearGradient(rect.topLeft(), rect.bottomLeft())
+            if self._active_glow:
+                wave = math.sin(math.radians(self._glow_angle))
+                mid_pos = 0.45 + (wave * 0.06)
+            else:
+                mid_pos = 0.45
+            grad.setColorAt(0.0, edge_soft)
+            grad.setColorAt(max(0.2, min(0.8, mid_pos)), mid_dark)
+            grad.setColorAt(1.0, edge_soft)
 
         painter.setPen(QPen(border_color, 1.5))
         painter.setBrush(grad)
