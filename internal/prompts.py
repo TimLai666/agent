@@ -88,16 +88,16 @@ def build_combined_system_prompt(
     """
     parts: list[str] = []
 
-    # 添加基礎 prompt
+    # 添加基礎 prompt（進行變數代換）
     if base_prompt is None:
         base_prompt = _build_system_prompt()
     if base_prompt:
-        parts.append(base_prompt)
+        parts.append(_process_variables(base_prompt))
 
-    # 添加額外的 prompts
+    # 添加額外的 prompts（進行變數代換）
     if additional_prompts:
         for prompt_name in additional_prompts:
-            prompt = get_system_prompt(prompt_name)
+            prompt = get_system_prompt_processed(prompt_name)
             if prompt:
                 parts.append(prompt)
 
@@ -150,8 +150,12 @@ def _process_variables(text: str, variables: dict[str, str] | None = None) -> st
         "SEARCH_TOOL_NAME": "find_files_with_fragment",  # 搜尋檔案
         "WEBFETCH_TOOL_NAME": "fetch",  # 瀏覽網站內容
         "WEBSEARCH_TOOL_NAME": "web_search",  # 網路搜尋（使用 DuckDuckGo）
-        "ASKUSERQUESTION_TOOL_NAME": "詢問使用者",  # 暫時用中文描述
-        "TODO_TOOL_NAME": "待辦事項管理",  # 暫時用中文描述
+        "ASKUSERQUESTION_TOOL_NAME": "ask_user_question",  # 舊版變數名
+        "ASK_USER_QUESTION_TOOL_NAME": "ask_user_question",
+        "ASK_USER_QUESTION_TOOL": "ask_user_question",
+        "EXIT_PLAN_MODE_TOOL_NAME": "exit_plan_mode",
+        "EXIT_PLAN_MODE_TOOL_OBJECT_NAME": "exit_plan_mode",
+        "TODO_TOOL_NAME": "todo",
         # Agent 類型
         "EXPLORE_AGENT": "explore",  # 探索 agent 類型
         "CLAUDE_CODE_GUIDE_SUBAGENT_TYPE": "guide",  # 指南 agent 類型
@@ -178,6 +182,18 @@ def _process_variables(text: str, variables: dict[str, str] | None = None) -> st
 
     # 處理函數調用格式 ${FUNCTION_NAME()}
     text = re.sub(r'\$\{([A-Z_]+)\(\)\}', lambda m: default_vars.get(m.group(1), m.group(0)), text)
+
+    # 處理屬性存取格式 ${VAR.name} / ${VAR.agentType}
+    text = re.sub(
+        r'\$\{([A-Z_]+)\.name\}',
+        lambda m: default_vars.get(f"{m.group(1)}_NAME", default_vars.get(m.group(1), m.group(0))),
+        text,
+    )
+    text = re.sub(
+        r'\$\{([A-Z_]+)\.agentType\}',
+        lambda m: default_vars.get(f"{m.group(1)}_AGENT_TYPE", default_vars.get(m.group(1), m.group(0))),
+        text,
+    )
 
     # 處理簡單變量格式 ${VARIABLE_NAME}
     text = re.sub(r'\$\{([A-Z_]+)\}', lambda m: default_vars.get(m.group(1), m.group(0)), text)
