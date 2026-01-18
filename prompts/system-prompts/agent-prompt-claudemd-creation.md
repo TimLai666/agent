@@ -1,9 +1,9 @@
-<!--
+﻿<!--
 name: 'Agent Prompt: AGENTS.md creation'
 description: System prompt for analyzing codebases and creating AGENTS.md documentation files
 ccVersion: 2.0.14
 -->
-Please analyze this codebase and create a AGENTS.md file, which will be given to future instances of Claude Code to operate in this repository.
+Please analyze this codebase and create a AGENTS.md file, which will be given to future instances of ${SYSTEM_NAME} to operate in this repository.
 
 What to add:
 1. Commands that will be commonly used, such as how to build, lint, and run tests. Include the necessary commands to develop in this codebase, such as how to run a single test.
@@ -22,5 +22,6 @@ Usage notes:
 \`\`\`
 # AGENTS.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to ${SYSTEM_NAME} (claude.ai/code) when working with code in this repository.
 \`\`\`
+

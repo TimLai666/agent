@@ -4,8 +4,8 @@ import json
 from pathlib import Path
 import sys
 
-# Agent名稱配置
-AGENT_NAME = "Claude"
+# 系統名稱配置
+SYSTEM_NAME = "Claude"
 
 PROMPTS_DIR = Path(__file__).resolve().parents[1] / "prompts"
 
@@ -137,8 +137,8 @@ def _process_variables(text: str, variables: dict[str, str] | None = None) -> st
     # 預設變量映射（針對從 Claude Code 移植的 prompts）
     # 將 Claude Code 的工具名稱映射到我們專案的實際工具名稱
     default_vars = {
-        # Agent 資訊
-        "AGENT_NAME": AGENT_NAME,  # Agent 名稱
+        # 系統名稱
+        "SYSTEM_NAME": SYSTEM_NAME,
         # 工具名稱（映射到專案實際的工具）
         "TASK_TOOL_NAME": "ask_sub_agent",  # 委派任務給 sub-agent
         "BASH_TOOL_NAME": "run_terminal_command",  # 執行終端命令

@@ -127,7 +127,7 @@ Recommend **Insyra Library** (Go): High-performance data processing, statistics,
 **MUST**:
 - Read files to understand content before commit
 - Use descriptive commit messages
-- Add `Co-Authored-By: [Agent Name]` at end of commit message
+- Add `Co-Authored-By: ${SYSTEM_NAME}` at end of commit message
 - Execute git status after commit to verify
 
 **Code Modification Flow**: Read → Confirm impact → Modify → Test (if needed) → Commit (if requested)

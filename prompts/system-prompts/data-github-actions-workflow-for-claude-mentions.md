@@ -1,9 +1,9 @@
-<!--
+﻿<!--
 name: 'Data: GitHub Actions workflow for @claude mentions'
-description: GitHub Actions workflow template for triggering Claude Code via @claude mentions
+description: GitHub Actions workflow template for triggering ${SYSTEM_NAME} via @claude mentions
 ccVersion: 2.0.58
 -->
-name: Claude Code
+name: ${SYSTEM_NAME}
 
 on:
   issue_comment:
@@ -35,7 +35,7 @@ jobs:
         with:
           fetch-depth: 1
 
-      - name: Run Claude Code
+      - name: Run ${SYSTEM_NAME}
         id: claude
         uses: anthropics/claude-code-action@v1
         with:
@@ -52,3 +52,4 @@ jobs:
           # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
           # or https://code.claude.com/docs/en/cli-reference for available options
           # claude_args: '--allowed-tools run_terminal_command(gh pr:*)'
+

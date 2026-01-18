@@ -209,6 +209,106 @@
             box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
         }
 
+        .custom-select-hidden {
+            position: absolute;
+            opacity: 0;
+            pointer-events: none;
+            height: 0;
+            width: 0;
+        }
+
+        .custom-select {
+            position: relative;
+            width: 100%;
+        }
+
+        .custom-select__button {
+            width: 100%;
+            padding: 10px 36px 10px 10px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            font-size: 14px;
+            text-align: left;
+            background: white;
+            cursor: pointer;
+            position: relative;
+        }
+
+        .custom-select__button:focus {
+            outline: none;
+            border-color: #667eea;
+            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+        }
+
+        .custom-select__button::after {
+            content: "";
+            position: absolute;
+            right: 12px;
+            top: 50%;
+            transform: translateY(-50%);
+            border-left: 5px solid transparent;
+            border-right: 5px solid transparent;
+            border-top: 6px solid #666;
+        }
+
+        .custom-select.is-open .custom-select__button::after {
+            border-top-color: transparent;
+            border-bottom: 6px solid #666;
+            top: 45%;
+        }
+
+        .custom-select.is-disabled .custom-select__button {
+            background: #f5f5f5;
+            color: #999;
+            cursor: not-allowed;
+        }
+
+        .custom-select__list {
+            position: absolute;
+            left: 0;
+            right: 0;
+            top: calc(100% + 4px);
+            background: white;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            box-shadow: 0 10px 20px rgba(0, 0, 0, 0.15);
+            max-height: 260px;
+            overflow-y: auto;
+            z-index: 2000;
+            display: none;
+        }
+
+        .custom-select.is-open .custom-select__list {
+            display: block;
+        }
+
+        .custom-select__group {
+            padding: 6px 10px;
+            font-size: 12px;
+            font-weight: bold;
+            color: #666;
+            background: #f5f5f5;
+        }
+
+        .custom-select__option {
+            padding: 8px 10px;
+            cursor: pointer;
+        }
+
+        .custom-select__option:hover {
+            background: #f1f3ff;
+        }
+
+        .custom-select__option.is-selected {
+            background: #667eea;
+            color: white;
+        }
+
+        .custom-select__option.is-disabled {
+            color: #999;
+            cursor: not-allowed;
+        }
+
         .modal {
             display: none;
             position: fixed;
@@ -979,6 +1079,157 @@
     </div>
 
     <script>
+        const customSelectRegistry = new Map();
+        let customSelectEventsBound = false;
+
+        function initCustomSelects() {
+            document.querySelectorAll('select').forEach((select) => {
+                if (customSelectRegistry.has(select)) {
+                    return;
+                }
+                buildCustomSelect(select);
+            });
+
+            if (!customSelectEventsBound) {
+                document.addEventListener('click', (event) => {
+                    const openSelect = event.target.closest('.custom-select');
+                    closeAllCustomSelects(openSelect);
+                });
+                document.addEventListener('keydown', (event) => {
+                    if (event.key === 'Escape') {
+                        closeAllCustomSelects(null);
+                    }
+                });
+                document.querySelectorAll('form').forEach((form) => {
+                    form.addEventListener('reset', () => {
+                        setTimeout(syncAllCustomSelects, 0);
+                    });
+                });
+                customSelectEventsBound = true;
+            }
+        }
+
+        function buildCustomSelect(select) {
+            select.classList.add('custom-select-hidden');
+
+            const wrapper = document.createElement('div');
+            wrapper.className = 'custom-select';
+
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.className = 'custom-select__button';
+
+            const list = document.createElement('div');
+            list.className = 'custom-select__list';
+
+            wrapper.appendChild(button);
+            wrapper.appendChild(list);
+            select.insertAdjacentElement('afterend', wrapper);
+
+            button.addEventListener('click', () => {
+                if (select.disabled) {
+                    return;
+                }
+                const isOpen = wrapper.classList.contains('is-open');
+                closeAllCustomSelects(wrapper);
+                if (!isOpen) {
+                    wrapper.classList.add('is-open');
+                }
+            });
+
+            list.addEventListener('click', (event) => {
+                const optionEl = event.target.closest('.custom-select__option');
+                if (!optionEl || optionEl.classList.contains('is-disabled')) {
+                    return;
+                }
+                const index = Number(optionEl.dataset.index);
+                if (!Number.isNaN(index)) {
+                    select.selectedIndex = index;
+                    select.dispatchEvent(new Event('change', { bubbles: true }));
+                }
+                wrapper.classList.remove('is-open');
+                refreshCustomSelect(select);
+            });
+
+            const observer = new MutationObserver(() => {
+                refreshCustomSelect(select);
+            });
+            observer.observe(select, { childList: true, subtree: true, attributes: true, attributeFilter: ['disabled'] });
+
+            select.addEventListener('change', () => {
+                refreshCustomSelect(select);
+            });
+
+            customSelectRegistry.set(select, { wrapper, button, list, observer });
+            refreshCustomSelect(select);
+        }
+
+        function closeAllCustomSelects(exceptWrapper) {
+            customSelectRegistry.forEach(({ wrapper }) => {
+                if (!exceptWrapper || wrapper !== exceptWrapper) {
+                    wrapper.classList.remove('is-open');
+                }
+            });
+        }
+
+        function refreshCustomSelect(select) {
+            const entry = customSelectRegistry.get(select);
+            if (!entry) {
+                return;
+            }
+            const { wrapper, button, list } = entry;
+            const options = Array.from(select.options);
+            list.innerHTML = '';
+
+            let lastGroup = null;
+            options.forEach((option, index) => {
+                const groupLabel = option.parentElement && option.parentElement.tagName === 'OPTGROUP'
+                    ? option.parentElement.label
+                    : null;
+                if (groupLabel && groupLabel !== lastGroup) {
+                    const groupEl = document.createElement('div');
+                    groupEl.className = 'custom-select__group';
+                    groupEl.textContent = groupLabel;
+                    list.appendChild(groupEl);
+                    lastGroup = groupLabel;
+                } else if (!groupLabel) {
+                    lastGroup = null;
+                }
+
+                const optionEl = document.createElement('div');
+                optionEl.className = 'custom-select__option';
+                optionEl.dataset.index = String(index);
+                optionEl.textContent = option.textContent;
+
+                if (option.disabled) {
+                    optionEl.classList.add('is-disabled');
+                }
+                if (option.selected) {
+                    optionEl.classList.add('is-selected');
+                }
+
+                list.appendChild(optionEl);
+            });
+
+            const selectedOption = options[select.selectedIndex];
+            button.textContent = selectedOption ? selectedOption.textContent : '';
+            button.disabled = select.disabled;
+            wrapper.classList.toggle('is-disabled', select.disabled);
+        }
+
+        function syncAllCustomSelects() {
+            document.querySelectorAll('select').forEach((select) => {
+                refreshCustomSelect(select);
+            });
+        }
+
+        function syncCustomSelectById(id) {
+            const select = document.getElementById(id);
+            if (select) {
+                refreshCustomSelect(select);
+            }
+        }
+
         // Tab switching
         function switchTab(tab) {
             document.querySelectorAll('.tab-button').forEach(btn => btn.classList.remove('active'));
@@ -1472,8 +1723,10 @@
                 if (result.success && result.config) {
                     // 已有默認配置，填充表單
                     document.getElementById('default_provider').value = result.config.provider_id;
+                    syncCustomSelectById('default_provider');
                     await loadDefaultProviderModels();
                     document.getElementById('default_model').value = result.config.model_name;
+                    syncCustomSelectById('default_model');
                     document.getElementById('default_temperature').value = result.config.temperature || 0.2;
                     document.getElementById('delete-default-btn').style.display = 'inline-block';
                 } else {
@@ -1650,8 +1903,10 @@
 
                 if (result.success && result.config) {
                     document.getElementById('default_provider').value = result.config.provider_id;
+                    syncCustomSelectById('default_provider');
                     await loadDefaultProviderModels();
                     document.getElementById('default_model').value = result.config.model_name;
+                    syncCustomSelectById('default_model');
                     document.getElementById('default_temperature').value = result.config.temperature || 0.2;
                     document.getElementById('delete-default-btn').style.display = 'inline-block';
                 } else {
@@ -1729,8 +1984,10 @@
 
                 if (result.success && result.config) {
                     document.getElementById('subagent_provider').value = result.config.provider_id;
+                    syncCustomSelectById('subagent_provider');
                     await loadSubagentProviderModels();
                     document.getElementById('subagent_model').value = result.config.model_name;
+                    syncCustomSelectById('subagent_model');
                     document.getElementById('subagent_temperature').value = result.config.temperature || 0.2;
                     document.getElementById('delete-subagent-default-btn').style.display = 'inline-block';
                 } else {
@@ -1852,8 +2109,10 @@
 
                 if (result.success && result.config) {
                     document.getElementById('core_provider').value = result.config.provider_id;
+                    syncCustomSelectById('core_provider');
                     await loadCoreProviderModels();
                     document.getElementById('core_model').value = result.config.model_name;
+                    syncCustomSelectById('core_model');
                     document.getElementById('core_temperature').value = result.config.temperature || 0.2;
                     document.getElementById('delete-core-default-btn').style.display = 'inline-block';
                 } else {
@@ -1999,8 +2258,10 @@
 
                 if (result.success && result.config) {
                     document.getElementById('coagent_provider').value = result.config.provider_id;
+                    syncCustomSelectById('coagent_provider');
                     await loadCoagentProviderModels();
                     document.getElementById('coagent_model').value = result.config.model_name;
+                    syncCustomSelectById('coagent_model');
                     document.getElementById('coagent_temperature').value = result.config.temperature || 0.2;
                     document.getElementById('delete-coagent-default-btn').style.display = 'inline-block';
                 } else {
@@ -2113,8 +2374,10 @@
 
                 if (result.success && result.config) {
                     document.getElementById('category_provider').value = result.config.provider_id;
+                    syncCustomSelectById('category_provider');
                     await loadCategoryProviderModels();
                     document.getElementById('category_model').value = result.config.model_name;
+                    syncCustomSelectById('category_model');
                     document.getElementById('category_temperature').value = result.config.temperature || 0.2;
                     document.getElementById('delete-category-default-btn').style.display = 'inline-block';
                 } else {
@@ -2465,6 +2728,7 @@
 
         // Initial load
 
+        initCustomSelects();
         loadProviders();
 
 

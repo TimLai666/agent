@@ -1,15 +1,15 @@
-<!--
+﻿<!--
 name: 'Data: GitHub App installation PR description'
-description: Template for PR description when installing Claude Code GitHub App integration
+description: Template for PR description when installing ${SYSTEM_NAME} GitHub App integration
 ccVersion: 2.0.14
 -->
-## \uD83E\uDD16 Installing Claude Code GitHub App
+## \uD83E\uDD16 Installing ${SYSTEM_NAME} GitHub App
 
-This PR adds a GitHub Actions workflow that enables Claude Code integration in our repository.
+This PR adds a GitHub Actions workflow that enables ${SYSTEM_NAME} integration in our repository.
 
-### What is Claude Code?
+### What is ${SYSTEM_NAME}?
 
-[Claude Code](https://claude.com/claude-code) is an AI coding agent that can help with:
+[${SYSTEM_NAME}](https://claude.com/claude-code) is an AI coding agent that can help with:
 - Bug fixes and improvements  
 - Documentation updates
 - Implementing new features
@@ -41,6 +41,7 @@ Once the workflow is triggered, Claude will analyze the comment and surrounding 
 allowed_tools: run_terminal_command(npm install),run_terminal_command(npm run build),run_terminal_command(npm run lint),run_terminal_command(npm run test)
 \`\`\`
 
-There's more information in the [Claude Code action repo](https://github.com/anthropics/claude-code-action).
+There's more information in the [${SYSTEM_NAME} action repo](https://github.com/anthropics/claude-code-action).
 
 After merging this PR, let's try mentioning @claude in a comment on any PR to get started!
+
