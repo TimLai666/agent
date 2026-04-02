@@ -103,6 +103,8 @@ class AgentRuntime(QThread):
         args = event.get("args") or ()
         kwargs = event.get("kwargs") or {}
         stage = str(event.get("stage") or "")
+        is_skill_call = tool == "use_skill"
+        explicit_skill_name = str(event.get("skill_name") or "").strip()
 
         def _trim(value: str, limit: int = 80) -> str:
             value = value.strip()
@@ -117,6 +119,8 @@ class AgentRuntime(QThread):
                 raw = kwargs.get("skill_name")
                 if isinstance(raw, str):
                     skill_name = raw.strip()
+            if not skill_name and explicit_skill_name:
+                skill_name = explicit_skill_name
             if not skill_name and args:
                 first = args[0]
                 if isinstance(first, str):
@@ -139,6 +143,19 @@ class AgentRuntime(QThread):
                 pass
 
         label = tool if not detail else f"{tool} ({detail})"
+
+        if is_skill_call:
+            if stage == "skill-activated":
+                return f"[SKILL] {label}"
+            if stage == "start":
+                return f"[SKILL>] {label}"
+            if stage == "end":
+                return f"[SKILL OK] {label}"
+            if stage == "error":
+                error = str(event.get("error") or "")
+                suffix = f": {error}" if error else ""
+                return f"[SKILL ERR] {label}{suffix}"
+            return f"[SKILL] {label}"
 
         if stage == "start":
             return f"[>] {label}"

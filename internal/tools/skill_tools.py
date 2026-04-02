@@ -68,6 +68,19 @@ Returns:
     # Register the tool with dynamic description
     @agent.tool_plain(description=tool_description)
     def use_skill(skill_name: str) -> str:
+        callback = getattr(agent, "_tool_event_callback", None)
+        if callback:
+            try:
+                callback(
+                    {
+                        "stage": "skill-activated",
+                        "tool": "use_skill",
+                        "skill_name": skill_name,
+                    }
+                )
+            except Exception:
+                logger.debug("Tool event callback failed on skill activation.", exc_info=True)
+
         # Get the skill
         skill = skills.get_skill(skill_name)
 
