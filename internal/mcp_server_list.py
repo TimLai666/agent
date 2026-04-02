@@ -3,7 +3,6 @@ from internal.mcp.client_builder import McpClient
 from internal.mcp.fetch import fetch
 from internal.mcp.browser import playwright
 from internal.mcp.taiwan_holiday import taiwan_holiday
-from internal.mcp.package_docs import package_docs
 from internal.services.config_db import list_mcp_tools, list_remote_mcps, get_mcp_last_updated
 from internal.mcp.remote_mcp_loader import load_remote_mcp_from_url
 from internal.logger import logger
@@ -19,7 +18,6 @@ def get_built_in_mcp_servers() -> list[MCPServerStdio]:
     """Returns a fresh list of built-in MCP servers."""
     return [
         fetch, playwright, taiwan_holiday,
-        package_docs,
     ]
 
 
