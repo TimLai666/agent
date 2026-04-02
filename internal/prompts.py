@@ -2,10 +2,11 @@ from datetime import date
 from functools import lru_cache
 import json
 from pathlib import Path
+import re
 import sys
 
-# 系統名稱配置
-SYSTEM_NAME = "Claude"
+# 系統名稱配置（避免注入特定廠商或模型身分）
+SYSTEM_NAME = "Assistant"
 
 PROMPTS_DIR = Path(__file__).resolve().parents[1] / "prompts"
 
@@ -178,8 +179,6 @@ def _process_variables(text: str, variables: dict[str, str] | None = None) -> st
     if variables:
         default_vars.update(variables)
 
-    import re
-
     # 處理函數調用格式 ${FUNCTION_NAME()}
     text = re.sub(r'\$\{([A-Z_]+)\(\)\}', lambda m: default_vars.get(m.group(1), m.group(0)), text)
 
@@ -200,6 +199,10 @@ def _process_variables(text: str, variables: dict[str, str] | None = None) -> st
 
     # 移除複雜的函數調用（帶參數或複雜邏輯）
     text = re.sub(r'\$\{[^}]+\([^)]*\)[^}]*\}', '', text)
+
+    # 清除 Claude/Anthropic 身分注入（保留工具識別字串，不改 mcp__claude-in-chrome 這類名稱）
+    text = re.sub(r'\bClaude\b', 'assistant', text, flags=re.IGNORECASE)
+    text = re.sub(r'\bAnthropic\b', 'provider', text, flags=re.IGNORECASE)
 
     return text
 
