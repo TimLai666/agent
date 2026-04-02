@@ -239,43 +239,20 @@ Skills（專家指導）> Tools（執行操作）> 直接回答
 
 ### 實際效果
 
-當 skill 被激活時，會在 context 中加入：
+當 agent 呼叫 `use_skill` 時，會取得：
 
-```markdown
-# Active Skills (PRIORITY: Use these BEFORE tools)
-
-**IMPORTANT**: 優先使用以下 skills 的知識和方法論...
-
-## code-review
-[內容...]
-
----
-**Remember**: 遵循 skills 指導再使用 tools
-```
+1. 該 skill 的指導內容
+2. 若存在，附帶 bundled resources（scripts/references/assets）路徑
 
 ## 🔧 配置
 
-### 匹配參數
+### 路徑配置
 
-```python
-# 在 MainAgent._apply_skills() 中
-relevant_skills = self.skills.find_relevant_skills(
-    prompt,
-    max_skills=3,      # 最多激活 3 個
-    min_score=0.1,     # 最低相關性 0.1
-    use_llm=False      # 使用關鍵詞匹配（快）
-)
+```bash
+python main.py --skills-dir skills extra_skills
 ```
 
-### LLM 評分模式
-
-```python
-# 啟用 LLM 評分（更準確但較慢）
-registry = load_skill_registry(
-    enable_llm_scoring=True,
-    agent=your_agent
-)
-```
+系統會從多個 root 遞迴掃描 `SKILL.md`。
 
 ## 🐛 故障排查
 
@@ -289,9 +266,6 @@ registry = load_skill_registry(
 ## 📚 完整文檔
 
 - **系統架構**: [docs/SKILLS_SYSTEM.md](docs/SKILLS_SYSTEM.md)
-- **完整實現**: [docs/SKILLS_FULL_IMPLEMENTATION.md](docs/SKILLS_FULL_IMPLEMENTATION.md)
-- **使用指南**: [docs/SKILLS_USAGE_IN_AGENTS.md](docs/SKILLS_USAGE_IN_AGENTS.md)
-- **配對與優先級**: [docs/SKILLS_MATCHING_AND_PRIORITY.md](docs/SKILLS_MATCHING_AND_PRIORITY.md) ⭐ NEW
 - **日誌系統**: [docs/SKILLS_LOGGING.md](docs/SKILLS_LOGGING.md)
 - **指令文檔**: [docs/SKILLS_COMMANDS.md](docs/SKILLS_COMMANDS.md)
 - **vs Tools**: [docs/SKILLS_VS_TOOLS.md](docs/SKILLS_VS_TOOLS.md)
@@ -324,7 +298,7 @@ description: A helpful skill for coding.
 
 **Skills 系統提供：**
 - ✅ 知識注入（vs Tools 的執行）
-- ✅ 自動激活（vs 手動調用）
+- ✅ `use_skill` 工具啟用
 - ✅ Progressive disclosure（按需載入）
 - ✅ 完整的指令支援（查看、測試、重載）
 - ✅ 詳細的日誌記錄

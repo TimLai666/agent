@@ -142,7 +142,10 @@ internal/
 
 docs/
 ├── SKILLS_SYSTEM.md              # 系統文檔
-└── SKILLS_FULL_IMPLEMENTATION.md # 完整實現文檔
+├── SKILLS_COMMANDS.md            # 指令文檔
+├── SKILLS_SCRIPT_EXECUTION.md    # 資源與腳本執行
+├── SKILLS_LOGGING.md             # 日誌說明
+└── SKILLS_VS_TOOLS.md            # Skills 與 Tools 分工
 ```
 
 ## 🚀 使用方式
@@ -277,7 +280,10 @@ Agent：「我有一個 hello_world.py 示例...」
 | `skills/README.md` | Skills 使用指南 | ✅ |
 | `skills/QUICKSTART.md` | 快速入門 | ✅ |
 | `docs/SKILLS_SYSTEM.md` | 系統架構 | ✅ |
-| `docs/SKILLS_FULL_IMPLEMENTATION.md` | 完整實現 | ✅ |
+| `docs/SKILLS_COMMANDS.md` | 指令文檔 | ✅ |
+| `docs/SKILLS_SCRIPT_EXECUTION.md` | 資源與腳本執行 | ✅ |
+| `docs/SKILLS_LOGGING.md` | 日誌說明 | ✅ |
+| `docs/SKILLS_VS_TOOLS.md` | Skills 與 Tools 分工 | ✅ |
 | `SKILLS_SUMMARY.md` | 本文檔 | ✅ |
 
 ## 🎉 總結
