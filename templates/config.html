@@ -456,16 +456,16 @@
         </header>
 
         <div class="tabs">
-            <button class="tab-button active" onclick="switchTab('providers')">
+            <button class="tab-button active" onclick="switchTab(event, 'providers')">
                 🔌 提供者管理
             </button>
-            <button class="tab-button" onclick="switchTab('agents')">
+            <button class="tab-button" onclick="switchTab(event, 'agents')">
                 🤖 Agent 配置
             </button>
-            <button class="tab-button" onclick="switchTab('defaults')">
+            <button class="tab-button" onclick="switchTab(event, 'defaults')">
                 ⚙️ 默認配置
             </button>
-            <button class="tab-button" onclick="switchTab('mcp-tools')">
+            <button class="tab-button" onclick="switchTab(event, 'mcp-tools')">
                 🔨 MCP 工具
             </button>
         </div>
@@ -590,8 +590,114 @@
                     <input type="text" id="provider_name" required placeholder="例如: OpenAI, Anthropic Claude">
                 </div>
 
+                <div class="form-group" id="base-url-group">
+                    <label for="base_url">Base URL</label>
+                    <input type="text" id="base_url" placeholder="留空使用 OpenAI 預設 (https://api.openai.com/v1)">
+                </div>
 
-                <!-- Default Config Modal (Global) -->
+                <div class="form-group" id="api-key-group">
+                    <label for="api_key">API Key</label>
+                    <input type="password" id="api_key" placeholder="sk-...">
+                </div>
+
+                <div class="form-group" id="github-token-group" style="display: none;">
+                    <label for="github_token">GitHub Token</label>
+                    <input type="password" id="github_token" placeholder="ghp_...">
+                    <button type="button" class="btn btn-secondary" style="margin-top: 10px;"
+                        onclick="authenticateGitHub()">
+                        🔐 瀏覽器登入
+                    </button>
+                </div>
+
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" onclick="closeModal('add-provider-modal')">
+                        取消
+                    </button>
+                    <button type="submit" class="btn btn-primary">
+                        新增
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Add Agent Modal -->
+    <div id="add-agent-modal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3 class="modal-title">設定 Agent</h3>
+                <button class="close-btn" onclick="closeModal('add-agent-modal')">&times;</button>
+            </div>
+            <form id="add-agent-form">
+                <div class="form-group">
+                    <label for="agent_name">Agent 名稱 *</label>
+                    <select id="agent_name" required>
+                        <option value="">請選擇 Agent</option>
+                    </select>
+                    <small style="color: #666; display: block; margin-top: 5px;">
+                        從專案中發現的 Agent
+                    </small>
+                </div>
+
+                <div class="form-group">
+                    <label>
+                        <input type="checkbox" id="use_inheritance" onchange="toggleInheritance()">
+                        使用繼承配置（從其他 Agent 繼承）
+                    </label>
+                </div>
+
+                <div id="inheritance-section" style="display: none;">
+                    <div class="form-group">
+                        <label for="inherit_from">繼承自 *</label>
+                        <select id="inherit_from">
+                            <option value="">請選擇父 Agent</option>
+                        </select>
+                        <small style="color: #666; display: block; margin-top: 5px;">
+                            此 Agent 將使用父 Agent 的 Provider 和 Model 配置
+                        </small>
+                    </div>
+                </div>
+
+                <div id="direct-config-section">
+                    <div class="form-group">
+                        <label for="agent_provider">提供者 *</label>
+                        <select id="agent_provider" onchange="loadProviderModels()">
+                            <option value="">請選擇提供者</option>
+                        </select>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="agent_model">模型名稱 *</label>
+                        <select id="agent_model">
+                            <option value="">先選擇提供者</option>
+                        </select>
+                        <small id="model-loading" style="color: #666; display: none; margin-top: 5px;">
+                            載入模型列表中...
+                        </small>
+                    </div>
+                </div>
+
+                <div class="form-group">
+                    <label for="agent_temperature">Temperature (可選)</label>
+                    <input type="number" id="agent_temperature" min="0" max="2" step="0.1" value="0.2">
+                    <small style="color: #666; display: block; margin-top: 5px;">
+                        0.0 = 更確定，2.0 = 更隨機（繼承時可留空使用父配置）
+                    </small>
+                </div>
+
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" onclick="closeModal('add-agent-modal')">
+                        取消
+                    </button>
+                    <button type="submit" class="btn btn-primary">
+                        儲存
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Default Config Modal (Global) -->
                 <div id="default-config-modal" class="modal">
                     <div class="modal-content">
                         <div class="modal-header">
@@ -774,6 +880,15 @@
                 <script>
                     const customSelectRegistry = new Map();
                     let customSelectEventsBound = false;
+                    let _providersCache = null;
+
+                    async function fetchProviders(forceRefresh = false) {
+                        if (!_providersCache || forceRefresh) {
+                            const response = await fetch('/api/providers');
+                            _providersCache = await response.json();
+                        }
+                        return _providersCache;
+                    }
 
                     function initCustomSelects() {
                         document.querySelectorAll('select').forEach((select) => {
@@ -924,11 +1039,11 @@
                     }
 
                     // Tab switching
-                    function switchTab(tab) {
+                    function switchTab(e, tab) {
                         document.querySelectorAll('.tab-button').forEach(btn => btn.classList.remove('active'));
                         document.querySelectorAll('.tab-content').forEach(content => content.classList.remove('active'));
 
-                        event.target.classList.add('active');
+                        e.currentTarget.classList.add('active');
                         document.getElementById(`${tab}-tab`).classList.add('active');
 
                         if (tab === 'providers') {
@@ -1073,8 +1188,7 @@
                         container.innerHTML = '<div class="loading">載入中...</div>';
 
                         try {
-                            const response = await fetch('/api/providers');
-                            const providers = await response.json();
+                            const providers = await fetchProviders(true);
 
                             if (providers.length === 0) {
                                 container.innerHTML = `
@@ -1319,8 +1433,7 @@
                         const select = document.getElementById('agent_provider');
 
                         try {
-                            const response = await fetch('/api/providers');
-                            const providers = await response.json();
+                            const providers = await fetchProviders();
 
                             select.innerHTML = '<option value="">請選擇提供者</option>' +
                                 providers.map(p => `<option value="${p.provider_id}">${p.name}</option>`).join('');
@@ -1331,50 +1444,7 @@
 
                     // Load provider models
                     async function loadProviderModels() {
-                        const providerId = document.getElementById('agent_provider').value;
-                        const modelSelect = document.getElementById('agent_model');
-                        const loadingText = document.getElementById('model-loading');
-
-                        if (!providerId) {
-                            modelSelect.innerHTML = '<option value="">先選擇提供者</option>';
-                            modelSelect.disabled = true;
-                            return;
-                        }
-
-                        modelSelect.innerHTML = '<option value="">載入中...</option>';
-                        modelSelect.disabled = true;
-                        loadingText.style.display = 'block';
-                        loadingText.textContent = '載入模型列表中...';
-                        loadingText.style.color = '#666';
-
-                        try {
-                            const response = await fetch(`/api/providers/${providerId}/models`);
-
-                            if (!response.ok) {
-                                throw new Error(`HTTP ${response.status}`);
-                            }
-
-                            const data = await response.json();
-                            console.log('獲取到的模型數據:', data);
-
-                            if (data.models && data.models.length > 0) {
-                                modelSelect.innerHTML = data.models.map(model =>
-                                    `<option value="${model}">${model}</option>`
-                                ).join('');
-                                loadingText.style.display = 'none';
-                            } else {
-                                modelSelect.innerHTML = '<option value="">無可用模型</option>';
-                                loadingText.textContent = '提示: 請檢查提供者配置或 API 連接';
-                                loadingText.style.color = '#ff9800';
-                            }
-                        } catch (error) {
-                            console.error('載入模型失敗:', error);
-                            modelSelect.innerHTML = '<option value="">載入失敗</option>';
-                            loadingText.textContent = `錯誤: ${error.message}`;
-                            loadingText.style.color = '#f44336';
-                        } finally {
-                            modelSelect.disabled = false;
-                        }
+                        return loadModelsForSelect('agent_provider', 'agent_model', 'model-loading');
                     }
 
                     // GitHub authentication
@@ -1403,45 +1473,13 @@
 
                     // ========== 默認配置相關函數 ==========
 
-                    // 顯示默認配置模態框
-                    async function showDefaultConfigModal() {
-                        // 載入提供者列表
-                        await loadProvidersForDefault();
-
-                        // 載入現有默認配置
-                        try {
-                            const response = await fetch('/api/default-config');
-                            const result = await response.json();
-
-                            if (result.success && result.config) {
-                                // 已有默認配置，填充表單
-                                document.getElementById('default_provider').value = result.config.provider_id;
-                                syncCustomSelectById('default_provider');
-                                await loadDefaultProviderModels();
-                                document.getElementById('default_model').value = result.config.model_name;
-                                syncCustomSelectById('default_model');
-                                document.getElementById('default_temperature').value = result.config.temperature || 0.2;
-                                document.getElementById('delete-default-btn').style.display = 'inline-block';
-                            } else {
-                                // 沒有默認配置，重置表單
-                                document.getElementById('default-config-form').reset();
-                                document.getElementById('delete-default-btn').style.display = 'none';
-                            }
-                        } catch (error) {
-                            console.error('載入默認配置失敗:', error);
-                        }
-
-                        document.getElementById('default-config-modal').classList.add('active');
-                    }
-
-                    // 載入默認配置的提供者列表
-                    async function loadProvidersForDefault() {
-                        const select = document.getElementById('default_provider');
+                    // 共用：載入提供者列表到指定 select
+                    async function loadProvidersForSelect(selectId) {
+                        const select = document.getElementById(selectId);
                         select.innerHTML = '<option value="">載入中...</option>';
 
                         try {
-                            const response = await fetch('/api/providers');
-                            const providers = await response.json();
+                            const providers = await fetchProviders();
 
                             let html = '<option value="">請選擇提供者</option>';
                             providers.forEach(p => {
@@ -1455,27 +1493,28 @@
                         }
                     }
 
-                    // 載入默認配置的模型列表
-                    async function loadDefaultProviderModels() {
-                        const providerId = document.getElementById('default_provider').value;
-                        const modelSelect = document.getElementById('default_model');
-                        const loadingText = document.getElementById('default-model-loading');
+                    // 共用：載入模型列表到指定 select
+                    async function loadModelsForSelect(providerSelectId, modelSelectId, loadingId) {
+                        const providerId = document.getElementById(providerSelectId).value;
+                        const modelSelect = document.getElementById(modelSelectId);
+                        const loadingText = document.getElementById(loadingId);
 
                         if (!providerId) {
                             modelSelect.innerHTML = '<option value="">先選擇提供者</option>';
                             modelSelect.disabled = true;
-                            loadingText.style.display = 'none';
+                            if (loadingText) loadingText.style.display = 'none';
                             return;
                         }
 
                         modelSelect.disabled = true;
                         modelSelect.innerHTML = '<option value="">載入中...</option>';
-                        loadingText.style.display = 'block';
-                        loadingText.textContent = '載入模型列表中...';
-                        loadingText.style.color = '#666';
+                        if (loadingText) {
+                            loadingText.style.display = 'block';
+                            loadingText.textContent = '載入模型列表中...';
+                            loadingText.style.color = '#666';
+                        }
 
                         try {
-                            console.log(`正在獲取提供者 ${providerId} 的模型列表...`);
                             const response = await fetch(`/api/providers/${providerId}/models`);
 
                             if (!response.ok) {
@@ -1483,34 +1522,44 @@
                             }
 
                             const data = await response.json();
-                            console.log('獲取到的默認配置模型數據:', data);
 
                             if (data.models && data.models.length > 0) {
                                 modelSelect.innerHTML = data.models.map(model =>
                                     `<option value="${model}">${model}</option>`
                                 ).join('');
-                                loadingText.style.display = 'none';
+                                if (loadingText) loadingText.style.display = 'none';
                             } else {
                                 modelSelect.innerHTML = '<option value="">無可用模型</option>';
-                                loadingText.textContent = '提示: 請檢查提供者配置或 API 連接';
-                                loadingText.style.color = '#ff9800';
+                                if (loadingText) {
+                                    loadingText.textContent = '提示: 請檢查提供者配置或 API 連接';
+                                    loadingText.style.color = '#ff9800';
+                                }
                             }
                         } catch (error) {
                             console.error('載入模型失敗:', error);
                             modelSelect.innerHTML = '<option value="">載入失敗</option>';
-                            loadingText.textContent = `錯誤: ${error.message}`;
-                            loadingText.style.color = '#f44336';
+                            if (loadingText) {
+                                loadingText.textContent = `錯誤: ${error.message}`;
+                                loadingText.style.color = '#f44336';
+                            }
                         } finally {
                             modelSelect.disabled = false;
                         }
+                    }
+
+                    async function loadProvidersForDefault() {
+                        return loadProvidersForSelect('default_provider');
+                    }
+
+                    async function loadDefaultProviderModels() {
+                        return loadModelsForSelect('default_provider', 'default_model', 'default-model-loading');
                     }
 
                     // ========== 默認配置標籤頁 ==========
 
                     // 載入默認配置標籤頁
                     async function loadDefaultsTab() {
-                        await loadGlobalDefaultStatus();
-                        await loadCoreDefaultStatus();
+                        await Promise.all([loadGlobalDefaultStatus(), loadCoreDefaultStatus()]);
                     }
 
                     // 顯示全域默認配置模態框
@@ -1540,12 +1589,12 @@
                         document.getElementById('default-config-modal').classList.add('active');
                     }
 
-                    // 載入全域默認配置狀態
-                    async function loadGlobalDefaultStatus() {
-                        const statusDiv = document.getElementById('global-default-status');
+                    // 共用：載入默認配置狀態到指定 statusDiv
+                    async function loadDefaultStatus(apiUrl, statusDivId, successMsg, missingMsg, missingHint) {
+                        const statusDiv = document.getElementById(statusDivId);
 
                         try {
-                            const response = await fetch('/api/default-config');
+                            const response = await fetch(apiUrl);
                             const result = await response.json();
 
                             if (result.success && result.config) {
@@ -1553,116 +1602,46 @@
                         <p><strong>提供者:</strong> ${result.config.provider_name}</p>
                         <p><strong>模型:</strong> ${result.config.model_name}</p>
                         <p><strong>Temperature:</strong> ${result.config.temperature}</p>
-                        <p style="color: #4caf50; margin-top: 10px;">✅ 所有未配置的 Agent 將使用此設定</p>
+                        <p style="color: #4caf50; margin-top: 10px;">✅ ${successMsg}</p>
                     `;
                             } else {
                                 statusDiv.innerHTML = `
-                        <p style="color: #ff9800;">⚠️ 尚未設定全域默認配置</p>
-                        <p style="color: #666; font-size: 14px;">建議設定一個全域默認，讓未配置的 Agent 也能運行</p>
+                        <p style="color: #ff9800;">⚠️ ${missingMsg}</p>
+                        <p style="color: #666; font-size: 14px;">${missingHint}</p>
                     `;
                             }
                         } catch (error) {
-                            console.error('載入全域默認狀態失敗:', error);
+                            console.error(`載入狀態失敗 (${apiUrl}):`, error);
                             statusDiv.innerHTML = '<p style="color: #f44336;">載入失敗</p>';
                         }
+                    }
+
+                    async function loadGlobalDefaultStatus() {
+                        return loadDefaultStatus(
+                            '/api/default-config', 'global-default-status',
+                            '所有未配置的 Agent 將使用此設定',
+                            '尚未設定全域默認配置',
+                            '建議設定一個全域默認，讓未配置的 Agent 也能運行'
+                        );
                     }
 
                     // ========== Core 默認配置相關函數 ==========
 
-                    // 載入 Core 默認狀態
                     async function loadCoreDefaultStatus() {
-                        const statusDiv = document.getElementById('core-default-status');
-
-                        try {
-                            const response = await fetch('/api/category-default-config/core');
-                            const result = await response.json();
-
-                            if (result.success && result.config) {
-                                statusDiv.innerHTML = `
-                        <p><strong>提供者:</strong> ${result.config.provider_name}</p>
-                        <p><strong>模型:</strong> ${result.config.model_name}</p>
-                        <p><strong>Temperature:</strong> ${result.config.temperature}</p>
-                        <p style="color: #4caf50; margin-top: 10px;">✅ 所有未配置的 Core Agent 將使用此設定</p>
-                    `;
-                            } else {
-                                statusDiv.innerHTML = `
-                        <p style="color: #ff9800;">⚠️ 尚未設定 Core 默認配置</p>
-                        <p style="color: #666; font-size: 14px;">未設定時將使用全域默認配置</p>
-                    `;
-                            }
-                        } catch (error) {
-                            console.error('載入 Core 默認狀態失敗:', error);
-                            statusDiv.innerHTML = '<p style="color: #f44336;">載入失敗</p>';
-                        }
+                        return loadDefaultStatus(
+                            '/api/category-default-config/core', 'core-default-status',
+                            '所有未配置的 Core Agent 將使用此設定',
+                            '尚未設定 Core 默認配置',
+                            '未設定時將使用全域默認配置'
+                        );
                     }
 
-                    // 載入 Core 的提供者列表
                     async function loadProvidersForCore() {
-                        const select = document.getElementById('core_provider');
-                        select.innerHTML = '<option value="">載入中...</option>';
-
-                        try {
-                            const response = await fetch('/api/providers');
-                            const providers = await response.json();
-
-                            let html = '<option value="">請選擇提供者</option>';
-                            providers.forEach(p => {
-                                html += `<option value="${p.provider_id}">${p.name} (${p.provider_type})</option>`;
-                            });
-
-                            select.innerHTML = html;
-                        } catch (error) {
-                            select.innerHTML = '<option value="">載入失敗</option>';
-                            console.error('載入提供者失敗:', error);
-                        }
+                        return loadProvidersForSelect('core_provider');
                     }
 
-                    // 載入 Core 的模型列表
                     async function loadCoreProviderModels() {
-                        const providerId = document.getElementById('core_provider').value;
-                        const modelSelect = document.getElementById('core_model');
-                        const loadingText = document.getElementById('core-model-loading');
-
-                        if (!providerId) {
-                            modelSelect.innerHTML = '<option value="">先選擇提供者</option>';
-                            modelSelect.disabled = true;
-                            loadingText.style.display = 'none';
-                            return;
-                        }
-
-                        modelSelect.innerHTML = '<option value="">載入中...</option>';
-                        modelSelect.disabled = true;
-                        loadingText.style.display = 'block';
-                        loadingText.textContent = '載入模型列表中...';
-                        loadingText.style.color = '#666';
-
-                        try {
-                            const response = await fetch(`/api/providers/${providerId}/models`);
-
-                            if (!response.ok) {
-                                throw new Error(`HTTP ${response.status}`);
-                            }
-
-                            const data = await response.json();
-
-                            if (data.models && data.models.length > 0) {
-                                modelSelect.innerHTML = data.models.map(model =>
-                                    `<option value="${model}">${model}</option>`
-                                ).join('');
-                                loadingText.style.display = 'none';
-                            } else {
-                                modelSelect.innerHTML = '<option value="">無可用模型</option>';
-                                loadingText.textContent = '提示: 請檢查提供者配置或 API 連接';
-                                loadingText.style.color = '#ff9800';
-                            }
-                        } catch (error) {
-                            console.error('載入模型失敗:', error);
-                            modelSelect.innerHTML = '<option value="">載入失敗</option>';
-                            loadingText.textContent = `錯誤: ${error.message}`;
-                            loadingText.style.color = '#f44336';
-                        } finally {
-                            modelSelect.disabled = false;
-                        }
+                        return loadModelsForSelect('core_provider', 'core_model', 'core-model-loading');
                     }
 
                     // 顯示 Core 默認配置模態框
