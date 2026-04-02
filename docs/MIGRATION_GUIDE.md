@@ -101,8 +101,8 @@ uv run main.py --config
 
 # 2. 為不同 agent 配置不同模型
 main          -> openai        -> gpt-4
-philosopher   -> anthropic     -> claude-3-5-sonnet-20241022
-code-reviewer -> github-copilot -> gpt-4o
+marketing     -> anthropic     -> claude-3-5-sonnet-20241022
+testing       -> github-copilot -> gpt-4o
 ```
 
 ## 故障排除

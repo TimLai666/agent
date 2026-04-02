@@ -28,7 +28,7 @@ class ProviderConfig:
 @dataclass
 class AgentModelConfig:
     """Configuration for a specific agent"""
-    agent_name: str  # e.g., "main", "philosopher", "marketing"
+    agent_name: str  # e.g., "main", "marketing", "function-call"
     provider_id: str  # Reference to ProviderConfig
     model_name: str  # e.g., "gpt-4", "claude-3-5-sonnet"
     temperature: float = 0.2

@@ -204,7 +204,7 @@ class MainAgent:
             model=model,
             system_prompt=enhanced_system_prompt,
             instructions=(
-                "You are the main agent in an internal discussion with the philosopher. "
+                "You are the main agent in an internal self-review discussion. "
                 "Provide a concise candidate answer for the user and respond to critique. "
                 "Do not call tools. Do not include self-validation."
             ),
@@ -354,7 +354,6 @@ class MainAgent:
         http_client: AsyncClient | None = None,
     ) -> None:
         self.agent = agent
-        self.philosopher = None
         self.sub_agents = None
         self.skills = skills
         self._planner_agent = planner_agent or agent
@@ -516,35 +515,6 @@ class MainAgent:
             current_args = args
             current_error = ""
             while True:
-                if isinstance(current_tool, str) and "ask_philosopher" in allowed_names:
-                    if current_tool == "ask_philosopher":
-                        question = ""
-                        if isinstance(current_args, dict):
-                            question = str(
-                                current_args.get("question")
-                                or current_args.get("prompt")
-                                or ""
-                            ).strip()
-                        if not question:
-                            question = self._build_sub_agent_prompt(
-                                note, current_args, step_outputs
-                            )
-                        current_args = {
-                            "question": self._build_philosopher_prompt(
-                                note, current_args, step_outputs, question
-                            )
-                        }
-                    elif current_tool in {"philosopher", "哲學家"}:
-                        question = self._build_sub_agent_prompt(
-                            note, current_args, step_outputs
-                        )
-                        current_tool = "ask_philosopher"
-                        current_args = {
-                            "question": self._build_philosopher_prompt(
-                                note, current_args, step_outputs, question
-                            )
-                        }
-
                 if not current_tool:
                     current_error = "Missing 'tool' field."
                 elif current_tool not in allowed_names:
@@ -704,145 +674,6 @@ class MainAgent:
             except Exception:
                 logger.exception("Tool recovery failed")
         return None
-
-    async def _should_consult_philosopher(
-        self,
-        prompt: str,
-        message_history: list[ModelRequest | ModelResponse] | None = None,
-    ) -> bool:
-        """以主 agent 模型決定是否需要與哲學家討論。
-
-        會向 `decider` 發出簡短判定請求（回傳 YES/NO 與簡短原因）。
-        若模型失敗或回應不明確，採保守策略：回傳 True 以確保討論。
-        """
-        # 使用嚴格 JSON 回應格式：{"consult": true|false, "reason": "..."}
-        # 範例幫助模型學習何種問題需要討論（簡單事實性問題不需要）
-        decider = (
-            "你是主 agent 的決策助手。請判斷下列使用者輸入是否需要向哲學家 co-agent 進行多輪內省討論。"
-            " 嚴格回傳一個有效 JSON 對象，不要包含其他文字。JSON 格式：{'consult': true/false, 'reason': '短理由'}。"
-            " **重要**：在這個判定步驟中，請不要呼叫任何工具或嘗試執行外部函式；僅依靠你的語言理解回傳 JSON。"
-            " 範例：\n"
-            "輸入: '現在幾點'\n輸出: {"
-            + '"consult": false, "reason": "簡單事實性查詢"}'
-            + "\n"
-            "輸入: '評估不同投資組合的風險與報酬'\n輸出: {"
-            + '"consult": true, "reason": "需要權衡與推理"}'
-            + "\n\n"
-            "使用者輸入：\n" + prompt + "\n\n請只回傳 JSON，且不要呼叫任何工具："
-        )
-
-        try:
-            dec = getattr(self, "_decider_agent", self.agent)
-            result = await dec.run(decider, message_history=message_history)
-            out = (result.output or "").strip()
-            # 嘗試解析 JSON
-            try:
-                parsed = json.loads(out)
-                consult = bool(parsed.get("consult", False))
-                return consult
-            except Exception:
-                # 若模型回傳包含 JSON 片段，嘗試從其中抽取 true/false
-                lower = out.lower()
-                if (
-                    "true" in lower
-                    or "yes" in lower
-                    or "是" in lower
-                    or "需要" in lower
-                ):
-                    return True
-                if (
-                    "false" in lower
-                    or "no" in lower
-                    or "否" in lower
-                    or "不需要" in lower
-                ):
-                    return False
-                # 解析失敗：為避免多餘討論，採保守策略：不討論
-                logger.info(
-                    "Decision response not parseable; defaulting to NO consult. Response: %s",
-                    out,
-                )
-                return False
-        except Exception:
-            logger.exception(
-                "Decision call to main agent failed; defaulting to NO consult"
-            )
-            return False
-
-    async def ask_philosopher(self, question: str) -> str:
-        """Tool: forward question to philosopher co-agent."""
-        if not self.philosopher:
-            raise RuntimeError("Philosopher co-agent is not available.")
-        return await self.philosopher.run(question)
-
-    async def _run_philosopher_discussion(self, question: str) -> str:
-        discussion: list[tuple[str, str]] = []
-        max_rounds = 5
-        main_draft: str | None = None
-        discussion_agent = self._discussion_agent or self.agent
-        initial_prompt = self._build_main_discussion_prompt(None, None)
-        main_result = await discussion_agent.run(initial_prompt)
-        main_draft = (main_result.output or "").strip()
-        discussion.append(("MainAgent", main_draft))
-
-        for _ in range(max_rounds):
-            phil_prompt = self._build_philosopher_prompt(
-                note=None,
-                args=None,
-                step_outputs=None,
-                question=question,
-                main_draft=main_draft,
-            )
-            phil_output = await self.philosopher.run(phil_prompt)
-            discussion.append(("Philosopher", phil_output))
-
-            main_prompt = self._build_main_discussion_prompt(phil_output, main_draft)
-            main_result = await discussion_agent.run(main_prompt)
-            main_draft = (main_result.output or "").strip()
-            discussion.append(("MainAgent", main_draft))
-
-            phil_agrees = self._parse_philosopher_agreement(phil_output)
-            if phil_agrees is True and await self._should_end_discussion(
-                discussion, last_main_answer=main_draft
-            ):
-                break
-
-        return "\n".join(f"{speaker}: {text}" for speaker, text in discussion)
-
-    async def _run_philosopher_discussion_stream(self, question: str):
-        discussion: list[tuple[str, str]] = []
-        max_rounds = 5
-        main_draft: str | None = None
-        discussion_agent = self._discussion_agent or self.agent
-        initial_prompt = self._build_main_discussion_prompt(None, None)
-        main_result = await discussion_agent.run(initial_prompt)
-        main_draft = (main_result.output or "").strip()
-        discussion.append(("MainAgent", main_draft))
-        yield f"MainAgent: {main_draft}"
-
-        for _ in range(max_rounds):
-            phil_prompt = self._build_philosopher_prompt(
-                note=None,
-                args=None,
-                step_outputs=None,
-                question=question,
-                main_draft=main_draft,
-            )
-            phil_output = await self.philosopher.run(phil_prompt)
-            discussion.append(("Philosopher", phil_output))
-            yield f"Philosopher: {phil_output}"
-
-            main_prompt = self._build_main_discussion_prompt(phil_output, main_draft)
-            main_result = await discussion_agent.run(main_prompt)
-            main_draft = (main_result.output or "").strip()
-            discussion.append(("MainAgent", main_draft))
-            yield f"MainAgent: {main_draft}"
-
-            phil_agrees = self._parse_philosopher_agreement(phil_output)
-            if phil_agrees is True and await self._should_end_discussion(
-                discussion, last_main_answer=main_draft
-            ):
-                break
 
     def list_sub_agents(self) -> list[dict[str, str]]:
         return []
@@ -1022,80 +853,6 @@ class MainAgent:
         if "<self-validation>" in text:
             text = text.split("<self-validation>", 1)[0]
         return text.strip() or None
-
-    def _build_philosopher_prompt(
-        self,
-        note: str | None,
-        args: dict[str, Any] | None,
-        step_outputs: list[str] | None,
-        question: str | None,
-        main_draft: str | None = None,
-    ) -> str:
-        parts = [
-            "You are the philosopher co-agent in an internal discussion with the main agent.",
-            "Provide reasoning and context the main agent can use to answer the user.",
-            "Do NOT ask the user questions. Answer directly based on context.",
-            "End with a line: Agreement: yes/no.",
-        ]
-        if self._previous_user_prompt:
-            parts.append(f"Previous user message: {self._previous_user_prompt}")
-        if self._last_assistant_reply:
-            parts.append(f"Previous assistant reply: {self._last_assistant_reply}")
-        if self._last_user_prompt:
-            parts.append(f"Current user message: {self._last_user_prompt}")
-        if note:
-            parts.append(f"Plan note: {note}")
-        if question:
-            parts.append(f"Question: {question}")
-        if main_draft:
-            parts.append(f"Main agent draft response: {main_draft}")
-        if step_outputs:
-            parts.append(f"Latest tool output: {step_outputs[-1]}")
-        else:
-            recent_output = self._get_recent_tool_output()
-            if recent_output:
-                parts.append(f"Previous tool output: {recent_output}")
-        return "\n\n".join(parts)
-
-    def _parse_philosopher_agreement(self, text: str | None) -> bool | None:
-        if not text:
-            return None
-        lowered = text.lower()
-        if "agreement:" in lowered:
-            for line in lowered.splitlines():
-                if "agreement:" in line:
-                    if "yes" in line:
-                        return True
-                    if "no" in line:
-                        return False
-        if "同意" in text:
-            return True
-        if "不同意" in text or "不認同" in text:
-            return False
-        return None
-
-    def _build_main_discussion_prompt(
-        self,
-        phil_output: str | None,
-        main_draft: str | None,
-    ) -> str:
-        prompt = (
-            "You are the main agent in an internal discussion with the philosopher.\n"
-            "Respond to the philosopher's points and draft a concise answer for the user.\n"
-            "Do not call tools. Do not include self-validation. Do not ask the user questions.\n\n"
-        )
-        if self._previous_user_prompt:
-            prompt += f"Previous user message: {self._previous_user_prompt}\n\n"
-        if self._last_assistant_reply:
-            prompt += f"Previous assistant reply: {self._last_assistant_reply}\n\n"
-        if self._last_user_prompt:
-            prompt += f"Current user message: {self._last_user_prompt}\n\n"
-        if main_draft:
-            prompt += f"Previous draft: {main_draft}\n\n"
-        if phil_output:
-            prompt += f"Philosopher feedback:\n{phil_output}\n\n"
-        prompt += "Provide the updated draft answer only."
-        return prompt
 
     def _resolve_args(self, args: Any, step_outputs: list[str]) -> Any:
         def resolve_value(value: Any) -> Any:
@@ -1441,103 +1198,6 @@ class MainAgent:
     ) -> tuple[list[str], list[dict[str, Any]]]:
         return [], []
 
-    async def _should_end_discussion(
-        self,
-        discussion: list[tuple[str, str]],
-        last_main_answer: str | None = None,
-        message_history: list[ModelRequest | ModelResponse] | None = None,
-    ) -> bool:
-        """Ask the main agent model whether the discussion can end.
-
-        Returns True if the main agent judges the discussion sufficient to form
-        a final answer. Expects a strict JSON reply: {"end": true|false, "reason": "..."}.
-        Falls back to keyword checks on philosopher critique when parsing fails.
-        """
-        # Build a short prompt summarizing the discussion and candidate answer
-        summary = """請判斷下列討論與主 agent 的候選回答是否已足以得出最終答案。只有在哲學家明確同意（Agreement: yes/同意）時才能結束。只回傳 JSON：{" + '"end": true/false, "reason": "短理由"}' + "，不要其他文字。\n\n討論摘要：\n"""
-        for speaker, text in discussion:
-            summary += f"{speaker}: {text}\n"
-        if last_main_answer:
-            summary += f"\n主 agent 候選回答：\n{last_main_answer}\n"
-
-        summary += "\n**重要**：不要呼叫任何工具。只依據討論判斷並回傳 JSON。"
-
-        decider = self._discussion_agent or self.agent
-        try:
-            res = await decider.run(summary, message_history=message_history)
-            out = (res.output or "").strip()
-            try:
-                parsed = json.loads(out)
-                return bool(parsed.get("end", False))
-            except Exception:
-                # 尝试基于可解析的文字作简单判定；若无法解析则不结束
-                lower = out.lower()
-                if (
-                    "true" in lower
-                    or "yes" in lower
-                    or "可以" in lower
-                    or "結束" in lower
-                ):
-                    return True
-                if (
-                    "false" in lower
-                    or "no" in lower
-                    or "不" in lower
-                    or "還需要" in lower
-                ):
-                    return False
-                # 解析失敗：不回退、不使用任何後備規則，直接回傳 False（繼續討論）
-                return False
-        except Exception:
-            logger.exception(
-                "End-discussion decision call failed; defaulting to NO end"
-            )
-            return False
-
-    async def _decide_discussion_depth(
-        self,
-        prompt: str,
-        message_history: list[ModelRequest | ModelResponse] | None = None,
-    ) -> dict:
-        """Ask the main agent model what discussion depth to use.
-        Returns a dict like {"depth": "very_shallow"|"shallow"|"medium"|"deep"|"very_deep", "rounds": 1..5}.
-        On parse failure or exception, return {'depth':'medium','rounds':2}.
-        """
-        dec = (
-            "你是主 agent 的討論深度決策器。請根據下列使用者問題判斷哲學家討論的內容深度（very_shallow/shallow/medium/deep/very_deep），"
-            ' 並回傳嚴格的 JSON：{"depth": "very_shallow|shallow|medium|deep|very_deep", "rounds": 1..5}.'
-            ' 範例：\n輸入：\'現在幾點\'\n輸出：{"depth": "very_shallow", "rounds": 1}\n'
-            '輸入：\'評估不同投資組合的風險與報酬\'\n輸出：{"depth": "very_deep", "rounds": 5}\n\n使用者輸入：\n'
-            + prompt
-            + "\n\n請只回傳 JSON，且不要呼叫工具。"
-        )
-
-        try:
-            res = await self.agent.run(dec, message_history=message_history)
-            out = (res.output or "").strip()
-            try:
-                parsed = json.loads(out)
-                depth = parsed.get("depth", "medium")
-                rounds = int(parsed.get("rounds", 2))
-                if depth not in (
-                    "very_shallow",
-                    "shallow",
-                    "medium",
-                    "deep",
-                    "very_deep",
-                ):
-                    depth = "medium"
-                if rounds < 1:
-                    rounds = 1
-                if rounds > 5:
-                    rounds = 5
-                return {"depth": depth, "rounds": rounds}
-            except Exception:
-                return {"depth": "medium", "rounds": 2}
-        except Exception:
-            logger.exception("Discussion depth decision failed; defaulting to medium")
-            return {"depth": "medium", "rounds": 2}
-
     async def run(
         self,
         prompt: str,
@@ -1695,7 +1355,7 @@ class MainAgent:
         message_history: list[ModelRequest | ModelResponse] | None = None,
         skip_plan_execution: bool = True,  # 默認跳過 plan execution，讓 agent 自己調用工具
     ):
-        """Streamed version of run(): yields chunks from philosopher/subagents/main agent as they produce output."""
+        """Streamed version of run(): yields chunks from subagents/main agent as they produce output."""
         # 每次執行前從資料庫重載配置
         self._reload_model_from_db()
         

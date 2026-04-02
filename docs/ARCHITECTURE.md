@@ -1,17 +1,14 @@
 # Multi-Agent Architecture
 
 ## Overview
-This system uses four agents:
+This system uses three agents:
 - Main agent: understands user intent and responds quickly.
-- Philosopher co-agent: handles complex reasoning and planning.
 - Subagent: executes tasks by delegating tool usage.
 - Function-call agent: owns all tools and execution MCP servers.
 
 ## Responsibilities
 - Main agent talks to users and delegates execution via `delegate_to_subagent`.
-- Philosopher provides multi-turn reasoning threads.
 - Subagent runs tasks via `run_function_call_agent`.
-- Subagents can consult the philosopher co-agent through the `ask_philosopher` tool when they need deeper reasoning.
 - Each sub-agent under `internal/sub_agents/` is now automatically exposed as a main-agent tool named after the agent (prompt provided via the tool argument).
 - Function-call agent executes tools and MCP actions (including browser MCP).
 
@@ -30,7 +27,7 @@ This system uses four agents:
 
 ## Configuration
 Each agent supports its own model config via env vars:
-- `MAIN_*`, `CO_*`, `PHILOSOPHER_*`, `SUB_*`, `FUNCTION_CALL_*`
+- `MAIN_*`, `CO_*`, `SUB_*`, `FUNCTION_CALL_*`
   - `*_OPENAI_BASE_URL`
   - `*_OPENAI_API_KEY`
   - `*_MODEL_NAME`
@@ -38,7 +35,6 @@ Each agent supports its own model config via env vars:
 
 Inheritance behavior:
 - Main agent falls back to base values.
-- Philosopher co-agent falls back to `MAIN_*`, then base.
 - Subagent falls back to `MAIN_*`, then base.
 - Function-call agent falls back to `SUB_*`, then `MAIN_*`, then base.
 

@@ -351,7 +351,7 @@ def create_model_for_agent(
     Create a model for a specific agent.
     
     Args:
-        agent_name: Name of the agent (e.g., "main", "philosopher")
+        agent_name: Name of the agent (e.g., "main", "marketing", "function-call")
         http_client: HTTP client for API calls
     
     Returns:

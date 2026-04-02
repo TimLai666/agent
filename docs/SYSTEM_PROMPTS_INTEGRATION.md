@@ -15,7 +15,6 @@
 prompts/
 ├── SYSTEM_PROMPT.md              # 主要的 system prompt（保持不變）
 ├── MAIN_AGENT_PROMPT.md          # Main agent 的指示
-├── PHILOSOPHER_PROMPT.md         # Philosopher agent 的指示
 └── system-prompts/               # 額外的 system prompts
     ├── agent-prompt-explore.md   # Explore agent 的 prompt
     ├── tool-description-bash.md  # Bash 工具描述
@@ -98,7 +97,6 @@ agent = MainAgent.create(
     base_config=config,
     env=env,
     http_client=client,
-    philosopher=philosopher,
     additional_system_prompts=[
         "tool_description_bash",
         "tool_description_grep",

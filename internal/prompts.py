@@ -229,6 +229,17 @@ _LOCAL_INSTRUCTION_FILES = ("AGENTS.md", "CLAUDE.md", "CONTEXT.md")
 _KEYWORD_TRIGGER_FILE = PROMPTS_DIR / "KEYWORD_TRIGGERS.json"
 
 
+def _strip_generated_metadata(content: str) -> str:
+    """移除本地指示檔中的自動產生中繼資訊（例如 Generated:）。"""
+    cleaned_lines: list[str] = []
+    for line in content.splitlines():
+        normalized = line.strip().lower()
+        if normalized.startswith("generated:") or normalized.startswith("**generated:**"):
+            continue
+        cleaned_lines.append(line)
+    return "\n".join(cleaned_lines).strip()
+
+
 def _find_upwards(start_dir: Path, filename: str) -> Path | None:
     if not start_dir:
         return None
@@ -261,6 +272,7 @@ def load_local_instructions(start_dir: Path | None = None) -> list[str]:
             content = path.read_text(encoding="utf-8").strip()
         except Exception:
             continue
+        content = _strip_generated_metadata(content)
         if content:
             instructions.append(f"指示來源：{path}\n{content}")
     return instructions

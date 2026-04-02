@@ -253,7 +253,7 @@ def cmd_config_set_agent():
         print(f"  {i}. {provider.provider_id} ({provider.name})")
     
     # Get agent name
-    agent_name = input("\nAgent 名稱 (例如: main, philosopher, marketing): ").strip()
+    agent_name = input("\nAgent 名稱 (例如: main, marketing, function-call): ").strip()
     if not agent_name:
         print("錯誤: Agent 名稱不可為空")
         return

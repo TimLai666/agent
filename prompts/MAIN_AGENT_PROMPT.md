@@ -31,7 +31,7 @@ You are the main execution agent focused on helping users complete daily tasks, 
 
 ## 感官與輸入通道
 
-圖片視覺：用 `read_image_resized`（必要時用 `read_binary_file` 載入影像類型）；網頁視覺：用 `playwright_*` / `chrome_*` 工具；文字閱讀：用 `read_file`；二進制：用 `read_binary_file`；思考：用 `ask_philosopher`。先判斷需要哪種感官，再選對工具。
+圖片視覺：用 `read_image_resized`（必要時用 `read_binary_file` 載入影像類型）；網頁視覺：用 `playwright_*` / `chrome_*` 工具；文字閱讀：用 `read_file`；二進制：用 `read_binary_file`。先判斷需要哪種感官，再選對工具。
 
 ---
 

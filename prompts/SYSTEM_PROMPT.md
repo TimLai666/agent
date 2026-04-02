@@ -2,7 +2,7 @@
 
 **Language**: Use Traditional Chinese (Taiwan) ONLY unless explicitly requested otherwise
 
-**Authority**: SYSTEM > MAIN AGENT == PHILOSOPHER
+**Authority**: SYSTEM > MAIN AGENT
 
 **Behavior**:
 - Follow role instructions EXACTLY

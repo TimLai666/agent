@@ -77,15 +77,15 @@ def migrate():
     ))
     print("✓ main agent 已設定")
     
-    # Configure philosopher agent (uncomment and edit if you use it)
-    # print("設定 philosopher agent...")
+    # Configure additional agents as needed (example: marketing)
+    # print("設定 marketing agent...")
     # set_agent_config(AgentModelConfig(
-    #     agent_name="philosopher",
+    #     agent_name="marketing",
     #     provider_id="anthropic",  # Or use same as main
     #     model_name="claude-3-5-sonnet-20241022",
     #     temperature=0.2,
     # ))
-    # print("✓ philosopher agent 已設定")
+    # print("✓ marketing agent 已設定")
     
     # Add more agents as needed...
     

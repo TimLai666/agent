@@ -91,14 +91,14 @@ def test_agent_operations():
     print("✓ 成功")
     
     # Set another agent
-    print("2. 設定 philosopher agent...")
-    phil_config = AgentModelConfig(
-        agent_name="test-philosopher",
+    print("2. 設定 marketing agent...")
+    marketing_config = AgentModelConfig(
+        agent_name="test-marketing",
         provider_id="test-copilot",
         model_name="gpt-3.5-turbo",
         temperature=0.3,
     )
-    assert set_agent_config(phil_config)
+    assert set_agent_config(marketing_config)
     print("✓ 成功")
     
     # List agent configs
@@ -144,7 +144,7 @@ def cleanup():
     
     print("1. 刪除測試 agent 配置...")
     delete_agent_config("test-main")
-    delete_agent_config("test-philosopher")
+    delete_agent_config("test-marketing")
     print("✓ 成功")
     
     print("2. 刪除測試提供者...")

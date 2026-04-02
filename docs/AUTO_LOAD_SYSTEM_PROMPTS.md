@@ -57,7 +57,6 @@ agent = MainAgent.create(
     base_config=config,
     env=env,
     http_client=client,
-    philosopher=philosopher,
     # auto_load_all_prompts=True  # 預設值，可省略
 )
 ```
