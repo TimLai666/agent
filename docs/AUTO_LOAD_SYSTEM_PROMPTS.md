@@ -1,5 +1,7 @@
 # 自動載入 System Prompts 功能
 
+> 最後更新：2026-04-03
+
 ## 概述
 
 從現在開始，**MainAgent 預設會自動載入所有可用的 system prompts**。這意味著 agent 在啟動時會自動組合：
@@ -29,6 +31,15 @@ agent = MainAgent.create(
 agent = MainAgent.create(...)
 # 👆 這會自動載入 prompts/system-prompts/ 中的所有檔案
 ```
+
+## 目前不再包含的機制
+
+- 已移除 prompt 關鍵字觸發功能。
+- `prompts/KEYWORD_TRIGGERS.json` 不再存在，也不會被載入。
+
+## 目前新增的資訊
+
+- MainAgent 建構 system prompt 時，會加入 `# Model Information` 區塊並顯示 `Active Model`。
 
 ## Agent 現在看到什麼？
 
@@ -100,7 +111,7 @@ agent = MainAgent.create(
 
 ### 是否影響效能？
 
-**短答案**：對於現代 LLM（如 GPT-4、Claude）影響很小。
+**短答案**：對於現代 LLM（如 GPT-4 系列）影響很小。
 
 **長答案**：
 - ✅ **Token 數量增加**：會消耗更多 input tokens
