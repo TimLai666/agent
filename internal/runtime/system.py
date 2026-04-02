@@ -17,6 +17,30 @@ HISTORY_LIMIT = 30
 COMMAND_PREFIX = "/"
 
 
+def _summarize_exception(exc: Exception) -> str:
+    """Extract a concise root-cause message from nested exception groups."""
+    current: BaseException | None = exc
+    visited: set[int] = set()
+
+    while current is not None and id(current) not in visited:
+        visited.add(id(current))
+        nested = getattr(current, "exceptions", None)
+        if isinstance(nested, (list, tuple)) and nested:
+            current = nested[0]
+            continue
+        if getattr(current, "__cause__", None) is not None:
+            current = current.__cause__
+            continue
+        if getattr(current, "__context__", None) is not None:
+            current = current.__context__
+            continue
+        break
+
+    if current is None:
+        return "Unknown error"
+    return f"{type(current).__name__}: {current}"
+
+
 def _format_tool_line(event: dict) -> str:
     tool = str(event.get("tool") or "tool")
     args = event.get("args") or ()
@@ -130,7 +154,11 @@ async def run_cli(
             try:
                 await stack.enter_async_context(main_agent.agent.run_mcp_servers())
             except Exception as exc:  # pragma: no cover - best effort when MCP fails
-                logger.warning("MCP browser tools failed to start; continuing without them.", exc_info=exc)
+                reason = _summarize_exception(exc)
+                logger.warning(
+                    "MCP browser tools failed to start; continuing without them. Root cause: %s",
+                    reason,
+                )
                 # Keep CLI behavior consistent with GUI: remove unavailable MCP toolsets
                 # so the agent won't repeatedly attempt calls to broken MCP servers.
                 try:

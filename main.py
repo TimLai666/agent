@@ -67,6 +67,30 @@ class AgentRuntime(QThread):
         finally:
             loop.close()
 
+    @staticmethod
+    def _summarize_exception(exc: Exception) -> str:
+        """Extract a concise root-cause message from nested exception groups."""
+        current: BaseException | None = exc
+        visited: set[int] = set()
+
+        while current is not None and id(current) not in visited:
+            visited.add(id(current))
+            nested = getattr(current, "exceptions", None)
+            if isinstance(nested, (list, tuple)) and nested:
+                current = nested[0]
+                continue
+            if getattr(current, "__cause__", None) is not None:
+                current = current.__cause__
+                continue
+            if getattr(current, "__context__", None) is not None:
+                current = current.__context__
+                continue
+            break
+
+        if current is None:
+            return "Unknown error"
+        return f"{type(current).__name__}: {current}"
+
     async def _initialize(self):
         try:
             self.http_client = AsyncClient(verify=False)
@@ -83,9 +107,10 @@ class AgentRuntime(QThread):
                 )
                 logger.info("MCP servers started in AgentRuntime")
             except Exception as exc:
+                reason = self._summarize_exception(exc)
                 logger.warning(
-                    "MCP servers failed to start in AgentRuntime; clearing toolsets and continuing.",
-                    exc_info=exc,
+                    "MCP servers failed to start in AgentRuntime; continuing without them. Root cause: %s",
+                    reason,
                 )
                 # 清除已註冊的 MCP toolsets 以防止 agent 嘗試調用不可用的工具
                 self.main_agent.agent._user_toolsets = []
