@@ -1,1 +1,8 @@
+.venv/
 .env
+__pycache__/
+*.pyc
+
+_tmp_opencode
+_tmp_codex/
+.claude/
