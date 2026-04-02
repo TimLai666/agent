@@ -309,7 +309,8 @@ Skills 管理：
         """重新載入 skills"""
         try:
             from internal.skills_loader import load_skill_registry
-            self.main_agent.skills = load_skill_registry()
+            root_dirs = getattr(self.main_agent, "skill_root_dirs", None)
+            self.main_agent.skills = load_skill_registry(root_dirs=root_dirs)
             count = len(self.main_agent.skills.list_names())
             self.output_callback(f"Skills 已重新載入。載入了 {count} 個 skills。")
         except Exception as e:

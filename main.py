@@ -4,6 +4,7 @@ import sys
 import warnings
 from collections import deque
 from contextlib import AsyncExitStack
+from pathlib import Path
 
 from httpx import AsyncClient
 from pydantic_ai.messages import ModelRequest, ModelResponse
@@ -34,9 +35,10 @@ class AgentRuntime(QThread):
     error_occurred = Signal(int, str)
     tool_event = Signal(object)
 
-    def __init__(self, base_config):
+    def __init__(self, base_config, skill_root_dirs: list[Path] | None = None):
         super().__init__()
         self.base_config = base_config
+        self.skill_root_dirs = list(skill_root_dirs or [])
         self.loop: asyncio.AbstractEventLoop | None = None
         self.http_client: AsyncClient | None = None
         self.main_agent: MainAgent | None = None
@@ -68,7 +70,11 @@ class AgentRuntime(QThread):
     async def _initialize(self):
         try:
             self.http_client = AsyncClient(verify=False)
-            self.main_agent = MainAgent.create(self.base_config, self.http_client)
+            self.main_agent = MainAgent.create(
+                self.base_config,
+                self.http_client,
+                skill_root_dirs=self.skill_root_dirs,
+            )
             self.main_agent.set_tool_event_callback(self._emit_tool_event)
             self.mcp_stack = AsyncExitStack()
             try:
@@ -222,7 +228,7 @@ class AgentRuntime(QThread):
 
 
 class GUIAgentApp:
-    def __init__(self):
+    def __init__(self, skill_root_dirs: list[Path] | None = None):
         warnings.filterwarnings("ignore", category=DeprecationWarning)
         warnings.filterwarnings("ignore", category=ResourceWarning)
 
@@ -274,7 +280,7 @@ class GUIAgentApp:
         # 設置 GUI 確認處理器
         set_gui_confirm_handler(self._gui_confirm_handler)
         
-        self.runtime = AgentRuntime(self.base_config)
+        self.runtime = AgentRuntime(self.base_config, skill_root_dirs=skill_root_dirs)
         self.runtime.ready.connect(self.handle_runtime_ready)
         self.runtime.result_ready.connect(self.handle_result)
         self.runtime.chunk_ready.connect(self.handle_chunk)
@@ -637,6 +643,34 @@ class GUIAgentApp:
         return result
 
 
+def _resolve_skill_root_dirs(raw_paths: list[str] | None) -> list[Path]:
+    """Resolve and normalize skill root directories from CLI args."""
+    if not raw_paths:
+        return []
+
+    resolved: list[Path] = []
+    seen: set[str] = set()
+
+    for raw in raw_paths:
+        text = (raw or "").strip()
+        if not text:
+            continue
+
+        path_obj = Path(text).expanduser()
+        if not path_obj.is_absolute():
+            path_obj = (Path.cwd() / path_obj).resolve()
+        else:
+            path_obj = path_obj.resolve()
+
+        key = str(path_obj).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        resolved.append(path_obj)
+
+    return resolved
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run agent CLI or GUI.")
     parser.add_argument(
@@ -664,7 +698,14 @@ def main() -> None:
         action="store_true",
         help="Open configuration Web UI to manage providers and agent settings.",
     )
+    parser.add_argument(
+        "--skills-dir",
+        nargs="+",
+        metavar="PATH",
+        help="One or more skill root directories. Defaults to built-in skills/ when omitted.",
+    )
     args = parser.parse_args()
+    skill_root_dirs = _resolve_skill_root_dirs(args.skills_dir)
 
     try:
         # Ensure Web UI server is running in background (always on)
@@ -688,11 +729,17 @@ def main() -> None:
             except Exception:
                 print("Config web UI available; open your browser to http://127.0.0.1:5000")
         elif args.gui:
-            gui_app = GUIAgentApp()
+            gui_app = GUIAgentApp(skill_root_dirs=skill_root_dirs)
             sys.exit(gui_app.run())
         else:
             prompt = " ".join(args.prompt) if args.prompt else None
-            asyncio.run(run_cli(prompt_once=prompt, single_turn=args.once))
+            asyncio.run(
+                run_cli(
+                    prompt_once=prompt,
+                    single_turn=args.once,
+                    skill_root_dirs=skill_root_dirs,
+                )
+            )
     except KeyboardInterrupt:
         pass
 

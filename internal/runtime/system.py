@@ -1,5 +1,6 @@
 import warnings
 from contextlib import AsyncExitStack
+from pathlib import Path
 
 from httpx import AsyncClient
 from pydantic_ai.messages import ModelRequest, ModelResponse
@@ -251,7 +252,11 @@ def _handle_command(
     return None
 
 
-async def run_cli(prompt_once: str | None = None, single_turn: bool = False) -> None:
+async def run_cli(
+    prompt_once: str | None = None,
+    single_turn: bool = False,
+    skill_root_dirs: list[Path] | None = None,
+) -> None:
     warnings.filterwarnings("ignore", category=DeprecationWarning)
     warnings.filterwarnings("ignore", category=ResourceWarning)
 
@@ -261,7 +266,11 @@ async def run_cli(prompt_once: str | None = None, single_turn: bool = False) -> 
     base_config = load_base_config()
 
     async with AsyncClient(verify=False) as http_client:
-        main_agent = MainAgent.create(base_config, http_client)
+        main_agent = MainAgent.create(
+            base_config,
+            http_client,
+            skill_root_dirs=skill_root_dirs,
+        )
 
         chat_history: list[ModelRequest | ModelResponse] | None = None
         history: list[tuple[str, str]] = []

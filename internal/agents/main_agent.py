@@ -4,6 +4,7 @@ import inspect
 import json
 import re
 import sys
+from pathlib import Path
 from typing import Any, cast
 
 from httpx import AsyncClient
@@ -145,13 +146,14 @@ class MainAgent:
         base_config: AgentConfig,
         http_client: AsyncClient,
         skills: SkillRegistry | None = None,
+        skill_root_dirs: list[Path] | None = None,
         additional_system_prompts: list[str] | None = None,
         auto_load_all_prompts: bool = True,
     ) -> "MainAgent":
         # Load skills first
         if skills is None:
             try:
-                skills = load_skill_registry()
+                skills = load_skill_registry(root_dirs=skill_root_dirs)
             except Exception:
                 logger.exception("Failed to load skills; continuing without them")
                 skills = SkillRegistry({}, None)
@@ -329,6 +331,7 @@ class MainAgent:
             decider_agent,
             skills,
             http_client,
+            skill_root_dirs,
         )
         try:
             add_all_tools(agent)
@@ -351,6 +354,7 @@ class MainAgent:
         decider_agent: Agent[None, str] | None = None,
         skills: SkillRegistry | None = None,
         http_client: AsyncClient | None = None,
+        skill_root_dirs: list[Path] | None = None,
     ) -> None:
         self.agent = agent
         self.sub_agents = None
@@ -365,6 +369,7 @@ class MainAgent:
         self._last_assistant_reply: str | None = None
         self._mcp_tool_names: set[str] | None = None  # 緩存 MCP 工具名稱列表
         self._http_client = http_client  # 保存以便重載 model
+        self.skill_root_dirs = list(skill_root_dirs or [])
         setattr(self.agent, "_tool_event_callback", None)
         # tools are registered via add_all_tools during create()
 
