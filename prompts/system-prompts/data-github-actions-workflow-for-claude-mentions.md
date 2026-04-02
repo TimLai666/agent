@@ -1,6 +1,6 @@
 ﻿<!--
-name: 'Data: GitHub Actions workflow for @claude mentions'
-description: GitHub Actions workflow template for triggering ${SYSTEM_NAME} via @claude mentions
+name: 'Data: GitHub Actions workflow for @assistant mentions'
+description: GitHub Actions workflow template for triggering ${SYSTEM_NAME} via @assistant mentions
 ccVersion: 2.0.58
 -->
 name: ${SYSTEM_NAME}
@@ -16,19 +16,19 @@ on:
     types: [submitted]
 
 jobs:
-  claude:
+  assistant:
     if: |
-      (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude')) ||
-      (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude')) ||
-      (github.event_name == 'pull_request_review' && contains(github.event.review.body, '@claude')) ||
-      (github.event_name == 'issues' && (contains(github.event.issue.body, '@claude') || contains(github.event.issue.title, '@claude')))
+      (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@assistant')) ||
+      (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@assistant')) ||
+      (github.event_name == 'pull_request_review' && contains(github.event.review.body, '@assistant')) ||
+      (github.event_name == 'issues' && (contains(github.event.issue.body, '@assistant') || contains(github.event.issue.title, '@assistant')))
     runs-on: ubuntu-latest
     permissions:
       contents: read
       pull-requests: read
       issues: read
       id-token: write
-      actions: read # Required for Claude to read CI results on PRs
+      actions: read # Required for the assistant to read CI results on PRs
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -36,20 +36,19 @@ jobs:
           fetch-depth: 1
 
       - name: Run ${SYSTEM_NAME}
-        id: claude
-        uses: anthropics/claude-code-action@v1
+        id: assistant
+        uses: your-org/ai-code-action@v1
         with:
-          anthropic_api_key: \${{ secrets.ANTHROPIC_API_KEY }}
+          provider_api_key: \${{ secrets.AI_PROVIDER_API_KEY }}
 
-          # This is an optional setting that allows Claude to read CI results on PRs
+          # This is an optional setting that allows the assistant to read CI results on PRs
           additional_permissions: |
             actions: read
 
-          # Optional: Give a custom prompt to Claude. If this is not specified, Claude will perform the instructions specified in the comment that tagged it.
+          # Optional: Give a custom prompt to the assistant. If this is not specified, the assistant will perform the instructions specified in the comment that tagged it.
           # prompt: 'Update the pull request description to include a summary of changes.'
 
-          # Optional: Add claude_args to customize behavior and configuration
-          # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
-          # or https://code.claude.com/docs/en/cli-reference for available options
-          # claude_args: '--allowed-tools run_terminal_command(gh pr:*)'
+          # Optional: Add assistant_args to customize behavior and configuration
+          # See your action provider docs for available options
+          # assistant_args: '--allowed-tools run_terminal_command(gh pr:*)'
 

@@ -1,6 +1,6 @@
 ﻿<!--
 name: 'Agent Prompt: Prompt Hook execution'
-description: Prompt given to Claude when acting evaluating whether to pass or fail a prompt hook.
+description: Prompt given to the assistant when evaluating whether to pass or fail a prompt hook.
 ccVersion: 2.0.41
 -->
 You are evaluating a hook in ${SYSTEM_NAME}.

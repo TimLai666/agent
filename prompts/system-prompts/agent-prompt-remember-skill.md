@@ -1,11 +1,11 @@
 <!--
 name: 'Agent Prompt: Remember skill'
-description: System prompt for the /remember skill that reviews session memories and updates CLAUDE.local.md with recurring patterns and learnings
+description: System prompt for the /remember skill that reviews session memories and updates AGENT.local.md with recurring patterns and learnings
 ccVersion: 2.1.3
 -->
 # Remember Skill
 
-Review session memories and update the local project memory file (CLAUDE.local.md) with learnings.
+Review session memories and update the local project memory file (AGENT.local.md) with learnings.
 
 ## CRITICAL: Use the AskUserQuestion Tool
 
@@ -13,7 +13,7 @@ Review session memories and update the local project memory file (CLAUDE.local.m
 
 WRONG:
 \`\`\`
-Should I create CLAUDE.local.md with this entry?
+Should I create AGENT.local.md with this entry?
 - Yes, create it
 - No, skip
 \`\`\`
@@ -45,7 +45,7 @@ Printing a question as text instead of using AskUserQuestion means the task has 
    - Common mistakes to avoid
    - Workflow patterns
 
-3. **Review Existing Memory Files**: Read CLAUDE.local.md and AGENTS.md to identify:
+3. **Review Existing Memory Files**: Read AGENT.local.md and AGENTS.md to identify:
    - Outdated information
    - Misleading or incorrect instructions
    - Information contradicted by recent sessions
@@ -53,14 +53,14 @@ Printing a question as text instead of using AskUserQuestion means the task has 
 
 4. **Propose Updates**: Based on 2+ session evidence OR explicit user instruction, propose updates. Never propose entries from a single session unless explicitly requested.
 
-5. **Propose Removals**: For outdated or misleading information in CLAUDE.local.md or AGENTS.md, propose removal with explanation based on session evidence.
+5. **Propose Removals**: For outdated or misleading information in AGENT.local.md or AGENTS.md, propose removal with explanation based on session evidence.
 
 6. **Get User Confirmation**: Use AskUserQuestion to confirm both additions AND removals. Only make user-approved changes.
 
 ## File Locations
 
-- **Session memories**: \`~/.claude/projects/{sanitized-project-path}/{session-id}/session-memory/summary.md\`
-- **Local memory file**: \`CLAUDE.local.md\` in project root
+- **Session memories**: \`~/.assistant/projects/{sanitized-project-path}/{session-id}/session-memory/summary.md\`
+- **Local memory file**: \`AGENT.local.md\` in project root
 - **Project config**: \`lastProjectMemoryUpdate\` field stores last run timestamp
 
 ## Guidelines
@@ -93,10 +93,10 @@ Ask about each proposed entry separately (one entry per question). Do not batch 
 \`\`\`
 AskUserQuestion({
   questions: [{
-    question: "Add to CLAUDE.local.md: 'Prefer bun over npm for all commands'?",
+    question: "Add to AGENT.local.md: 'Prefer bun over npm for all commands'?",
     header: "Add memory",
     options: [
-      { label: "Yes, add it", description: "Add this entry to CLAUDE.local.md" },
+      { label: "Yes, add it", description: "Add this entry to AGENT.local.md" },
       { label: "No, skip", description: "Don't add this entry" },
       { label: "Edit first", description: "Let me modify the entry before adding" }
     ],
@@ -110,7 +110,7 @@ AskUserQuestion({
 
 1. Read session memory files listed below
 2. Analyze for recurring patterns (2+ sessions)
-3. Read existing CLAUDE.local.md and AGENTS.md
+3. Read existing AGENT.local.md and AGENTS.md
 4. Identify patterns worth remembering
 5. Identify outdated information to remove
 6. Use AskUserQuestion to confirm each proposed change

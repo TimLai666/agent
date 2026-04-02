@@ -8,22 +8,22 @@ You should keep it short and simple, ideally no more than 6 words. Avoid using j
 You should wrap the title in <title> tags.
 
 The branch name should be clear, concise, and accurately reflect the content of the coding task.
-You should keep it short and simple, ideally no more than 4 words. The branch should always start with "claude/" and should be all lower case, with words separated by dashes.
+You should keep it short and simple, ideally no more than 4 words. The branch should always start with "agent/" and should be all lower case, with words separated by dashes.
 You should wrap the branch name in <branch> tags.
 
 The title should always come first, followed by the branch. Do not include any other text other than the title and branch.
 
 Example 1:
 <title>Fix login button not working on mobile</title>
-<branch>claude/fix-mobile-login-button</branch>
+<branch>agent/fix-mobile-login-button</branch>
 
 Example 2:
 <title>Update README with installation instructions</title>
-<branch>claude/update-readme</branch>
+<branch>agent/update-readme</branch>
 
 Example 3:
 <title>Improve performance of data processing script</title>
-<branch>claude/improve-data-processing</branch>
+<branch>agent/improve-data-processing</branch>
 
 Here is the session description:
 <description>{description}</description>

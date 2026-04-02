@@ -1,0 +1,412 @@
+{
+  "summary": {
+    "total_files": 51,
+    "with_claude": 0,
+    "with_anthropic": 0,
+    "with_template_variables": 18
+  },
+  "files": [
+    {
+      "file": "prompts/MAIN_AGENT_PROMPT.md",
+      "line_count": 242,
+      "has_claude": false,
+      "has_anthropic": false,
+      "template_variables": [
+        "${SYSTEM_NAME}"
+      ]
+    },
+    {
+      "file": "prompts/SKILLS_PRIORITY.md",
+      "line_count": 25,
+      "has_claude": false,
+      "has_anthropic": false,
+      "template_variables": []
+    },
+    {
+      "file": "prompts/system-prompts/agent-prompt-agent-creation-architect.md",
+      "line_count": 75,
+      "has_claude": false,
+      "has_anthropic": false,
+      "template_variables": []
+    },
+    {
+      "file": "prompts/system-prompts/agent-prompt-agent-hook.md",
+      "line_count": 18,
+      "has_claude": false,
+      "has_anthropic": false,
+      "template_variables": [
+        "${STRUCTURED_OUTPUT_TOOL_NAME}",
+        "${SYSTEM_NAME}",
+        "${TRANSCRIPT_PATH}"
+      ]
+    },
+    {
+      "file": "prompts/system-prompts/agent-prompt-bash-command-description-writer.md",
+      "line_count": 16,
+      "has_claude": false,
+      "has_anthropic": false,
+      "template_variables": []
+    },
+    {
+      "file": "prompts/system-prompts/agent-prompt-bash-command-file-path-extraction.md",
+      "line_count": 26,
+      "has_claude": false,
+      "has_anthropic": false,
+      "template_variables": []
+    },
+    {
+      "file": "prompts/system-prompts/agent-prompt-bash-command-prefix-detection.md",
+      "line_count": 73,
+      "has_claude": false,
+      "has_anthropic": false,
+      "template_variables": [
+        "${COMMAND_STRING}",
+        "${SYSTEM_NAME}"
+      ]
+    },
+    {
+      "file": "prompts/system-prompts/agent-prompt-claude-guide-agent.md",
+      "line_count": 23,
+      "has_claude": false,
+      "has_anthropic": false,
+      "template_variables": [
+        "${SYSTEM_NAME}"
+      ]
+    },
+    {
+      "file": "prompts/system-prompts/agent-prompt-claudemd-creation.md",
+      "line_count": 27,
+      "has_claude": false,
+      "has_anthropic": false,
+      "template_variables": [
+        "${SYSTEM_NAME}"
+      ]
+    },
+    {
+      "file": "prompts/system-prompts/agent-prompt-command-execution-specialist.md",
+      "line_count": 18,
+      "has_claude": false,
+      "has_anthropic": false,
+      "template_variables": [
+        "${SYSTEM_NAME}"
+      ]
+    },
+    {
+      "file": "prompts/system-prompts/agent-prompt-conversation-summarization.md",
+      "line_count": 100,
+      "has_claude": false,
+      "has_anthropic": false,
+      "template_variables": []
+    },
+    {
+      "file": "prompts/system-prompts/agent-prompt-explore.md",
+      "line_count": 26,
+      "has_claude": false,
+      "has_anthropic": false,
+      "template_variables": []
+    },
+    {
+      "file": "prompts/system-prompts/agent-prompt-pr-comments-slash-command.md",
+      "line_count": 42,
+      "has_claude": false,
+      "has_anthropic": false,
+      "template_variables": [
+        "${ADDITIONAL_USER_INPUT?\"Additional user input: \"+ADDITIONAL_USER_INPUT:\"\"}",
+        "${BASH_TOOL_NAME}"
+      ]
+    },
+    {
+      "file": "prompts/system-prompts/agent-prompt-prompt-hook-execution.md",
+      "line_count": 15,
+      "has_claude": false,
+      "has_anthropic": false,
+      "template_variables": [
+        "${SYSTEM_NAME}"
+      ]
+    },
+    {
+      "file": "prompts/system-prompts/agent-prompt-prompt-suggestion-generator-v2.md",
+      "line_count": 36,
+      "has_claude": false,
+      "has_anthropic": false,
+      "template_variables": [
+        "${SYSTEM_NAME}"
+      ]
+    },
+    {
+      "file": "prompts/system-prompts/agent-prompt-remember-skill.md",
+      "line_count": 118,
+      "has_claude": false,
+      "has_anthropic": false,
+      "template_variables": []
+    },
+    {
+      "file": "prompts/system-prompts/agent-prompt-review-pr-slash-command.md",
+      "line_count": 32,
+      "has_claude": false,
+      "has_anthropic": false,
+      "template_variables": [
+        "${BASH_TOOL_NAME}",
+        "${PR_NUMBER_ARG}"
+      ]
+    },
+    {
+      "file": "prompts/system-prompts/agent-prompt-security-review-slash.md",
+      "line_count": 196,
+      "has_claude": false,
+      "has_anthropic": false,
+      "template_variables": []
+    },
+    {
+      "file": "prompts/system-prompts/agent-prompt-session-notes-template.md",
+      "line_count": 35,
+      "has_claude": false,
+      "has_anthropic": false,
+      "template_variables": []
+    },
+    {
+      "file": "prompts/system-prompts/agent-prompt-session-notes-update-instructions.md",
+      "line_count": 44,
+      "has_claude": false,
+      "has_anthropic": false,
+      "template_variables": [
+        "${MAX_SECTION_TOKENS}"
+      ]
+    },
+    {
+      "file": "prompts/system-prompts/agent-prompt-session-search-assistant.md",
+      "line_count": 39,
+      "has_claude": false,
+      "has_anthropic": false,
+      "template_variables": []
+    },
+    {
+      "file": "prompts/system-prompts/agent-prompt-session-title-and-branch-generation.md",
+      "line_count": 30,
+      "has_claude": false,
+      "has_anthropic": false,
+      "template_variables": []
+    },
+    {
+      "file": "prompts/system-prompts/agent-prompt-status-line-setup.md",
+      "line_count": 106,
+      "has_claude": false,
+      "has_anthropic": false,
+      "template_variables": [
+        "${SYSTEM_NAME}"
+      ]
+    },
+    {
+      "file": "prompts/system-prompts/agent-prompt-update-magic-docs.md",
+      "line_count": 55,
+      "has_claude": false,
+      "has_anthropic": false,
+      "template_variables": []
+    },
+    {
+      "file": "prompts/system-prompts/agent-prompt-user-sentiment-analysis.md",
+      "line_count": 18,
+      "has_claude": false,
+      "has_anthropic": false,
+      "template_variables": [
+        "${CONVERSATION_HISTORY}"
+      ]
+    },
+    {
+      "file": "prompts/system-prompts/data-github-actions-workflow-for-claude-mentions.md",
+      "line_count": 54,
+      "has_claude": false,
+      "has_anthropic": false,
+      "template_variables": [
+        "${SYSTEM_NAME}",
+        "${{ secrets.AI_PROVIDER_API_KEY }"
+      ]
+    },
+    {
+      "file": "prompts/system-prompts/data-github-app-installation-pr-description.md",
+      "line_count": 47,
+      "has_claude": false,
+      "has_anthropic": false,
+      "template_variables": [
+        "${SYSTEM_NAME}"
+      ]
+    },
+    {
+      "file": "prompts/system-prompts/greeting-time-check.md",
+      "line_count": 154,
+      "has_claude": false,
+      "has_anthropic": false,
+      "template_variables": []
+    },
+    {
+      "file": "prompts/system-prompts/system-prompt-autonomous-agent-standalone.md",
+      "line_count": 20,
+      "has_claude": false,
+      "has_anthropic": false,
+      "template_variables": []
+    },
+    {
+      "file": "prompts/system-prompts/system-prompt-censoring-assistance-with-malicious-activities.md",
+      "line_count": 6,
+      "has_claude": false,
+      "has_anthropic": false,
+      "template_variables": []
+    },
+    {
+      "file": "prompts/system-prompts/system-prompt-chrome-browser-mcp-tools.md",
+      "line_count": 16,
+      "has_claude": false,
+      "has_anthropic": false,
+      "template_variables": []
+    },
+    {
+      "file": "prompts/system-prompts/system-prompt-claude-in-chrome-browser-automation.md",
+      "line_count": 52,
+      "has_claude": false,
+      "has_anthropic": false,
+      "template_variables": []
+    },
+    {
+      "file": "prompts/system-prompts/system-prompt-git-status.md",
+      "line_count": 20,
+      "has_claude": false,
+      "has_anthropic": false,
+      "template_variables": [
+        "${CURRENT_BRANCH}",
+        "${GIT_STATUS||\"(clean)\"}",
+        "${MAIN_BRANCH}",
+        "${RECENT_COMMITS}"
+      ]
+    },
+    {
+      "file": "prompts/system-prompts/system-prompt-learning-mode-insights.md",
+      "line_count": 14,
+      "has_claude": false,
+      "has_anthropic": false,
+      "template_variables": []
+    },
+    {
+      "file": "prompts/system-prompts/system-prompt-learning-mode.md",
+      "line_count": 28,
+      "has_claude": false,
+      "has_anthropic": false,
+      "template_variables": []
+    },
+    {
+      "file": "prompts/system-prompts/system-prompt-main-system-prompt.md",
+      "line_count": 36,
+      "has_claude": false,
+      "has_anthropic": false,
+      "template_variables": [
+        "${SECURITY_POLICY}"
+      ]
+    },
+    {
+      "file": "prompts/system-prompts/system-prompt-scratchpad-directory.md",
+      "line_count": 23,
+      "has_claude": false,
+      "has_anthropic": false,
+      "template_variables": [
+        "${SCRATCHPAD_DIR_FN()}"
+      ]
+    },
+    {
+      "file": "prompts/system-prompts/tool-description-bash-git-commit-and-pr-creation-instructions.md",
+      "line_count": 56,
+      "has_claude": false,
+      "has_anthropic": false,
+      "template_variables": []
+    },
+    {
+      "file": "prompts/system-prompts/tool-description-bash-sandbox-note.md",
+      "line_count": 16,
+      "has_claude": false,
+      "has_anthropic": false,
+      "template_variables": []
+    },
+    {
+      "file": "prompts/system-prompts/tool-description-bash.md",
+      "line_count": 31,
+      "has_claude": false,
+      "has_anthropic": false,
+      "template_variables": []
+    },
+    {
+      "file": "prompts/system-prompts/tool-description-computer.md",
+      "line_count": 9,
+      "has_claude": false,
+      "has_anthropic": false,
+      "template_variables": []
+    },
+    {
+      "file": "prompts/system-prompts/tool-description-edit.md",
+      "line_count": 12,
+      "has_claude": false,
+      "has_anthropic": false,
+      "template_variables": []
+    },
+    {
+      "file": "prompts/system-prompts/tool-description-glob.md",
+      "line_count": 11,
+      "has_claude": false,
+      "has_anthropic": false,
+      "template_variables": []
+    },
+    {
+      "file": "prompts/system-prompts/tool-description-grep.md",
+      "line_count": 12,
+      "has_claude": false,
+      "has_anthropic": false,
+      "template_variables": []
+    },
+    {
+      "file": "prompts/system-prompts/tool-description-playwright.md",
+      "line_count": 118,
+      "has_claude": false,
+      "has_anthropic": false,
+      "template_variables": []
+    },
+    {
+      "file": "prompts/system-prompts/tool-description-readfile.md",
+      "line_count": 17,
+      "has_claude": false,
+      "has_anthropic": false,
+      "template_variables": []
+    },
+    {
+      "file": "prompts/system-prompts/tool-description-skill.md",
+      "line_count": 12,
+      "has_claude": false,
+      "has_anthropic": false,
+      "template_variables": []
+    },
+    {
+      "file": "prompts/system-prompts/tool-description-websearch.md",
+      "line_count": 22,
+      "has_claude": false,
+      "has_anthropic": false,
+      "template_variables": []
+    },
+    {
+      "file": "prompts/system-prompts/tool-description-write.md",
+      "line_count": 12,
+      "has_claude": false,
+      "has_anthropic": false,
+      "template_variables": []
+    },
+    {
+      "file": "prompts/system-prompts/tool-parameter-computer-action-for-computer-tool.md",
+      "line_count": 19,
+      "has_claude": false,
+      "has_anthropic": false,
+      "template_variables": []
+    },
+    {
+      "file": "prompts/SYSTEM_PROMPT.md",
+      "line_count": 72,
+      "has_claude": false,
+      "has_anthropic": false,
+      "template_variables": []
+    }
+  ]
+}
