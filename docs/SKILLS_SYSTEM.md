@@ -14,15 +14,18 @@
 ## 核心元件
 
 1. `SkillSpec`
+
 - 位置：`internal/skills_loader.py`
 - 內容：`name`、`description`、`path`、`resources`。
 - `content` 會延遲讀取 `SKILL.md`（lazy loading）。
 
-2. `SkillRegistry`
+1. `SkillRegistry`
+
 - 位置：`internal/skills_loader.py`
 - 負責管理已載入 skills、名稱查找、匹配函式與 metadata 彙整。
 
-3. `use_skill` 工具
+1. `use_skill` 工具
+
 - 位置：`internal/tools/skill_tools.py`
 - 啟用後回傳：skill 內容 + Bundled Resources（若存在）。
 
@@ -46,6 +49,12 @@ python main.py --skills-dir skills extra_skills vendor_skills
 
 1. CLI 與 GUI 都會吃到同一組 `skill_root_dirs`。
 2. `/skills reload` 會沿用同一組路徑重新載入。
+
+若未指定 `--skills-dir`，預設載入順序為：
+
+1. `~/.agents/skills`
+2. `~/.claude/skills`
+3. 專案內建 `skills/`
 
 ## Bundled Resources
 

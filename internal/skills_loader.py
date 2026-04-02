@@ -23,6 +23,10 @@ if TYPE_CHECKING:
 
 
 SKILLS_DIR = Path(__file__).resolve().parent.parent / "skills"
+DEFAULT_EXTERNAL_SKILLS_DIRS = [
+    Path.home() / ".agents" / "skills",
+    Path.home() / ".claude" / "skills",
+]
 
 
 @dataclass
@@ -299,8 +303,11 @@ def load_skill_registry(
     """
     if root_dirs:
         skills_roots = [Path(p) for p in root_dirs]
+    elif root_dir is not None:
+        skills_roots = [Path(root_dir)]
     else:
-        skills_roots = [root_dir or SKILLS_DIR]
+        # Default precedence: user global dirs first, then project-local skills.
+        skills_roots = [*DEFAULT_EXTERNAL_SKILLS_DIRS, SKILLS_DIR]
 
     specs: list[SkillSpec] = []
     for skills_root in skills_roots:
