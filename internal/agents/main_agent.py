@@ -20,6 +20,7 @@ from internal.logger import logger
 from internal.prompts import (
     SYSTEM_PROMPT,
     build_runtime_instructions,
+    build_environment_context,
     get_prompt,
     get_system_prompt_processed,
     build_combined_system_prompt,
@@ -105,9 +106,10 @@ class MainAgent:
         weekday_en = weekday_names[now.weekday()]
         weekday_zh = weekday_chinese[now.weekday()]
 
-        # 構建時間資訊
+        # 構建時間與環境資訊
+        environment_context = build_environment_context()
         time_info = f"""
-# Current Date and Time
+    # Current Date and Time
 
 **IMPORTANT: The current date and time information below is automatically generated at agent initialization.**
 
@@ -118,6 +120,10 @@ class MainAgent:
 - **System**: {platform.system()}
 
 **Use this information** when responding to user greetings or when time-sensitive context is needed.
+
+    # Runtime Environment
+
+    {environment_context}
 """
 
         # 基礎 prompt + 時間資訊
@@ -161,7 +167,10 @@ class MainAgent:
         )
         config = load_agent_config_chain([cls.ENV_PREFIX], main_defaults, env)
         model = create_openai_model(config, http_client)
-        instructions = build_runtime_instructions(get_prompt(cls.PROMPT_KEY))
+        instructions = build_runtime_instructions(
+            get_prompt(cls.PROMPT_KEY),
+            include_environment_context=False,
+        )
 
         mcp_servers = get_all_mcp_servers()
 
@@ -1185,10 +1194,9 @@ class MainAgent:
             "- 查某日期是星期幾：get_weekday，參數 date_str\n"
             "- 擲骰子：roll_dice\n"
             "- 從清單隨機挑一個：random_pick，參數 items\n"
-            "- 目前工作目錄：get_current_directory\n"
             "- 列出目錄檔案：list_files_in_directory，參數 dir\n"
             "- 讀取檔案內容：read_file，參數 file_path\n"
-            "- 作業系統/架構：get_platform_info\n"
+            "- 目前工作目錄/平台/日期等執行環境資訊：已在 system prompt 提供，原則上不需另外呼叫工具\n"
             "- 股價/股史：get_current_stock_price 或 get_stock_history\n"
             "  - ticker_symbol 請使用使用者原始市場代碼（例如 AAPL、TSLA、7203.T、2330.TW）\n"
             "  - 台股如無後綴，請在 args 補上 2330.TW 或提供 is_taiwan_stock=true\n\n"

@@ -1,6 +1,5 @@
 from pydantic_ai.mcp import MCPServerStdio
 from internal.mcp.client_builder import McpClient
-from internal.mcp.time import time
 from internal.mcp.fetch import fetch
 from internal.mcp.cook import cook
 from internal.mcp.browser import playwright, chrome
@@ -20,7 +19,7 @@ _last_cache_timestamp: str | None = None
 def get_built_in_mcp_servers() -> list[MCPServerStdio]:
     """Returns a fresh list of built-in MCP servers."""
     return [
-        time, fetch, cook, playwright, chrome, taiwan_holiday,
+        fetch, cook, playwright, chrome, taiwan_holiday,
         package_docs,
     ]
 

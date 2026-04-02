@@ -3,11 +3,9 @@ from pydantic_ai import Agent
 
 from .tools.basic_tools import add_basic_tools
 from .tools.file_tools import add_file_tools
-from .tools.interactive_tools import add_interactive_tools
 from .tools.python_tools import add_python_tools
 from .tools.stock_market_tools import add_stock_market_tools
 from .tools.terminal_tools import add_terminal_tools
-from .tools.website_tools import add_website_tools
 from .tools.web_search_tools import add_web_search_tools
 
 
@@ -22,8 +20,6 @@ def add_all_tools(
     add_python_tools(agent)
     add_terminal_tools(agent)
     add_web_search_tools(agent)
-    # add_interactive_tools(agent)
-    # add_website_tools(agent)
     add_stock_market_tools(agent)
     if extra_tools:
         for tool in extra_tools:

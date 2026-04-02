@@ -281,14 +281,19 @@ def build_environment_context(start_dir: Path | None = None) -> str:
     return "\n".join(lines)
 
 
-def build_runtime_instructions(base_instructions: str, start_dir: Path | None = None) -> str:
+def build_runtime_instructions(
+    base_instructions: str,
+    start_dir: Path | None = None,
+    include_environment_context: bool = True,
+) -> str:
     parts: list[str] = []
     base = (base_instructions or "").strip()
     if base:
         parts.append(base)
-    context = build_environment_context(start_dir)
-    if context:
-        parts.append(context)
+    if include_environment_context:
+        context = build_environment_context(start_dir)
+        if context:
+            parts.append(context)
     local_instructions = load_local_instructions(start_dir)
     if local_instructions:
         parts.append("\n\n".join(local_instructions))
