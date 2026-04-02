@@ -4,6 +4,7 @@ import inspect
 import json
 import re
 import sys
+import uuid
 from pathlib import Path
 from typing import Any, cast
 
@@ -30,6 +31,13 @@ from internal.services.agent_factory import (
     AgentConfig,
     create_openai_model,
     load_agent_config_chain,
+)
+from internal.services.config_manager import create_model_for_agent
+from internal.services.subagent_tasks import (
+    AgentToolInput,
+    SendMessageToolInput,
+    SubagentTaskManager,
+    TaskStopToolInput,
 )
 from internal.set_tools import add_all_tools
 from internal.skills_loader import SkillRegistry, load_skill_registry
@@ -347,6 +355,7 @@ class MainAgent:
 
             register_skill_tool(agent, skills)
             add_all_tools(agent)
+            main_agent._register_subagent_tools()
             logger.info("Registered tools on MainAgent")
         except Exception:
             logger.exception(
@@ -382,8 +391,129 @@ class MainAgent:
         self._mcp_tool_names: set[str] | None = None  # 緩存 MCP 工具名稱列表
         self._http_client = http_client  # 保存以便重載 model
         self.skill_root_dirs = list(skill_root_dirs or [])
+        self._session_id = str(uuid.uuid4())
+        self._task_notifications: list[str] = []
+        self._task_manager = SubagentTaskManager(
+            worker=self._run_subagent_task,
+            enqueue_notification=self._enqueue_pending_notification,
+        )
         setattr(self.agent, "_tool_event_callback", None)
         # tools are registered via add_all_tools during create()
+
+    def _register_subagent_tools(self) -> None:
+        @self.agent.tool_plain
+        async def AgentTool(
+            prompt: str,
+            name: str = "",
+            subagent_type: str = "",
+            run_in_background: bool = True,
+            isolation: str = "none",
+            model: str = "",
+        ) -> dict[str, str]:
+            """Create a subagent task. Supports spawn (with subagent_type) and fork (without)."""
+            payload = AgentToolInput(
+                prompt=prompt,
+                name=name or None,
+                subagent_type=subagent_type or None,
+                run_in_background=run_in_background,
+                isolation=cast(Any, isolation or "none"),
+                model=model or None,
+            )
+            return cast(dict[str, str], await self._task_manager.spawnAgentTask(payload, self._session_id))
+
+        @self.agent.tool_plain
+        def SendMessageTool(to: str, message: str) -> dict[str, str | bool]:
+            """Send a follow-up instruction to an existing subagent task."""
+            payload = SendMessageToolInput(to=to, message=message)
+            return self._task_manager.sendMessageToTask(payload, self._session_id)
+
+        @self.agent.tool_plain
+        def TaskStopTool(task_id: str) -> dict[str, str | bool]:
+            """Stop a running or waiting subagent task."""
+            payload = TaskStopToolInput(task_id=task_id)
+            return self._task_manager.stopTask(payload)
+
+        @self.agent.tool_plain
+        def ListSubagentTasks() -> list[dict[str, str | int | bool | None]]:
+            """List current subagent tasks for this coordinator session."""
+            return self._task_manager.listTasks(self._session_id)
+
+    def _enqueue_pending_notification(self, xml: str) -> None:
+        self._task_notifications.append(xml)
+
+    def _drain_task_notifications(self) -> list[str]:
+        if not self._task_notifications:
+            return []
+        items = list(self._task_notifications)
+        self._task_notifications.clear()
+        return items
+
+    def _inject_task_notifications(self, prompt: str) -> str:
+        notifications = self._drain_task_notifications()
+        if not notifications:
+            return prompt
+        joined = "\n".join(notifications)
+        return (
+            "<internal-task-notifications>\n"
+            f"{joined}\n"
+            "</internal-task-notifications>\n\n"
+            f"{prompt}"
+        )
+
+    def _resolve_subagent_type(self, task_type: str | None) -> str:
+        if task_type:
+            return task_type
+        return "general-purpose"
+
+    async def _run_subagent_task(self, task: Any, prompt: str) -> str:
+        if not self._http_client:
+            raise RuntimeError("http_client unavailable for subagent execution")
+
+        subagent_type = self._resolve_subagent_type(getattr(task, "subagentType", None))
+        mode = getattr(task, "mode", "spawn")
+
+        if mode == "fork":
+            model = getattr(self.agent, "_model", None) or getattr(self.agent, "model", None)
+            worker_system_prompt = getattr(self.agent, "system_prompt", "")
+            worker_instructions = getattr(self.agent, "instructions", "")
+            if model is None:
+                raise RuntimeError("Fork subagent requires coordinator model")
+        else:
+            category = f"sub-agent/{subagent_type}"
+            model = create_model_for_agent(
+                agent_name=f"subagent:{subagent_type}",
+                http_client=self._http_client,
+                category=category,
+            )
+            if model is None:
+                model = create_model_for_agent(
+                    agent_name="main",
+                    http_client=self._http_client,
+                    category="core",
+                )
+            if model is None:
+                raise RuntimeError("Unable to resolve model for subagent")
+
+            worker_system_prompt = self._build_enhanced_system_prompt(
+                additional_prompts=None,
+                auto_load_all=True,
+                model_name=getattr(model, "model_name", None),
+            )
+            worker_instructions = (
+                f"You are subagent '{subagent_type}'. Focus only on assigned task and report concise results."
+            )
+
+        worker: Agent[None, str] = Agent(
+            model=model,
+            system_prompt=worker_system_prompt,
+            instructions=worker_instructions,
+            tools=[],
+            model_settings={"temperature": 0.2},
+        )
+        add_all_tools(worker)
+
+        result = await worker.run(prompt)
+        return result.output or ""
 
     def set_tool_event_callback(self, callback) -> None:
         """Register a callback for tool execution events."""
@@ -692,10 +822,30 @@ class MainAgent:
         return None
 
     def list_sub_agents(self) -> list[dict[str, str]]:
-        return []
+        return [
+            {"name": "general-purpose", "description": "General purpose worker for coding/research."},
+            {"name": "explore", "description": "Read-only exploration worker."},
+            {"name": "plan", "description": "Planning and specification worker."},
+            {"name": "verification", "description": "Verification/testing focused worker."},
+        ]
 
     async def ask_sub_agent(self, name: str = "", prompt: str = "", **kwargs) -> str:
-        return "Sub-agent mechanism has been removed."
+        payload = AgentToolInput(
+            prompt=prompt,
+            name=name or None,
+            subagent_type=name or "general-purpose",
+            run_in_background=bool(kwargs.get("run_in_background", False)),
+            isolation=cast(Any, kwargs.get("isolation", "none")),
+            model=kwargs.get("model"),
+        )
+        result = await self._task_manager.spawnAgentTask(payload, self._session_id)
+        task_id = result.get("task_id") or ""
+        task = self._task_manager.registry.getTask(task_id) if task_id else None
+        if not task:
+            return "Subagent task created but no result is available yet."
+        if task.result:
+            return task.result
+        return f"Subagent task started: {task_id}"
 
     def _format_sub_agents_context(self) -> str:
         return ""
@@ -1188,6 +1338,7 @@ class MainAgent:
         self._previous_user_prompt = self._last_user_prompt
         self._last_user_prompt = prompt
         prompt, explicit_subagents = self._prepare_prompt(prompt)
+        prompt = self._inject_task_notifications(prompt)
 
         # 如果啟用 skip_plan_execution，直接讓 agent.run() 自己調用工具
         if skip_plan_execution:
@@ -1338,6 +1489,7 @@ class MainAgent:
         self._previous_user_prompt = self._last_user_prompt
         self._last_user_prompt = prompt
         prompt, explicit_subagents = self._prepare_prompt(prompt)
+        prompt = self._inject_task_notifications(prompt)
 
         # 如果啟用 skip_plan_execution，直接讓 agent.run_stream() 自己調用工具
         if skip_plan_execution:

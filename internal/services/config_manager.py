@@ -346,6 +346,7 @@ def _create_github_copilot_model(
 def create_model_for_agent(
     agent_name: str,
     http_client: AsyncClient,
+    category: Optional[str] = None,
 ) -> Optional[OpenAIChatModel]:
     """
     Create a model for a specific agent.
@@ -353,11 +354,12 @@ def create_model_for_agent(
     Args:
         agent_name: Name of the agent (e.g., "main", "marketing", "function-call")
         http_client: HTTP client for API calls
+        category: Optional category used for default fallback resolution
     
     Returns:
         OpenAIChatModel instance or None if configuration not available
     """
-    config = get_model_config(agent_name)
+    config = get_model_config(agent_name, category=category)
     
     if not config:
         logger.error(
