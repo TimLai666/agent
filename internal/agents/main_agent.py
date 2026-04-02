@@ -475,7 +475,7 @@ class MainAgent:
     async def execute_plan(
         self,
         plan_obj: dict,
-        pre_steps_meta: list[dict[str, Any]] | None = None,
+        _pre_steps_meta: list[dict[str, Any]] | None = None,
     ) -> list[str]:
         """Execute an execution_plan-like object.
 
@@ -1162,7 +1162,7 @@ class MainAgent:
     def _filter_plan_subagent_steps(
         self,
         plan_list: list[dict[str, Any] | Any],
-        names: list[str],
+        _names: list[str],
     ) -> list[dict[str, Any] | Any]:
         return plan_list
 
@@ -1181,16 +1181,16 @@ class MainAgent:
 
     async def _run_subagent_with_semaphore(
         self,
-        name: str,
-        prompt: str,
-        semaphore: asyncio.Semaphore,
+        _name: str,
+        _prompt: str,
+        _semaphore: asyncio.Semaphore,
     ) -> str:
         return "Sub-agent mechanism has been removed."
 
     def _start_subagent_tasks(
         self,
-        names: list[str],
-        prompt: str,
+        _names: list[str],
+        _prompt: str,
     ) -> tuple[list[str], list[asyncio.Task]]:
         return [], []
 

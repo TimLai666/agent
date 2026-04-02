@@ -402,7 +402,7 @@ class AutoWrapTextBrowser(QTextBrowser):
         except Exception:
             pass
 
-    def setOpenExternalLinks(self, open_external: bool) -> None:
+    def setOpenExternalLinks(self, _open_external: bool) -> None:
         super().setOpenExternalLinks(False)
 
     def _handle_anchor_clicked(self, url: QUrl) -> None:

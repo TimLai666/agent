@@ -25,35 +25,6 @@ def discover_agents() -> List[Dict[str, str]]:
     return sorted(agents, key=lambda x: (x["category"], x["name"]))
 
 
-def get_agent_categories() -> Dict[str, List[str]]:
-    """
-    獲取按類別分組的 agent 列表
-    
-    Returns:
-        Dict mapping category to list of agent names
-    """
-    agents = discover_agents()
-    categories = {}
-    
-    for agent in agents:
-        category = agent["category"]
-        if category not in categories:
-            categories[category] = []
-        categories[category].append(agent["name"])
-    
-    return categories
-
-
-def get_all_agent_names() -> List[str]:
-    """
-    獲取所有 agent 名稱列表
-    
-    Returns:
-        List of agent names
-    """
-    return [agent["name"] for agent in discover_agents()]
-
-
 if __name__ == "__main__":
     # 測試
     print("發現的 Agents:")

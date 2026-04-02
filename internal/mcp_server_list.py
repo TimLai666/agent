@@ -89,9 +89,3 @@ def get_all_mcp_servers() -> list[MCPServerStdio]:
     return _mcp_cache
 
 
-def invalidate_mcp_cache():
-    """Force reload of MCP servers on next get_all_mcp_servers() call."""
-    global _mcp_cache, _last_cache_timestamp
-    _mcp_cache = None
-    _last_cache_timestamp = None
-    logger.debug("MCP cache invalidated")
