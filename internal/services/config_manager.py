@@ -41,13 +41,26 @@ def normalize_base_url(base_url: str | None) -> str | None:
     return base_url
 
 
-def get_model_config(agent_name: str) -> Optional[ModelConfig]:
+def get_model_config(agent_name: str, category: Optional[str] = None) -> Optional[ModelConfig]:
     """
     Get complete model configuration for an agent.
     Returns None if no configuration exists.
+
+    Args:
+        agent_name: Name of the agent
+        category: Optional category for default config fallback (e.g., "core", "co-agent", "sub-agent/...")
     """
-    # Get agent configuration
-    agent_config = get_agent_config(agent_name)
+    # Determine category if not provided
+    if category is None:
+        # Auto-detect category based on agent name
+        if agent_name in ["main"]:
+            category = "core"
+        elif agent_name in ["philosopher"]:
+            category = "co-agent"
+        # Sub-agents are handled by registry with explicit category
+
+    # Get agent configuration with category support
+    agent_config = get_agent_config(agent_name, category=category)
     if not agent_config:
         logger.warning(f"No configuration found for agent '{agent_name}'")
         return None
@@ -130,7 +143,6 @@ async def _get_copilot_token(github_token: str) -> str:
     
     token_endpoints = [
         "https://api.github.com/copilot_internal/v2/token",
-        "https://copilot-proxy.githubusercontent.com/v2/token",
     ]
     
     headers = {
@@ -246,6 +258,8 @@ def _create_github_copilot_model(
             request.headers["User-Agent"] = "GitHubCopilotChat/1.0"
             request.headers["Editor-Version"] = "vscode/1.85.0"
             request.headers["Editor-Plugin-Version"] = "copilot-chat/0.11.0"
+            if _request_has_vision_content(request):
+                request.headers["Copilot-Vision-Request"] = "true"
             
             logger.debug(f"Copilot API request: {request.method} {request.url}")
             
@@ -277,6 +291,39 @@ def _create_github_copilot_model(
                     logger.debug(f"Could not fix response format: {e}")
             
             return response
+
+    def _request_has_vision_content(request: Request) -> bool:
+        try:
+            content_type = request.headers.get("content-type", "")
+            if "application/json" not in content_type:
+                return False
+            raw = request.content
+            if not raw:
+                return False
+            try:
+                import json
+                payload = json.loads(raw.decode("utf-8"))
+            except Exception:
+                return False
+            messages = payload.get("messages") or []
+            for message in messages:
+                content = message.get("content")
+                if isinstance(content, list):
+                    for part in content:
+                        if not isinstance(part, dict):
+                            continue
+                        part_type = part.get("type")
+                        if part_type in {"image_url", "image", "input_image"}:
+                            return True
+                        if part_type == "file" and part.get("file"):
+                            return True
+                elif isinstance(content, dict):
+                    part_type = content.get("type")
+                    if part_type in {"image_url", "image", "input_image"}:
+                        return True
+            return False
+        except Exception:
+            return False
     
     copilot_http_client = CopilotTokenInterceptor(
         github_token=config.github_token,

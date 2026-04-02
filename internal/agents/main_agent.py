@@ -8,7 +8,13 @@ from typing import Any, cast
 
 from httpx import AsyncClient
 from pydantic_ai import Agent
-from pydantic_ai.messages import ModelRequest, ModelResponse
+from pydantic_ai.messages import (
+    BinaryContent,
+    ImageUrl,
+    ModelRequest,
+    ModelResponse,
+    UserContent,
+)
 
 from internal.co_agents.philosopher import PhilosopherCoAgent
 from internal.logger import logger
@@ -16,6 +22,8 @@ from internal.prompts import (
     SYSTEM_PROMPT,
     build_runtime_instructions,
     get_prompt,
+    get_system_prompt_processed,
+    build_combined_system_prompt,
     load_keyword_triggers,
     load_subagent_background_config,
 )
@@ -28,7 +36,7 @@ from internal.set_tools import add_all_tools
 from internal.skills_loader import SkillRegistry, load_skill_registry
 from internal.sub_agents import SubAgentRegistry, load_sub_agent_registry
 
-from internal.mcp_server_list import all_mcp_servers
+from internal.mcp_server_list import get_all_mcp_servers
 
 PROMPT_KEY = "MAIN_AGENT_PROMPT"
 ENV_PREFIX = "MAIN"
@@ -49,6 +57,84 @@ class MainAgent:
     PROMPT_KEY = PROMPT_KEY
     ENV_PREFIX = ENV_PREFIX
     TOOL_RECOVERY_MAX_ATTEMPTS = 2
+    _IMAGE_DIRECTIVE_RE = re.compile(r"(?mi)^\s*(?:image|img)\s*:\s*(?P<target>.+?)\s*$")
+    _IMAGE_MARKDOWN_RE = re.compile(r"!\[(?P<alt>[^\]]*)\]\((?P<target>[^)]+)\)")
+
+    @classmethod
+    def _build_enhanced_system_prompt(
+        cls,
+        additional_prompts: list[str] | None = None,
+        auto_load_all: bool = True,
+    ) -> str:
+        """建立增強的 system prompt。
+
+        Args:
+            additional_prompts: 要加入的額外 system prompt 名稱列表
+            auto_load_all: 是否自動載入所有可用的 system prompts（預設 True）
+
+        Returns:
+            組合後的 system prompt
+        """
+        from internal.prompts import list_available_system_prompts
+        from datetime import datetime
+        import platform
+
+        # 如果啟用自動載入，載入所有可用的 prompts
+        if auto_load_all and additional_prompts is None:
+            additional_prompts = list_available_system_prompts()
+            logger.info(f"Auto-loading {len(additional_prompts)} system prompts")
+
+        # 獲取當前時間資訊
+        now = datetime.now()
+        weekday_names = {
+            0: "Monday",
+            1: "Tuesday",
+            2: "Wednesday",
+            3: "Thursday",
+            4: "Friday",
+            5: "Saturday",
+            6: "Sunday"
+        }
+        weekday_chinese = {
+            0: "週一",
+            1: "週二",
+            2: "週三",
+            3: "週四",
+            4: "週五",
+            5: "週六",
+            6: "週日"
+        }
+
+        weekday_en = weekday_names[now.weekday()]
+        weekday_zh = weekday_chinese[now.weekday()]
+
+        # 構建時間資訊
+        time_info = f"""
+# Current Date and Time
+
+**IMPORTANT: The current date and time information below is automatically generated at agent initialization.**
+
+- **Current Date**: {now.strftime('%Y-%m-%d')} ({weekday_en} / {weekday_zh})
+- **Current Time**: {now.strftime('%H:%M:%S')}
+- **Full DateTime**: {now.strftime('%Y-%m-%d %H:%M:%S %A')}
+- **Time of Day**: {"Morning (早上)" if 6 <= now.hour < 12 else "Afternoon (下午)" if 12 <= now.hour < 18 else "Evening (晚上)" if 18 <= now.hour < 24 else "Late Night (深夜)"}
+- **System**: {platform.system()}
+
+**Use this information** when responding to user greetings or when time-sensitive context is needed.
+"""
+
+        # 基礎 prompt + 時間資訊
+        base_with_time = SYSTEM_PROMPT + "\n\n" + time_info
+
+        if not additional_prompts:
+            return base_with_time
+
+        # 使用 build_combined_system_prompt 組合 prompts
+        return build_combined_system_prompt(
+            base_prompt=base_with_time,
+            additional_prompts=additional_prompts,
+            separator="\n\n---\n\n",
+        )
 
     @classmethod
     def create(
@@ -59,6 +145,8 @@ class MainAgent:
         philosopher: PhilosopherCoAgent,
         sub_agents: SubAgentRegistry | None = None,
         skills: SkillRegistry | None = None,
+        additional_system_prompts: list[str] | None = None,
+        auto_load_all_prompts: bool = True,
     ) -> "MainAgent":
         # Load skills first (so sub-agents can use them)
         if skills is None:
@@ -98,12 +186,18 @@ class MainAgent:
         instructions = build_runtime_instructions(get_prompt(cls.PROMPT_KEY))
         if sub_agents and not sub_agents.is_empty():
             instructions += "\n\nSub-agents are available via tools: list_sub_agents, ask_sub_agent."
-   
-        mcp_servers = all_mcp_servers
+
+        mcp_servers = get_all_mcp_servers()
+
+        # 建立增強的 system prompt（預設自動載入所有可用的 prompts）
+        enhanced_system_prompt = cls._build_enhanced_system_prompt(
+            additional_prompts=additional_system_prompts,
+            auto_load_all=auto_load_all_prompts
+        )
 
         agent: Agent[None, str] = Agent(
             model=model,
-            system_prompt=SYSTEM_PROMPT,
+            system_prompt=enhanced_system_prompt,
             instructions=instructions,
             tools=[],
             model_settings={"temperature": config.temperature},
@@ -112,7 +206,7 @@ class MainAgent:
 
         planner_agent: Agent[None, str] = Agent(
             model=model,
-            system_prompt=SYSTEM_PROMPT,
+            system_prompt=enhanced_system_prompt,
             instructions=(
                 "你是嚴格的 JSON 轉換器。"
                 "只負責把主 agent 給你的工具請求轉成 JSON，"
@@ -123,7 +217,7 @@ class MainAgent:
         )
         discussion_agent: Agent[None, str] = Agent(
             model=model,
-            system_prompt=SYSTEM_PROMPT,
+            system_prompt=enhanced_system_prompt,
             instructions=(
                 "You are the main agent in an internal discussion with the philosopher. "
                 "Provide a concise candidate answer for the user and respond to critique. "
@@ -164,6 +258,12 @@ class MainAgent:
 
                     @functools.wraps(func)
                     async def wrapped_async(*args, **kwargs):
+                        callback = getattr(agent, "_tool_event_callback", None)
+                        if callback:
+                            try:
+                                callback({"stage": "start", "tool": func.__name__, "args": args, "kwargs": kwargs})
+                            except Exception as exc:
+                                logger.debug("Tool event callback failed on start.", exc_info=True)
                         logger.info(
                             "Tool call start: %s args=%s kwargs=%s",
                             func.__name__,
@@ -175,11 +275,21 @@ class MainAgent:
                             logger.info(
                                 "Tool call end: %s result=%s", func.__name__, res
                             )
+                            if callback:
+                                try:
+                                    callback({"stage": "end", "tool": func.__name__, "args": args, "kwargs": kwargs, "result": res})
+                                except Exception as exc:
+                                    logger.debug("Tool event callback failed on end.", exc_info=True)
                             return res
-                        except Exception:
+                        except Exception as exc:
                             logger.exception(
                                 "Tool %s raised an exception", func.__name__
                             )
+                            if callback:
+                                try:
+                                    callback({"stage": "error", "tool": func.__name__, "args": args, "kwargs": kwargs, "error": str(exc)})
+                                except Exception as exc:
+                                    logger.debug("Tool event callback failed on error.", exc_info=True)
                             raise
 
                     wrapped_callable = wrapped_async
@@ -187,6 +297,12 @@ class MainAgent:
 
                     @functools.wraps(func)
                     def wrapped_sync(*args, **kwargs):
+                        callback = getattr(agent, "_tool_event_callback", None)
+                        if callback:
+                            try:
+                                callback({"stage": "start", "tool": func.__name__, "args": args, "kwargs": kwargs})
+                            except Exception as exc:
+                                logger.debug("Tool event callback failed on start.", exc_info=True)
                         logger.info(
                             "Tool call start: %s args=%s kwargs=%s",
                             func.__name__,
@@ -198,11 +314,21 @@ class MainAgent:
                             logger.info(
                                 "Tool call end: %s result=%s", func.__name__, res
                             )
+                            if callback:
+                                try:
+                                    callback({"stage": "end", "tool": func.__name__, "args": args, "kwargs": kwargs, "result": res})
+                                except Exception as exc:
+                                    logger.debug("Tool event callback failed on end.", exc_info=True)
                             return res
-                        except Exception:
+                        except Exception as exc:
                             logger.exception(
                                 "Tool %s raised an exception", func.__name__
                             )
+                            if callback:
+                                try:
+                                    callback({"stage": "error", "tool": func.__name__, "args": args, "kwargs": kwargs, "error": str(exc)})
+                                except Exception as exc:
+                                    logger.debug("Tool event callback failed on error.", exc_info=True)
                             raise
 
                     wrapped_callable = wrapped_sync
@@ -220,6 +346,7 @@ class MainAgent:
             discussion_agent,
             decider_agent,
             skills,
+            http_client,
         )
         try:
             add_all_tools(
@@ -230,8 +357,6 @@ class MainAgent:
                     main_agent.ask_sub_agent,
                 ],
             )
-            if sub_agents and not sub_agents.is_empty():
-                sub_agents.register_tools(agent)
             logger.info("Registered tools on MainAgent")
         except Exception:
             logger.exception(
@@ -252,6 +377,7 @@ class MainAgent:
         discussion_agent: Agent[None, str] | None = None,
         decider_agent: Agent[None, str] | None = None,
         skills: SkillRegistry | None = None,
+        http_client: AsyncClient | None = None,
     ) -> None:
         self.agent = agent
         self.philosopher = philosopher
@@ -266,7 +392,46 @@ class MainAgent:
         self._previous_user_prompt: str | None = None
         self._last_assistant_reply: str | None = None
         self._mcp_tool_names: set[str] | None = None  # 緩存 MCP 工具名稱列表
+        self._http_client = http_client  # 保存以便重載 model
+        setattr(self.agent, "_tool_event_callback", None)
         # tools are registered via add_all_tools during create()
+
+    def set_tool_event_callback(self, callback) -> None:
+        """Register a callback for tool execution events."""
+        setattr(self.agent, "_tool_event_callback", callback)
+
+    def _reload_model_from_db(self) -> None:
+        """從資料庫重新載入配置並更新 model。
+        
+        每次 run() 或 run_stream() 時都會調用，確保使用最新的配置。
+        """
+        if not self._http_client:
+            logger.warning("無法重載 model：沒有 http_client")
+            return
+        
+        try:
+            # 從資料庫載入最新配置
+            config = AgentConfig(
+                name="main",
+                base_url=None,
+                api_key=None,
+                model_name="",
+                temperature=0.5,
+            )
+            new_model = create_openai_model(config, self._http_client)
+            
+            # 更新所有 agent 的 model
+            self.agent._model = new_model
+            if self._planner_agent and self._planner_agent is not self.agent:
+                self._planner_agent._model = new_model
+            if self._discussion_agent and self._discussion_agent is not self.agent:
+                self._discussion_agent._model = new_model
+            if self._decider_agent and self._decider_agent is not self.agent:
+                self._decider_agent._model = new_model
+            
+            logger.debug("已從資料庫重載 model 配置")
+        except Exception:
+            logger.exception("重載 model 配置失敗，繼續使用現有配置")
 
     async def _extract_execution_plan(self, text: str) -> dict | None:
         """Try to extract an execution plan JSON from free text.
@@ -1233,6 +1398,78 @@ class MainAgent:
         text = re.sub(r"```[\s\S]*?```", "", text)
         return re.sub(r"`[^`]+`", "", text)
 
+    def _normalize_image_directives(self, prompt: str) -> str:
+        if not prompt:
+            return prompt
+
+        def replace_directive(match: re.Match) -> str:
+            target = match.group("target").strip()
+            return f"![image]({target})"
+
+        return self._IMAGE_DIRECTIVE_RE.sub(replace_directive, prompt)
+
+    def _resolve_image_content(self, target: str) -> tuple[UserContent | None, str | None]:
+        raw_target = (target or "").strip()
+        if not raw_target:
+            return None, "圖片參照為空。"
+        if raw_target.startswith("<") and raw_target.endswith(">"):
+            raw_target = raw_target[1:-1].strip()
+        raw_target = raw_target.strip().strip("\"'").strip()
+
+        if raw_target.startswith("data:"):
+            try:
+                content = BinaryContent.from_data_uri(raw_target)
+            except Exception as exc:
+                return None, f"圖片 data URI 無效：{exc}"
+            if not content.is_image:
+                return None, "Data URI 不是圖片格式。"
+            return content, None
+
+        if re.match(r"^https?://", raw_target, flags=re.IGNORECASE):
+            return ImageUrl(raw_target), None
+
+        if raw_target.lower().startswith("file://"):
+            raw_target = raw_target[7:]
+
+        try:
+            content = BinaryContent.from_path(raw_target)
+        except Exception as exc:
+            return None, f"無法讀取圖片 '{raw_target}': {exc}"
+        if not content.is_image:
+            return None, f"不支援的圖片格式 '{raw_target}' (media_type={content.media_type})."
+        return content, None
+
+    def _build_user_prompt_content(self, prompt: str) -> tuple[list[UserContent], list[str]]:
+        normalized = self._normalize_image_directives(prompt)
+        parts: list[UserContent] = []
+        errors: list[str] = []
+        last = 0
+        for match in self._IMAGE_MARKDOWN_RE.finditer(normalized):
+            if match.start() > last:
+                parts.append(normalized[last:match.start()])
+            target = match.group("target")
+            content, error = self._resolve_image_content(target)
+            if error:
+                errors.append(error)
+                parts.append(match.group(0))
+            elif content is not None:
+                parts.append(content)
+            last = match.end()
+        if last < len(normalized):
+            parts.append(normalized[last:])
+        if not parts:
+            parts = [normalized]
+        if errors:
+            parts.append("\n\n[圖片載入錯誤]\n" + "\n".join(errors))
+        return parts, errors
+
+    def _append_error_to_user_content(
+        self,
+        content: list[UserContent],
+        error_context: str,
+    ) -> list[UserContent]:
+        return [*content, error_context]
+
     def _apply_keyword_triggers(self, prompt: str) -> tuple[str, dict[str, Any]]:
         triggers = load_keyword_triggers()
         if not triggers or not prompt:
@@ -1543,8 +1780,11 @@ class MainAgent:
         self,
         prompt: str,
         message_history: list[ModelRequest | ModelResponse] | None = None,
-        skip_plan_execution: bool = False,  # 默認跳過 plan execution，讓 agent 自己調用工具
+        skip_plan_execution: bool = True,  # 默認跳過 plan execution，讓 agent 自己調用工具
     ) -> str:
+        # 每次執行前從資料庫重載配置
+        self._reload_model_from_db()
+        
         self._previous_user_prompt = self._last_user_prompt
         self._last_user_prompt = prompt
         prompt, explicit_subagents = self._prepare_prompt(prompt)
@@ -1571,9 +1811,10 @@ class MainAgent:
                         exec_text = "\n".join(parallel_results)
                         prompt = f"{prompt}\n\nSub-agent results:\n{exec_text}"
             
+            user_content, _ = self._build_user_prompt_content(prompt)
             # 直接調用 agent.run()，捕獲 MCP 工具錯誤
             try:
-                result = await self.agent.run(prompt, message_history=message_history)
+                result = await self.agent.run(user_content, message_history=message_history)
                 try:
                     self._last_messages = result.all_messages()
                 except Exception:
@@ -1594,7 +1835,12 @@ class MainAgent:
                 
                 # 重新調用 agent.run()，這次不呼叫工具，只是讓 LLM 看到錯誤並生成回應
                 try:
-                    result = await self.agent.run(prompt + error_context, message_history=message_history)
+                    user_content_with_error = self._append_error_to_user_content(
+                        user_content, error_context
+                    )
+                    result = await self.agent.run(
+                        user_content_with_error, message_history=message_history
+                    )
                     try:
                         self._last_messages = result.all_messages()
                     except Exception:
@@ -1635,36 +1881,45 @@ class MainAgent:
         parallel_results: list[str] = []
         parallel_meta: list[dict[str, Any]] = []
         order, tasks = self._start_subagent_tasks(parallel_subagents, prompt)
-        if order and tasks and background_mode and plan_list:
-            exec_results.extend(await self.execute_plan({"plan": plan_list}))
-            plan_meta = list(self._last_execution_steps or [])
+        # Present plan as suggestions rather than forcing tool execution.
+        # This allows the LLM to consider the plan and choose whether to call tools itself.
+        if order and tasks:
             parallel_results, parallel_meta = await self._collect_subagent_results(
                 order, tasks, prompt
             )
-            exec_results.extend(parallel_results)
-            self._last_execution_steps = plan_meta + parallel_meta
-        else:
-            if order and tasks:
-                parallel_results, parallel_meta = await self._collect_subagent_results(
-                    order, tasks, prompt
-                )
-                if parallel_results:
-                    exec_results.extend(parallel_results)
-            if plan_list:
-                exec_results.extend(
-                    await self.execute_plan(
-                        {"plan": plan_list}, pre_steps_meta=parallel_meta
-                    )
-                )
-            else:
-                self._last_execution_steps = parallel_meta
+            if parallel_results:
+                exec_results.extend(parallel_results)
+        plan_meta: list[dict[str, Any]] = []
+        if plan_list:
+            suggested_lines: list[str] = []
+            for idx, step in enumerate(plan_list, start=1):
+                tool_name = step.get("tool") if isinstance(step, dict) else None
+                args = step.get("args", {}) if isinstance(step, dict) else {}
+                note = step.get("note") if isinstance(step, dict) else None
+                header = f"Suggested Step {idx}: {tool_name}"
+                if note:
+                    header += f"  ({note})"
+                args_text = ""
+                if args:
+                    try:
+                        args_text = f" args: {json.dumps(args, ensure_ascii=False)}"
+                    except Exception:
+                        args_text = f" args: {str(args)}"
+                line = header + args_text
+                suggested_lines.append(line)
+                plan_meta.append({"tool": tool_name, "args": args, "note": note, "suggested": True})
+            if suggested_lines:
+                exec_results.extend(suggested_lines)
+        # Record combined metadata (suggested plan steps + any parallel sub-agent meta)
+        self._last_execution_steps = list(plan_meta) + (parallel_meta if 'parallel_meta' in locals() else [])
         current_time = self._extract_current_time()
         if current_time:
             prompt = f"Current time: {current_time}\n\n{prompt}"
         if exec_results:
             exec_text = "\n".join(exec_results)
             prompt = f"{prompt}\n\nTool execution results:\n{exec_text}"
-        result = await self.agent.run(prompt, message_history=message_history)
+        user_content, _ = self._build_user_prompt_content(prompt)
+        result = await self.agent.run(user_content, message_history=message_history)
         try:
             self._last_messages = result.all_messages()
         except Exception:
@@ -1676,9 +1931,12 @@ class MainAgent:
         self,
         prompt: str,
         message_history: list[ModelRequest | ModelResponse] | None = None,
-        skip_plan_execution: bool = False,  # 默認使用 plan execution
+        skip_plan_execution: bool = True,  # 默認跳過 plan execution，讓 agent 自己調用工具
     ):
         """Streamed version of run(): yields chunks from philosopher/subagents/main agent as they produce output."""
+        # 每次執行前從資料庫重載配置
+        self._reload_model_from_db()
+        
         self._previous_user_prompt = self._last_user_prompt
         self._last_user_prompt = prompt
         prompt, explicit_subagents = self._prepare_prompt(prompt)
@@ -1705,10 +1963,11 @@ class MainAgent:
                         exec_text = "\n".join(parallel_results)
                         prompt = f"{prompt}\n\nSub-agent results:\n{exec_text}"
             
+            user_content, _ = self._build_user_prompt_content(prompt)
             # 直接調用 agent.run_stream()，捕獲 MCP 工具錯誤
             try:
                 async with self.agent.run_stream(
-                    user_prompt=prompt, message_history=message_history
+                    user_prompt=user_content, message_history=message_history
                 ) as result:
                     collected = ""
                     try:
@@ -1749,8 +2008,11 @@ class MainAgent:
                 
                 # 重新調用 agent.run_stream()，這次不呼叫工具，只是讓 LLM 看到錯誤並生成回應
                 try:
+                    user_content_with_error = self._append_error_to_user_content(
+                        user_content, error_context
+                    )
                     async with self.agent.run_stream(
-                        user_prompt=prompt + error_context, message_history=message_history
+                        user_prompt=user_content_with_error, message_history=message_history
                     ) as result:
                         collected = ""
                         async for chunk in result.stream_text(delta=True):
@@ -1814,287 +2076,57 @@ class MainAgent:
             exec_results.extend(parallel_results)
             pending_parallel = False
         if parallel_results or plan_list or pending_parallel:
-            yield "<tool-execution>\n"
-            open_block = True
-            registered = self._get_function_tools()
-            allowed_names = set(registered.keys())
+            # Present the plan as suggestions (do not execute tools in plan mode).
+            yield "<plan-suggestion>\n"
+            suggestion_lines: list[str] = []
+            steps_meta: list[dict[str, Any]] = []
+            # include parallel results first (no change)
             for line in parallel_results:
                 yield line + "\n"
+                suggestion_lines.append(line)
+            # present suggested plan steps
             for idx, step in enumerate(plan_list, start=1):
                 tool_name = step.get("tool") if isinstance(step, dict) else None
                 args = step.get("args", {}) if isinstance(step, dict) else {}
                 note = step.get("note") if isinstance(step, dict) else None
-                header = f"Step {idx}: {tool_name}"
+                header = f"Suggested Step {idx}: {tool_name}"
                 if note:
                     header += f"  ({note})"
-                yield header + "\n"
-                exec_results.append(header)
-                step_meta: dict[str, Any] = {
-                    "tool": tool_name,
-                    "args": args,
-                    "note": note,
-                }
+                args_text = ""
+                if args:
+                    try:
+                        args_text = f" args: {json.dumps(args, ensure_ascii=False)}"
+                    except Exception:
+                        args_text = f" args: {str(args)}"
+                line = header + args_text
+                yield line + "\n"
+                suggestion_lines.append(line)
+                steps_meta.append({"tool": tool_name, "args": args, "note": note, "suggested": True})
 
-                attempts = 0
-                current_tool = tool_name
-                current_args = args
-                current_error = ""
-                while True:
-                    if (
-                        isinstance(current_tool, str)
-                        and "ask_philosopher" in allowed_names
-                    ):
-                        if current_tool == "ask_philosopher":
-                            question = ""
-                            if isinstance(current_args, dict):
-                                question = str(
-                                    current_args.get("question")
-                                    or current_args.get("prompt")
-                                    or ""
-                                ).strip()
-                            if not question:
-                                question = self._build_sub_agent_prompt(
-                                    note, current_args, step_outputs
-                                )
-                            current_args = {
-                                "question": self._build_philosopher_prompt(
-                                    note, current_args, step_outputs, question
-                                )
-                            }
-                        elif current_tool in {"philosopher", "哲學家"}:
-                            question = self._build_sub_agent_prompt(
-                                note, current_args, step_outputs
-                            )
-                            current_tool = "ask_philosopher"
-                            current_args = {
-                                "question": self._build_philosopher_prompt(
-                                    note, current_args, step_outputs, question
-                                )
-                            }
-                        elif current_tool == "ask_sub_agent":
-                            name = ""
-                            if isinstance(current_args, dict):
-                                name = str(current_args.get("name", "")).strip().lower()
-                            if name in {
-                                "philosopher",
-                                "哲學家",
-                                "philosopher-co-agent",
-                            }:
-                                question = ""
-                                if isinstance(current_args, dict):
-                                    question = str(
-                                        current_args.get("prompt", "")
-                                    ).strip()
-                                if not question:
-                                    question = self._build_sub_agent_prompt(
-                                        note, current_args, step_outputs
-                                    )
-                                current_tool = "ask_philosopher"
-                                current_args = {
-                                    "question": self._build_philosopher_prompt(
-                                        note, current_args, step_outputs, question
-                                    )
-                                }
-
-                    if (
-                        self.sub_agents
-                        and isinstance(current_tool, str)
-                        and self.sub_agents.get_agent(current_tool)
-                        and "ask_sub_agent" in allowed_names
-                    ):
-                        prompt = self._build_sub_agent_prompt(
-                            note, current_args, step_outputs
-                        )
-                        current_args = {"name": current_tool, "prompt": prompt}
-                        current_tool = "ask_sub_agent"
-
-                    if not current_tool:
-                        current_error = "Missing 'tool' field."
-                    elif current_tool not in allowed_names:
-                        # 檢查是否為 MCP 工具
-                        if isinstance(current_tool, str) and self._is_mcp_tool(current_tool):
-                            # MCP 工具的錯誤：記錄後跳出，不進入 recovery
-                            # 這樣錯誤資訊會被傳遞給 LLM，由 LLM 生成友好的回應
-                            error_msg = (
-                                f"MCP tool '{current_tool}' cannot be executed in plan mode. "
-                                "This tool requires agent runtime context."
-                            )
-                            step_meta["error"] = error_msg
-                            line = f"  -> MCP tool error: {error_msg}"
-                            yield line + "\n"
-                            exec_results.append(line)
-                            break  # 跳出 while True 循環，不進入 recovery
-                        else:
-                            current_error = f"Tool '{current_tool}' is not registered."
-                    
-                    if not current_error and current_tool in allowed_names:
-                        
-                        if current_args:
-                            current_args = self._resolve_args(
-                                current_args, step_outputs
-                            )
-                        if current_args is None:
-                            current_args = {}
-                        elif not isinstance(current_args, dict):
-                            current_args = {"value": current_args}
-                        tool_def = (
-                            registered.get(str(current_tool))
-                            if isinstance(current_tool, str)
-                            else None
-                        )
-                        if tool_def is None:
-                            current_error = f"Tool '{current_tool}' declared but not found on agent runtime."
-                        elif getattr(tool_def, "takes_ctx", False):
-                            current_error = f"Tool '{current_tool}' requires context and cannot be called directly."
-                        else:
-                            callable_obj = tool_def.function
-                            try:
-                                try:
-                                    schema = tool_def.function_schema.json_schema or {}
-                                    expected_keys = list(
-                                        (schema.get("properties") or {}).keys()
-                                    )
-                                except Exception:
-                                    expected_keys = []
-                                if current_args and expected_keys:
-                                    expected_set = set(expected_keys)
-                                    if not set(current_args.keys()).issubset(
-                                        expected_set
-                                    ):
-                                        if (
-                                            len(expected_keys) == 1
-                                            and len(current_args) == 1
-                                        ):
-                                            current_args = {
-                                                expected_keys[0]: next(
-                                                    iter(current_args.values())
-                                                )
-                                            }
-                                if current_tool == "get_stock_history":
-                                    period = current_args.get("period")
-                                    if isinstance(period, str):
-                                        normalized = period.lower()
-                                        if normalized in {"month", "1m"}:
-                                            current_args["period"] = "1mo"
-                                        elif normalized in {"3m"}:
-                                            current_args["period"] = "3mo"
-
-                                if current_tool == "ask_philosopher":
-                                    question = str(current_args.get("question", ""))
-                                    yield "  -> result: (see discussion)\n"
-                                    if open_block:
-                                        yield "</tool-execution>\n"
-                                        open_block = False
-                                    yield "<discussion>\n"
-                                    transcript_lines: list[str] = []
-                                    async for (
-                                        line
-                                    ) in self._run_philosopher_discussion_stream(
-                                        question
-                                    ):
-                                        yield line + "\n"
-                                        transcript_lines.append(line)
-                                    yield "</discussion>\n"
-                                    transcript = "\n".join(transcript_lines)
-                                    exec_results.append(f"  -> result: {transcript}")
-                                    step_outputs.append(transcript)
-                                    step_meta["result"] = transcript
-                                    step_meta["tool"] = current_tool
-                                    if idx < len(plan_list):
-                                        yield "<tool-execution>\n"
-                                        open_block = True
-                                    break
-
-                                logger.info(
-                                    "Executing tool '%s' with args: %s",
-                                    current_tool,
-                                    current_args,
-                                )
-                                if inspect.iscoroutinefunction(callable_obj):
-                                    res = await callable_obj(**current_args)
-                                else:
-                                    maybe = (
-                                        callable_obj(**current_args)
-                                        if current_args
-                                        else callable_obj()
-                                    )
-                                    if asyncio.iscoroutine(maybe):
-                                        res = await maybe
-                                    else:
-                                        res = maybe
-                                logger.info(
-                                    "Tool '%s' execution result: %s", current_tool, res
-                                )
-                                line = f"  -> result: {res}"
-                                yield line + "\n"
-                                exec_results.append(line)
-                                step_outputs.append(str(res))
-                                step_meta["result"] = res
-                                step_meta["tool"] = current_tool
-                                break
-                            except Exception as e:
-                                logger.exception(
-                                    "Error executing tool %s", current_tool
-                                )
-                                current_error = f"Execution error: {e}"
-                                step_meta["error"] = current_error
-
-                    if attempts >= self.TOOL_RECOVERY_MAX_ATTEMPTS:
-                        if current_error:
-                            line = f"  -> execution error: {current_error}"
-                            yield line + "\n"
-                            exec_results.append(line)
-                            step_meta["error"] = current_error
-                        break
-
-                    attempts += 1
-                    line = f"  -> recovery attempt {attempts}: {current_error}"
-                    yield line + "\n"
-                    exec_results.append(line)
-                    recovery = await self._recover_tool_call(
-                        tool=current_tool,
-                        args=current_args,
-                        error=current_error,
-                        note=note,
-                    )
-                    if not recovery:
-                        line = "  -> recovery failed: no corrected tool call returned"
-                        yield line + "\n"
-                        exec_results.append(line)
-                        step_meta["error"] = (
-                            "recovery failed: no corrected tool call returned"
-                        )
-                        break
-                    current_tool = recovery.get("tool")
-                    current_args = recovery.get("args", {})
-
-                steps_meta.append(step_meta)
-
+            # if parallel tasks are still pending, collect their results
             if pending_parallel:
-                if not open_block:
-                    yield "<tool-execution>\n"
-                    open_block = True
                 parallel_results, parallel_meta = await self._collect_subagent_results(
                     order, tasks, prompt
                 )
                 steps_meta.extend(parallel_meta)
-                exec_results.extend(parallel_results)
+                suggestion_lines.extend(parallel_results)
                 for line in parallel_results:
                     yield line + "\n"
 
-            if open_block:
-                yield "</tool-execution>\n"
+            # finalize suggestion block
+            yield "</plan-suggestion>\n"
             self._last_execution_steps = steps_meta
             current_time = self._extract_current_time()
-            exec_text = "\n".join(exec_results)
-            prompt = f"{prompt}\n\nTool execution results:\n{exec_text}"
+            exec_text = "\n".join(exec_results + suggestion_lines)
+            prompt = f"{prompt}\n\nTool suggestion results:\n{exec_text}"
         if current_time:
             prompt = f"Current time: {current_time}\n\n{prompt}"
         
         # 捕獲最終 agent.run_stream() 的錯誤（包括 MCP 工具錯誤）
         try:
+            user_content, _ = self._build_user_prompt_content(prompt)
             async with self.agent.run_stream(
-                user_prompt=prompt, message_history=message_history
+                user_prompt=user_content, message_history=message_history
             ) as result:
                 collected = ""
                 try:

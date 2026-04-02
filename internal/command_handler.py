@@ -4,6 +4,11 @@ CLI 和 GUI 模式都使用此模組處理用戶指令
 """
 
 from typing import Callable, Optional
+import threading
+import webbrowser
+
+from internal.services import config_webui
+from internal.services import config_cli
 from internal.agents import MainAgent
 from internal.logger import logger
 
@@ -17,6 +22,7 @@ class CommandHandler:
         history: list[tuple[str, str]],
         output_callback: Optional[Callable[[str], None]] = None,
         exit_callback: Optional[Callable[[], None]] = None,
+        gui_window = None,
     ):
         """
         初始化指令處理器
@@ -26,11 +32,13 @@ class CommandHandler:
             history: 對話歷史記錄（用戶輸入、助手回覆）列表
             output_callback: 輸出回調函數（用於 GUI 顯示），如果為 None 則使用 print
             exit_callback: 退出回調函數（用於 GUI 關閉視窗）
+            gui_window: GUI 主窗口實例（用於打開 webview）
         """
         self.main_agent = main_agent
         self.history = history
         self.output_callback = output_callback or print
         self.exit_callback = exit_callback
+        self.gui_window = gui_window
         self.last_user_prompt = ""
         self.last_assistant_reply = ""
     
@@ -95,6 +103,44 @@ class CommandHandler:
         # /retry - 重新執行最後的輸入
         elif name == "/retry":
             return self._handle_retry()
+
+        # /config - 啟動設定 CLI 菜單（CLI 下同步，GUI 下非同步）
+        elif name == "/config":
+            try:
+                if self.output_callback == print:
+                    # CLI: run interactive menu synchronously
+                    config_cli.cmd_config_menu()
+                else:
+                    # GUI: run the CLI menu in a background thread so it doesn't block UI
+                    t = threading.Thread(target=config_cli.cmd_config_menu, daemon=True)
+                    t.start()
+                    self.output_callback("開啟設定選單（在終端中互動）...")
+            except Exception as e:
+                logger.error(f"Failed to open config menu: {e}")
+                self.output_callback(f"無法啟動設定選單: {e}")
+            return None
+
+        # /config-web - 開啟設定 Web UI 頁面（GUI 模式下使用 webview，CLI 模式下使用瀏覽器）
+        elif name == "/config-web":
+            try:
+                url = config_webui.ensure_webui_running()
+                
+                # 檢查是否為 GUI 模式（有 gui_window 且非 None）
+                if self.gui_window is not None:
+                    # GUI 模式：使用內建 webview
+                    self.gui_window.open_config_webview()
+                    self.output_callback("已打開配置頁面")
+                else:
+                    # CLI 模式：使用外部瀏覽器
+                    opened = webbrowser.open(url, new=2)
+                    if opened:
+                        self.output_callback(f"已在瀏覽器開啟設定頁：{url}")
+                    else:
+                        self.output_callback(f"設定頁位置：{url}（請手動打開）")
+            except Exception as e:
+                logger.error(f"Failed to open config web UI: {e}")
+                self.output_callback(f"無法開啟設定頁: {e}")
+            return None
         
         # 未知指令
         else:
@@ -109,6 +155,8 @@ class CommandHandler:
   /help              顯示此幫助訊息
   /exit, /quit       退出程式
   /clear             清空屏幕/對話框
+    /config            開啟文字式設定選單（CLI）或在終端中顯示（GUI）
+    /config-web        打開配置頁面（GUI 中使用內建 webview，CLI 中使用瀏覽器）
 
 查詢指令：
   /tools             列出所有可用工具

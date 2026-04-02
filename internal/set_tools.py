@@ -8,6 +8,7 @@ from .tools.python_tools import add_python_tools
 from .tools.stock_market_tools import add_stock_market_tools
 from .tools.terminal_tools import add_terminal_tools
 from .tools.website_tools import add_website_tools
+from .tools.web_search_tools import add_web_search_tools
 
 
 def add_all_tools(
@@ -20,6 +21,7 @@ def add_all_tools(
     add_file_tools(agent)
     add_python_tools(agent)
     add_terminal_tools(agent)
+    add_web_search_tools(agent)
     # add_interactive_tools(agent)
     # add_website_tools(agent)
     add_stock_market_tools(agent)

@@ -35,6 +35,23 @@ class AgentModelConfig:
     inherit_from: Optional[str] = None  # Parent agent to inherit from (for sub-agents)
 
 
+@dataclass
+class McpToolConfig:
+    """Configuration for a custom MCP tool"""
+    mcp_tool_id: str  # Unique identifier for this tool
+    name: str  # Display name
+    command: str  # The command to execute
+    args: Optional[str] = None  # Arguments for the command (space-separated)
+
+
+@dataclass
+class RemoteMcpConfig:
+    """Configuration for a remote MCP endpoint"""
+    remote_mcp_id: str  # Unique identifier for this remote MCP
+    name: str  # Display name
+    url: str  # URL to fetch the MCP definition from
+
+
 def _get_db_path() -> Path:
     """Get the database path, creating the directory if needed"""
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -94,10 +111,38 @@ def init_database():
             )
         """)
         
+        # MCP tools table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS mcp_tools (
+                mcp_tool_id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                command TEXT NOT NULL,
+                args TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
+        # Remote MCPs table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS remote_mcps (
+                remote_mcp_id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                url TEXT NOT NULL UNIQUE,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
         # Create indexes
         cursor.execute("""
             CREATE INDEX IF NOT EXISTS idx_agent_provider 
             ON agent_configs(provider_id)
+        """)
+        
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_mcp_tool_name
+            ON mcp_tools(name)
         """)
         
         logger.info(f"Database initialized at {_get_db_path()}")
@@ -219,20 +264,23 @@ def get_agent_config(agent_name: str, use_default: bool = True, category: Option
     """
     Get configuration for a specific agent.
     Follows inheritance chain if agent inherits from another.
-    Falls back to category default, subagent default, or global default if not found and use_default=True.
-    
+    Falls back to category default or global default if not found and use_default=True.
+
     Fallback order:
     1. Direct agent configuration
     2. Inherited configuration
-    3. Category default (default:{category})
-    4. Subagent default (default:subagents) - for all subagents
+    3. Category default (default:{category}) - for specific categories (e.g., default:marketing)
+    4. Category-level defaults:
+       - default:subagents (for sub-agent/* categories)
+       - default:core (for core category)
+       - default:co-agents (for co-agent category)
     5. Global default (default) - for all agents
-    
+
     Args:
         agent_name: Name of the agent
         use_default: Whether to fall back to default config if not found
-        category: Category of the agent (for category-specific defaults)
-        
+        category: Category of the agent (e.g., "core", "co-agent", "sub-agent/marketing")
+
     Returns:
         AgentModelConfig with resolved configuration, or None if not found
     """
@@ -257,19 +305,42 @@ def get_agent_config(agent_name: str, use_default: bool = True, category: Option
                                 inherit_from=f"default:{category}",
                             )
                     
-                    # 2. 如果是 subagent，嘗試 subagent 整體默認配置
-                    # core 和 co-agent 不是 subagent，只有 sub-agent/* 才是
-                    if category and category.startswith("sub-agent/"):
-                        subagent_default = get_agent_config("default:subagents", use_default=False)
-                        if subagent_default:
-                            return AgentModelConfig(
-                                agent_name=agent_name,
-                                provider_id=subagent_default.provider_id,
-                                model_name=subagent_default.model_name,
-                                temperature=subagent_default.temperature,
-                                inherit_from="default:subagents",
-                            )
-                    
+                    # 2. 嘗試 category 整體默認配置
+                    if category:
+                        # Sub-agents: default:subagents
+                        if category.startswith("sub-agent/"):
+                            category_default = get_agent_config("default:subagents", use_default=False)
+                            if category_default:
+                                return AgentModelConfig(
+                                    agent_name=agent_name,
+                                    provider_id=category_default.provider_id,
+                                    model_name=category_default.model_name,
+                                    temperature=category_default.temperature,
+                                    inherit_from="default:subagents",
+                                )
+                        # Core agents: default:core
+                        elif category == "core":
+                            category_default = get_agent_config("default:core", use_default=False)
+                            if category_default:
+                                return AgentModelConfig(
+                                    agent_name=agent_name,
+                                    provider_id=category_default.provider_id,
+                                    model_name=category_default.model_name,
+                                    temperature=category_default.temperature,
+                                    inherit_from="default:core",
+                                )
+                        # Co-agents: default:co-agents
+                        elif category == "co-agent":
+                            category_default = get_agent_config("default:co-agents", use_default=False)
+                            if category_default:
+                                return AgentModelConfig(
+                                    agent_name=agent_name,
+                                    provider_id=category_default.provider_id,
+                                    model_name=category_default.model_name,
+                                    temperature=category_default.temperature,
+                                    inherit_from="default:co-agents",
+                                )
+
                     # 3. 最後嘗試全域默認配置
                     default_config = get_agent_config("default", use_default=False)
                     if default_config:
@@ -346,6 +417,141 @@ def delete_agent_config(agent_name: str) -> bool:
     except Exception as e:
         logger.error(f"Failed to delete agent config: {e}")
         return False
+
+
+def add_mcp_tool(config: McpToolConfig) -> bool:
+    """Add or update an MCP tool configuration"""
+    try:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO mcp_tools (mcp_tool_id, name, command, args)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(mcp_tool_id) DO UPDATE SET
+                    name=excluded.name,
+                    command=excluded.command,
+                    args=excluded.args,
+                    updated_at=CURRENT_TIMESTAMP
+            """, (
+                config.mcp_tool_id,
+                config.name,
+                config.command,
+                config.args,
+            ))
+            return True
+    except Exception as e:
+        logger.error(f"Failed to add MCP tool: {e}")
+        return False
+
+
+def add_remote_mcp(config: RemoteMcpConfig) -> bool:
+    """Add or update a remote MCP configuration"""
+    try:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO remote_mcps (remote_mcp_id, name, url)
+                VALUES (?, ?, ?)
+                ON CONFLICT(remote_mcp_id) DO UPDATE SET
+                    name=excluded.name,
+                    url=excluded.url,
+                    updated_at=CURRENT_TIMESTAMP
+            """, (
+                config.remote_mcp_id,
+                config.name,
+                config.url,
+            ))
+            return True
+    except Exception as e:
+        logger.error(f"Failed to add remote MCP: {e}")
+        return False
+
+
+def list_mcp_tools() -> list[McpToolConfig]:
+    """List all MCP tool configurations"""
+    try:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM mcp_tools ORDER BY name")
+            rows = cursor.fetchall()
+            return [
+                McpToolConfig(
+                    mcp_tool_id=row["mcp_tool_id"],
+                    name=row["name"],
+                    command=row["command"],
+                    args=row["args"],
+                )
+                for row in rows
+            ]
+    except Exception as e:
+        logger.error(f"Failed to list MCP tools: {e}")
+        return []
+
+
+def list_remote_mcps() -> list[RemoteMcpConfig]:
+    """List all remote MCP configurations"""
+    try:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM remote_mcps ORDER BY name")
+            rows = cursor.fetchall()
+            return [
+                RemoteMcpConfig(
+                    remote_mcp_id=row["remote_mcp_id"],
+                    name=row["name"],
+                    url=row["url"],
+                )
+                for row in rows
+            ]
+    except Exception as e:
+        logger.error(f"Failed to list remote MCPs: {e}")
+        return []
+
+
+def delete_mcp_tool(mcp_tool_id: str) -> bool:
+    """Delete an MCP tool configuration"""
+    try:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM mcp_tools WHERE mcp_tool_id = ?", (mcp_tool_id,))
+            return cursor.rowcount > 0
+    except Exception as e:
+        logger.error(f"Failed to delete MCP tool: {e}")
+        return False
+
+
+def delete_remote_mcp(remote_mcp_id: str) -> bool:
+    """Delete a remote MCP configuration"""
+    try:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM remote_mcps WHERE remote_mcp_id = ?", (remote_mcp_id,))
+            return cursor.rowcount > 0
+    except Exception as e:
+        logger.error(f"Failed to delete remote MCP: {e}")
+        return False
+
+
+def get_mcp_last_updated() -> Optional[str]:
+    """
+    Get the most recent update timestamp from MCP configurations.
+    Returns the latest updated_at timestamp from either mcp_tools or remote_mcps tables.
+    """
+    try:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT MAX(updated_at) as last_updated FROM (
+                    SELECT updated_at FROM mcp_tools
+                    UNION ALL
+                    SELECT updated_at FROM remote_mcps
+                )
+            """)
+            row = cursor.fetchone()
+            return row["last_updated"] if row and row["last_updated"] else None
+    except Exception as e:
+        logger.error(f"Failed to get MCP last updated timestamp: {e}")
+        return None
 
 
 # Initialize database on module import

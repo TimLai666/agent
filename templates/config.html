@@ -209,6 +209,106 @@
             box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
         }
 
+        .custom-select-hidden {
+            position: absolute;
+            opacity: 0;
+            pointer-events: none;
+            height: 0;
+            width: 0;
+        }
+
+        .custom-select {
+            position: relative;
+            width: 100%;
+        }
+
+        .custom-select__button {
+            width: 100%;
+            padding: 10px 36px 10px 10px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            font-size: 14px;
+            text-align: left;
+            background: white;
+            cursor: pointer;
+            position: relative;
+        }
+
+        .custom-select__button:focus {
+            outline: none;
+            border-color: #667eea;
+            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+        }
+
+        .custom-select__button::after {
+            content: "";
+            position: absolute;
+            right: 12px;
+            top: 50%;
+            transform: translateY(-50%);
+            border-left: 5px solid transparent;
+            border-right: 5px solid transparent;
+            border-top: 6px solid #666;
+        }
+
+        .custom-select.is-open .custom-select__button::after {
+            border-top-color: transparent;
+            border-bottom: 6px solid #666;
+            top: 45%;
+        }
+
+        .custom-select.is-disabled .custom-select__button {
+            background: #f5f5f5;
+            color: #999;
+            cursor: not-allowed;
+        }
+
+        .custom-select__list {
+            position: absolute;
+            left: 0;
+            right: 0;
+            top: calc(100% + 4px);
+            background: white;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            box-shadow: 0 10px 20px rgba(0, 0, 0, 0.15);
+            max-height: 260px;
+            overflow-y: auto;
+            z-index: 2000;
+            display: none;
+        }
+
+        .custom-select.is-open .custom-select__list {
+            display: block;
+        }
+
+        .custom-select__group {
+            padding: 6px 10px;
+            font-size: 12px;
+            font-weight: bold;
+            color: #666;
+            background: #f5f5f5;
+        }
+
+        .custom-select__option {
+            padding: 8px 10px;
+            cursor: pointer;
+        }
+
+        .custom-select__option:hover {
+            background: #f1f3ff;
+        }
+
+        .custom-select__option.is-selected {
+            background: #667eea;
+            color: white;
+        }
+
+        .custom-select__option.is-disabled {
+            color: #999;
+            cursor: not-allowed;
+        }
+
         .modal {
             display: none;
             position: fixed;
@@ -365,6 +465,9 @@
             <button class="tab-button" onclick="switchTab('defaults')">
                 ⚙️ 默認配置
             </button>
+            <button class="tab-button" onclick="switchTab('mcp-tools')">
+                🔨 MCP 工具
+            </button>
         </div>
 
         <!-- Providers Tab -->
@@ -472,6 +575,28 @@
                     <div id="category-defaults-list">載入中...</div>
                 </div>
             </div>
+        </div>
+
+        <!-- MCP Tools Tab -->
+        <div id="mcp-tools-tab" class="tab-content">
+            <div class="section-header">
+                <h2>自訂 MCP 工具</h2>
+                <div style="display:flex; gap:10px;">
+                    <button class="btn btn-primary" onclick="showAddMcpToolModal()">
+                        ➕ 新增 MCP 工具
+                    </button>
+                    <button class="btn btn-primary" onclick="showAddRemoteMcpModal()">
+                        🌐 新增 遠端 MCP
+                    </button>
+                </div>
+            </div>
+            <div id="mcp-tools-list" class="loading">載入中...</div>
+
+            <div class="section-header" style="margin-top:20px;">
+                <h3>遠端 MCP（從 URL 加載）</h3>
+                <p style="color:#666; margin-left:auto;">可新增遠端 MCP 配置（URL 會被載入並解析成 MCP 客戶端）</p>
+            </div>
+            <div id="remote-mcps-list" class="loading">載入中...</div>
         </div>
     </div>
 
@@ -883,7 +1008,228 @@
         </div>
     </div>
 
+    <!-- Add MCP Tool Modal -->
+    <div id="add-mcp-tool-modal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3 class="modal-title">新增 MCP 工具</h3>
+                <button class="close-btn" onclick="closeModal('add-mcp-tool-modal')">&times;</button>
+            </div>
+            <form id="add-mcp-tool-form">
+                <div class="form-group">
+                    <label for="mcp_tool_id">工具 ID *</label>
+                    <input type="text" id="mcp_tool_id" required placeholder="例如: my-custom-tool">
+                </div>
+
+                <div class="form-group">
+                    <label for="mcp_name">顯示名稱 *</label>
+                    <input type="text" id="mcp_name" required placeholder="例如: 我的自訂工具">
+                </div>
+
+                <div class="form-group">
+                    <label for="mcp_command">執行指令 *</label>
+                    <input type="text" id="mcp_command" required placeholder="例如: uvx">
+                </div>
+
+                <div class="form-group">
+                    <label for="mcp_args">指令參數 (可選)</label>
+                    <input type="text" id="mcp_args" placeholder="例如: my-script --arg1 value1">
+                </div>
+
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" onclick="closeModal('add-mcp-tool-modal')">
+                        取消
+                    </button>
+                    <button type="submit" class="btn btn-primary">
+                        新增
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Add Remote MCP Modal -->
+    <div id="add-remote-mcp-modal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3 class="modal-title">新增 遠端 MCP</h3>
+                <button class="close-btn" onclick="closeModal('add-remote-mcp-modal')">&times;</button>
+            </div>
+            <form id="add-remote-mcp-form">
+                <div class="form-group">
+                    <label for="remote_mcp_id">遠端 MCP ID *</label>
+                    <input type="text" id="remote_mcp_id" required placeholder="例如: remote-1">
+                </div>
+                <div class="form-group">
+                    <label for="remote_mcp_name">顯示名稱 *</label>
+                    <input type="text" id="remote_mcp_name" required placeholder="例如: My Remote MCP">
+                </div>
+                <div class="form-group">
+                    <label for="remote_mcp_url">URL *</label>
+                    <input type="text" id="remote_mcp_url" required placeholder="例如: https://example.com/mcp.json">
+                    <small style="color:#666; display:block; margin-top:5px;">請輸入可返回 MCP 描述的 URL</small>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary"
+                        onclick="closeModal('add-remote-mcp-modal')">取消</button>
+                    <button type="submit" class="btn btn-primary">新增</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
     <script>
+        const customSelectRegistry = new Map();
+        let customSelectEventsBound = false;
+
+        function initCustomSelects() {
+            document.querySelectorAll('select').forEach((select) => {
+                if (customSelectRegistry.has(select)) {
+                    return;
+                }
+                buildCustomSelect(select);
+            });
+
+            if (!customSelectEventsBound) {
+                document.addEventListener('click', (event) => {
+                    const openSelect = event.target.closest('.custom-select');
+                    closeAllCustomSelects(openSelect);
+                });
+                document.addEventListener('keydown', (event) => {
+                    if (event.key === 'Escape') {
+                        closeAllCustomSelects(null);
+                    }
+                });
+                document.querySelectorAll('form').forEach((form) => {
+                    form.addEventListener('reset', () => {
+                        setTimeout(syncAllCustomSelects, 0);
+                    });
+                });
+                customSelectEventsBound = true;
+            }
+        }
+
+        function buildCustomSelect(select) {
+            select.classList.add('custom-select-hidden');
+
+            const wrapper = document.createElement('div');
+            wrapper.className = 'custom-select';
+
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.className = 'custom-select__button';
+
+            const list = document.createElement('div');
+            list.className = 'custom-select__list';
+
+            wrapper.appendChild(button);
+            wrapper.appendChild(list);
+            select.insertAdjacentElement('afterend', wrapper);
+
+            button.addEventListener('click', () => {
+                if (select.disabled) {
+                    return;
+                }
+                const isOpen = wrapper.classList.contains('is-open');
+                closeAllCustomSelects(wrapper);
+                if (!isOpen) {
+                    wrapper.classList.add('is-open');
+                }
+            });
+
+            list.addEventListener('click', (event) => {
+                const optionEl = event.target.closest('.custom-select__option');
+                if (!optionEl || optionEl.classList.contains('is-disabled')) {
+                    return;
+                }
+                const index = Number(optionEl.dataset.index);
+                if (!Number.isNaN(index)) {
+                    select.selectedIndex = index;
+                    select.dispatchEvent(new Event('change', { bubbles: true }));
+                }
+                wrapper.classList.remove('is-open');
+                refreshCustomSelect(select);
+            });
+
+            const observer = new MutationObserver(() => {
+                refreshCustomSelect(select);
+            });
+            observer.observe(select, { childList: true, subtree: true, attributes: true, attributeFilter: ['disabled'] });
+
+            select.addEventListener('change', () => {
+                refreshCustomSelect(select);
+            });
+
+            customSelectRegistry.set(select, { wrapper, button, list, observer });
+            refreshCustomSelect(select);
+        }
+
+        function closeAllCustomSelects(exceptWrapper) {
+            customSelectRegistry.forEach(({ wrapper }) => {
+                if (!exceptWrapper || wrapper !== exceptWrapper) {
+                    wrapper.classList.remove('is-open');
+                }
+            });
+        }
+
+        function refreshCustomSelect(select) {
+            const entry = customSelectRegistry.get(select);
+            if (!entry) {
+                return;
+            }
+            const { wrapper, button, list } = entry;
+            const options = Array.from(select.options);
+            list.innerHTML = '';
+
+            let lastGroup = null;
+            options.forEach((option, index) => {
+                const groupLabel = option.parentElement && option.parentElement.tagName === 'OPTGROUP'
+                    ? option.parentElement.label
+                    : null;
+                if (groupLabel && groupLabel !== lastGroup) {
+                    const groupEl = document.createElement('div');
+                    groupEl.className = 'custom-select__group';
+                    groupEl.textContent = groupLabel;
+                    list.appendChild(groupEl);
+                    lastGroup = groupLabel;
+                } else if (!groupLabel) {
+                    lastGroup = null;
+                }
+
+                const optionEl = document.createElement('div');
+                optionEl.className = 'custom-select__option';
+                optionEl.dataset.index = String(index);
+                optionEl.textContent = option.textContent;
+
+                if (option.disabled) {
+                    optionEl.classList.add('is-disabled');
+                }
+                if (option.selected) {
+                    optionEl.classList.add('is-selected');
+                }
+
+                list.appendChild(optionEl);
+            });
+
+            const selectedOption = options[select.selectedIndex];
+            button.textContent = selectedOption ? selectedOption.textContent : '';
+            button.disabled = select.disabled;
+            wrapper.classList.toggle('is-disabled', select.disabled);
+        }
+
+        function syncAllCustomSelects() {
+            document.querySelectorAll('select').forEach((select) => {
+                refreshCustomSelect(select);
+            });
+        }
+
+        function syncCustomSelectById(id) {
+            const select = document.getElementById(id);
+            if (select) {
+                refreshCustomSelect(select);
+            }
+        }
+
         // Tab switching
         function switchTab(tab) {
             document.querySelectorAll('.tab-button').forEach(btn => btn.classList.remove('active'));
@@ -898,6 +1244,8 @@
                 loadAgents();
             } else if (tab === 'defaults') {
                 loadDefaultsTab();
+            } else if (tab === 'mcp-tools') {
+                loadMcpTools();
             }
         }
 
@@ -916,6 +1264,10 @@
 
         function closeModal(modalId) {
             document.getElementById(modalId).classList.remove('active');
+        }
+
+        function showAddMcpToolModal() {
+            document.getElementById('add-mcp-tool-modal').classList.add('active');
         }
 
         // 切換繼承模式
@@ -1371,8 +1723,10 @@
                 if (result.success && result.config) {
                     // 已有默認配置，填充表單
                     document.getElementById('default_provider').value = result.config.provider_id;
+                    syncCustomSelectById('default_provider');
                     await loadDefaultProviderModels();
                     document.getElementById('default_model').value = result.config.model_name;
+                    syncCustomSelectById('default_model');
                     document.getElementById('default_temperature').value = result.config.temperature || 0.2;
                     document.getElementById('delete-default-btn').style.display = 'inline-block';
                 } else {
@@ -1549,8 +1903,10 @@
 
                 if (result.success && result.config) {
                     document.getElementById('default_provider').value = result.config.provider_id;
+                    syncCustomSelectById('default_provider');
                     await loadDefaultProviderModels();
                     document.getElementById('default_model').value = result.config.model_name;
+                    syncCustomSelectById('default_model');
                     document.getElementById('default_temperature').value = result.config.temperature || 0.2;
                     document.getElementById('delete-default-btn').style.display = 'inline-block';
                 } else {
@@ -1628,8 +1984,10 @@
 
                 if (result.success && result.config) {
                     document.getElementById('subagent_provider').value = result.config.provider_id;
+                    syncCustomSelectById('subagent_provider');
                     await loadSubagentProviderModels();
                     document.getElementById('subagent_model').value = result.config.model_name;
+                    syncCustomSelectById('subagent_model');
                     document.getElementById('subagent_temperature').value = result.config.temperature || 0.2;
                     document.getElementById('delete-subagent-default-btn').style.display = 'inline-block';
                 } else {
@@ -1751,8 +2109,10 @@
 
                 if (result.success && result.config) {
                     document.getElementById('core_provider').value = result.config.provider_id;
+                    syncCustomSelectById('core_provider');
                     await loadCoreProviderModels();
                     document.getElementById('core_model').value = result.config.model_name;
+                    syncCustomSelectById('core_model');
                     document.getElementById('core_temperature').value = result.config.temperature || 0.2;
                     document.getElementById('delete-core-default-btn').style.display = 'inline-block';
                 } else {
@@ -1898,8 +2258,10 @@
 
                 if (result.success && result.config) {
                     document.getElementById('coagent_provider').value = result.config.provider_id;
+                    syncCustomSelectById('coagent_provider');
                     await loadCoagentProviderModels();
                     document.getElementById('coagent_model').value = result.config.model_name;
+                    syncCustomSelectById('coagent_model');
                     document.getElementById('coagent_temperature').value = result.config.temperature || 0.2;
                     document.getElementById('delete-coagent-default-btn').style.display = 'inline-block';
                 } else {
@@ -2012,8 +2374,10 @@
 
                 if (result.success && result.config) {
                     document.getElementById('category_provider').value = result.config.provider_id;
+                    syncCustomSelectById('category_provider');
                     await loadCategoryProviderModels();
                     document.getElementById('category_model').value = result.config.model_name;
+                    syncCustomSelectById('category_model');
                     document.getElementById('category_temperature').value = result.config.temperature || 0.2;
                     document.getElementById('delete-category-default-btn').style.display = 'inline-block';
                 } else {
@@ -2363,8 +2727,340 @@
         });
 
         // Initial load
+
+        initCustomSelects();
         loadProviders();
+
+
+
+        // ========== MCP Tools Functions ==========
+
+
+
+        // Load MCP tools
+
+
+
+        async function loadMcpTools() {
+
+            const container = document.getElementById('mcp-tools-list');
+
+            container.innerHTML = '<div class="loading">載入中...</div>';
+
+
+
+            try {
+
+                const response = await fetch('/api/mcp-tools');
+
+                const tools = await response.json();
+
+
+
+                if (tools.length === 0) {
+
+                    container.innerHTML = `
+
+                                <div class="empty-state">
+
+                                    <svg fill="currentColor" viewBox="0 0 20 20"><path d="M10 18a8 8 0 100-16 8 8 0 000 16zM9.555 7.168A1 1 0 008 8v4a1 1 0 001.555.832l3-2a1 1 0 000-1.664l-3-2z"></path></svg>
+
+                                    <p>尚未新增任何自訂 MCP 工具</p>
+
+                                    <p>點擊上方「新增 MCP 工具」按鈕開始設定</p>
+
+                                </div>
+
+                            `;
+
+                } else {
+                    container.innerHTML = tools.map(tool => `
+
+                            <div class="card">
+
+                                <div class="card-header">
+
+                                    <div>
+
+                                        <div class="card-title">${tool.name}</div>
+
+                                        <div class="card-subtitle">${tool.mcp_tool_id}</div>
+
+                                    </div>
+
+                                    <div class="card-actions">
+
+                                        <button class="btn btn-danger" onclick="deleteMcpTool('${tool.mcp_tool_id}')">
+
+                                            🗑️ 刪除
+
+                                        </button>
+
+                                    </div>
+
+                                </div>
+
+                                <div class="card-body">
+
+                                    <p><strong>指令:</strong> <code>${tool.command}</code></p>
+
+                                    ${tool.args ? `<p><strong>參數:</strong> <code>${tool.args}</code></p>` : ''}
+
+                                </div>
+
+                            </div>
+
+                        `).join('');
+                }
+
+            } catch (error) {
+
+                container.innerHTML = `<div class="alert alert-error">載入失敗: ${error.message}</div>`;
+
+            }
+
+            // Always load remote MCP list regardless of local tools status
+            await loadRemoteMcps();
+
+        }
+
+
+
+        // Add MCP Tool
+
+        document.getElementById('add-mcp-tool-form').addEventListener('submit', async (e) => {
+
+            e.preventDefault();
+
+
+
+            const data = {
+
+                mcp_tool_id: document.getElementById('mcp_tool_id').value,
+
+                name: document.getElementById('mcp_name').value,
+
+                command: document.getElementById('mcp_command').value,
+
+                args: document.getElementById('mcp_args').value || null,
+
+            };
+
+
+
+            try {
+
+                const response = await fetch('/api/mcp-tools', {
+
+                    method: 'POST',
+
+                    headers: { 'Content-Type': 'application/json' },
+
+                    body: JSON.stringify(data)
+
+                });
+
+
+
+                const result = await response.json();
+
+
+
+                if (result.success) {
+
+                    closeModal('add-mcp-tool-modal');
+
+                    document.getElementById('add-mcp-tool-form').reset();
+
+                    loadMcpTools();
+
+                    alert('✅ MCP 工具新增成功！');
+
+                } else {
+
+                    alert('❌ ' + result.error);
+
+                }
+
+            } catch (error) {
+
+                alert('❌ 新增失敗: ' + error.message);
+
+            }
+
+        });
+
+
+
+        // Delete MCP Tool
+
+        async function deleteMcpTool(toolId) {
+
+            if (!confirm(`確定要刪除 MCP 工具 "${toolId}" 嗎？`)) {
+
+                return;
+
+            }
+
+
+
+            try {
+
+                const response = await fetch(`/api/mcp-tools/${toolId}`, {
+
+                    method: 'DELETE'
+
+                });
+
+
+
+                const result = await response.json();
+
+
+
+                if (result.success) {
+
+                    loadMcpTools();
+
+                    alert('✅ MCP 工具刪除成功！');
+
+                } else {
+
+                    alert('❌ ' + result.error);
+
+                }
+
+            } catch (error) {
+
+                alert('❌ 刪除失敗: ' + error.message);
+
+            }
+
+        }
+
+        // ========== Remote MCP Functions ==========
+
+        function showAddRemoteMcpModal() {
+            const modal = document.getElementById('add-remote-mcp-modal');
+            if (modal) modal.classList.add('active');
+        }
+
+        async function loadRemoteMcps() {
+            const container = document.getElementById('remote-mcps-list');
+            container.innerHTML = '<div class="loading">載入中...</div>';
+
+            try {
+                // 10s timeout to avoid indefinite loading state
+                const controller = new AbortController();
+                const timeoutId = setTimeout(() => controller.abort(), 10000);
+
+                const response = await fetch('/api/remote-mcps', { signal: controller.signal });
+                clearTimeout(timeoutId);
+
+                if (!response.ok) {
+                    const text = await response.text().catch(() => '');
+                    throw new Error(`HTTP ${response.status}: ${text}`);
+                }
+
+                const remotes = await response.json();
+
+                if (!Array.isArray(remotes)) {
+                    throw new Error('Malformed response from server');
+                }
+
+                if (remotes.length === 0) {
+                    container.innerHTML = `
+                                <div class="empty-state">
+                                    <svg fill="currentColor" viewBox="0 0 20 20"><path d="M10 18a8 8 0 100-16 8 8 0 000 16zM9.555 7.168A1 1 0 008 8v4a1 1 0 001.555.832l3-2a1 1 0 000-1.664l-3-2z"></path></svg>
+                                    <p>尚未新增遠端 MCP</p>
+                                    <p>點擊上方「新增 遠端 MCP」按鈕開始設定</p>
+                                </div>
+                            `;
+                    return;
+                }
+
+                container.innerHTML = remotes.map(m => `
+                            <div class="card">
+                                <div class="card-header">
+                                    <div>
+                                        <div class="card-title">${m.name}</div>
+                                        <div class="card-subtitle">${m.remote_mcp_id}</div>
+                                    </div>
+                                    <div class="card-actions">
+                                        <button class="btn btn-danger" onclick="deleteRemoteMcp('${m.remote_mcp_id}')">🗑️ 刪除</button>
+                                    </div>
+                                </div>
+                                <div class="card-body">
+                                    <p><strong>URL:</strong> <a href="${m.url}" target="_blank" rel="noreferrer">${m.url}</a></p>
+                                </div>
+                            </div>
+                        `).join('');
+            } catch (error) {
+                if (error.name === 'AbortError') {
+                    container.innerHTML = `<div class="alert alert-error">載入超時，請稍後再試</div>`;
+                } else {
+                    console.error('loadRemoteMcps error:', error);
+                    container.innerHTML = `<div class="alert alert-error">載入失敗: ${error.message}</div>`;
+                }
+            }
+        }
+
+        const addRemoteForm = document.getElementById('add-remote-mcp-form');
+        if (addRemoteForm) {
+            addRemoteForm.addEventListener('submit', async (e) => {
+                e.preventDefault();
+
+                const data = {
+                    remote_mcp_id: document.getElementById('remote_mcp_id').value,
+                    name: document.getElementById('remote_mcp_name').value,
+                    url: document.getElementById('remote_mcp_url').value,
+                };
+
+                try {
+                    const response = await fetch('/api/remote-mcps', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(data)
+                    });
+
+                    const result = await response.json();
+
+                    if (result.success) {
+                        closeModal('add-remote-mcp-modal');
+                        addRemoteForm.reset();
+                        loadMcpTools();
+                        alert('✅ 遠端 MCP 新增成功！');
+                    } else {
+                        alert('❌ ' + result.error);
+                    }
+                } catch (error) {
+                    alert('❌ 新增失敗: ' + error.message);
+                }
+            });
+        }
+
+        async function deleteRemoteMcp(remoteId) {
+            if (!confirm(`確定要刪除 遠端 MCP "${remoteId}" 嗎？`)) return;
+
+            try {
+                const response = await fetch(`/api/remote-mcps/${remoteId}`, { method: 'DELETE' });
+                const result = await response.json();
+
+                if (result.success) {
+                    loadMcpTools();
+                    alert('✅ 遠端 MCP 刪除成功！');
+                } else {
+                    alert('❌ ' + result.error);
+                }
+            } catch (error) {
+                alert('❌ 刪除失敗: ' + error.message);
+            }
+        }
+
     </script>
+
 </body>
+
+
 
 </html>
