@@ -3,9 +3,8 @@
 這是一個日常 AI agent，類似 Siri，目標是協助用戶完成日常任務。
 
 ## 特色
-- 支援多代理架構：主 agent、co-agent、subagents。
-- `internal/sub_agents/` 下的每個 `.md` 會自動註冊成 main agent 的工具。
-- 可透過 `/subagents` 和 `/tools` 查看可用能力。
+- 支援主 agent + 工具導向執行架構。
+- 可透過 `/tools` 查看可用能力。
 - 具備語音輸入（Whisper）與 CLI 互動流程。
 - **新功能**: SQLite 配置系統，支援多種模型提供者 (OpenAI、Claude、GitHub Copilot 等)
 
@@ -33,12 +32,12 @@ uv run main.py --config
 # 按照提示設定:
 # 1. 新增提供者 (OpenAI / Claude / GitHub Copilot / 本地 LLM)
 # 2. 設定 main agent 使用的模型
-# 3. [可選] 設定默認配置 - 讓所有未配置的 subagent 自動使用
+# 3. [可選] 設定默認配置
 ```
 
 **💡 默認配置功能**：
 - 在 Web UI 的 Agents 頁面，點擊 "⚙️ 默認配置" 按鈕
-- 設定後，所有未配置的 subagent 會自動使用此配置
+- 設定後，未配置項目可自動使用此配置
 - 適合快速開始和統一管理模型設定
 
 📖 **詳細文檔**：
@@ -83,7 +82,6 @@ CLI 和 GUI 模式都支援以下指令：
 
 ### 查詢指令
 - `/tools` - 列出所有可用工具
-- `/subagents` - 列出所有子代理
 - `/skills` 或 `/skills list` - 列出所有已載入的 skills
 - `/skills info <name>` - 顯示特定 skill 的詳細資訊
 - `/skills test <prompt>` - 測試哪些 skills 會匹配給定的提示

@@ -1,7 +1,0 @@
-{
-  "version": 1,
-  "max_concurrency": 3,
-  "max_auto_agents": 2,
-  "background_on_trigger": true,
-  "background_always": false
-}

@@ -3,7 +3,6 @@ Agent discovery and management utilities.
 Automatically discovers all agents in the project.
 """
 
-from pathlib import Path
 from typing import List, Dict
 
 
@@ -22,63 +21,6 @@ def discover_agents() -> List[Dict[str, str]]:
         "category": "core",
         "description": "主要 Agent",
     })
-    
-    # Co-Agents
-    co_agents_dir = Path(__file__).parent.parent / "co_agents"
-    if co_agents_dir.exists():
-        for file in co_agents_dir.glob("*.py"):
-            if file.stem not in ["__init__", "base"]:
-                agent_name = file.stem.replace("_", "-")
-                agents.append({
-                    "name": agent_name,
-                    "category": "co-agent",
-                    "description": f"Co-Agent: {file.stem}",
-                })
-    
-    # Sub-Agents (掃描 .md 文件，排除 README.md)
-    sub_agents_dir = Path(__file__).parent.parent / "sub_agents"
-    if sub_agents_dir.exists():
-        for md_file in sub_agents_dir.rglob("*.md"):
-            if md_file.name.lower() in ["readme.md", "agents.md"]:
-                continue
-            
-            try:
-                content = md_file.read_text(encoding="utf-8")
-                
-                # 解析 frontmatter 獲取名稱和描述
-                agent_name = md_file.stem  # 預設使用檔名
-                description = f"Sub-Agent: {agent_name}"
-                category_name = md_file.parent.name
-                
-                # 簡單的 frontmatter 解析
-                if content.startswith("---"):
-                    lines = content.splitlines()
-                    end_idx = None
-                    for idx in range(1, len(lines)):
-                        if lines[idx].strip() == "---":
-                            end_idx = idx
-                            break
-                    
-                    if end_idx:
-                        # 解析 frontmatter
-                        for line in lines[1:end_idx]:
-                            if ":" in line:
-                                key, value = line.split(":", 1)
-                                key = key.strip().lower()
-                                value = value.strip().strip('"\'')
-                                if key == "name":
-                                    agent_name = value
-                                elif key == "description":
-                                    description = value
-                
-                agents.append({
-                    "name": agent_name,
-                    "category": f"sub-agent/{category_name}",
-                    "description": description,
-                })
-            except Exception as e:
-                # 靜默忽略錯誤
-                pass
     
     return sorted(agents, key=lambda x: (x["category"], x["name"]))
 

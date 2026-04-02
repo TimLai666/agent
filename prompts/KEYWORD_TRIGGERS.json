@@ -5,21 +5,21 @@
       "name": "ultrawork",
       "pattern": "(?i)\\b(ultrawork|ulw)\\b",
       "position": "prefix",
-      "inject": "Ultrawork mode: maximize agent utilization and tool execution. Use subagents for exploration/analysis and verify results before answering.",
+      "inject": "Ultrawork mode: maximize tool utilization and execution. Use parallel searches/reads for exploration and verify results before answering.",
       "background": true
     },
     {
       "name": "search",
       "pattern": "(?i)\\b(search|find|locate|lookup|explore|discover|scan|grep|query|browse|trace|seek|track|pinpoint|hunt|搜尋|尋找|查找)\\b",
       "position": "prefix",
-      "inject": "Search mode: Use list_files for file name search, search_files for content search. Prefer parallel tool calls. Widen coverage and delegate to subagents when exploration is heavy.",
+      "inject": "Search mode: Use list_files for file name search, search_files for content search. Prefer parallel tool calls and widen coverage when exploration is heavy.",
       "background": true
     },
     {
       "name": "analyze",
       "pattern": "(?i)\\b(analyze|analyse|investigate|examine|research|study|inspect|audit|evaluate|assess|review|diagnose|debug|分析|檢查|研究|調查)\\b",
       "position": "prefix",
-      "inject": "Analyze mode: Read files first before analysis. Gather context before conclusions. Validate assumptions. Use subagents for specialized reasoning if needed."
+      "inject": "Analyze mode: Read files first before analysis. Gather context before conclusions. Validate assumptions with direct tool evidence."
     },
     {
       "name": "file_operations",

@@ -31,9 +31,6 @@ Tool usage policy:
 - Use run_terminal_command only for true shell operations (git, tests, build, etc.).
 - For images: use read_image_resized. For other binary files: use read_binary_file.
 - For web search: use web_search, web_search_news, or web_search_images when needed.
-- For subagents: use list_sub_agents to see options, then ask_sub_agent to delegate.
-- At the start of a task, call list_sub_agents to see if a specialist can help.
 - For skills: use use_skill immediately when the user requests a skill or slash command.
-- For philosophical reasoning: use ask_philosopher when appropriate.
 - You may call multiple tools in a single response when they are independent. Otherwise, run them sequentially.
 - Never guess tool parameters.

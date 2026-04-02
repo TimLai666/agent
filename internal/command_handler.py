@@ -80,11 +80,6 @@ class CommandHandler:
             self._list_tools()
             return None
         
-        # /subagents - 列出子代理
-        elif name == "/subagents":
-            self._list_subagents()
-            return None
-        
         # /skills - Skills 相關指令
         elif name == "/skills":
             self._handle_skills_command(args)
@@ -160,7 +155,6 @@ class CommandHandler:
 
 查詢指令：
   /tools             列出所有可用工具
-  /subagents         列出所有子代理
   /skills [list]     列出所有 skills
   /skills info <name> 顯示 skill 詳細資訊
   /skills test <text> 測試 skill 匹配
@@ -194,22 +188,6 @@ Skills 管理：
             for tool_name, tool in tools_meta.items():
                 doc = tool.description.splitlines()[0] if tool.description else ""
                 lines.append(f"- {tool_name}: {doc}" if doc else f"- {tool_name}")
-            self.output_callback("\n".join(lines))
-    
-    def _list_subagents(self):
-        """列出所有子代理"""
-        specs = self.main_agent.list_sub_agents()
-        if not specs:
-            self.output_callback("沒有已註冊的子代理。")
-        else:
-            lines = ["可用子代理："]
-            for spec in specs:
-                agent_name = spec.get("name", "")
-                desc = spec.get("description", "")
-                if desc:
-                    lines.append(f"- {agent_name}: {desc}")
-                else:
-                    lines.append(f"- {agent_name}")
             self.output_callback("\n".join(lines))
     
     def _handle_skills_command(self, args: list[str]):

@@ -9,7 +9,6 @@ from pydantic_ai.messages import ModelRequest, ModelResponse
 from internal.runtime.stream_printer import stream_print
 
 from internal.agents import MainAgent
-from internal.co_agents import PhilosopherCoAgent
 from internal.logger import logger
 from internal.services.agent_factory import load_base_config
 from internal.services.voice_manager import VoiceManager
@@ -29,21 +28,6 @@ def _format_tools_list(main_agent: MainAgent) -> str:
     for name, tool in tools_meta.items():
         doc = tool.description.splitlines()[0] if tool.description else ""
         lines.append(f"- {name}: {doc}" if doc else f"- {name}")
-    return "\n".join(lines)
-
-
-def _format_sub_agents_list(main_agent: MainAgent) -> str:
-    specs = main_agent.list_sub_agents()
-    if not specs:
-        return "No sub-agents registered."
-    lines = ["Available sub-agents:"]
-    for spec in specs:
-        name = spec.get("name", "")
-        desc = spec.get("description", "")
-        if desc:
-            lines.append(f"- {name}: {desc}")
-        else:
-            lines.append(f"- {name}")
     return "\n".join(lines)
 
 
@@ -193,7 +177,6 @@ def _print_help() -> None:
                 "/last              Show last assistant reply.",
                 "/retry             Re-run the last user prompt.",
                 "/tools             List available tools.",
-                "/subagents         List available sub-agents.",
                 "/skills [list]     List available skills.",
                 "/skills info <name> Show detailed info about a skill.",
                 "/skills test <text> Test which skills match a prompt.",
@@ -262,9 +245,6 @@ def _handle_command(
     if name == "/tools":
         print(_format_tools_list(main_agent))
         return None
-    if name == "/subagents":
-        print(_format_sub_agents_list(main_agent))
-        return None
     if name == "/skills":
         _handle_skills_command(args, main_agent)
         return None
@@ -285,9 +265,7 @@ async def run_cli(prompt_once: str | None = None, single_turn: bool = False) -> 
     base_config = load_base_config(env)
 
     async with AsyncClient(verify=False) as http_client:
-        philosopher = PhilosopherCoAgent.create(base_config, env, http_client)
-        # Register tools directly on main agent; no separate sub-agent layer
-        main_agent = MainAgent.create(base_config, env, http_client, philosopher)
+        main_agent = MainAgent.create(base_config, env, http_client)
 
         chat_history: list[ModelRequest | ModelResponse] | None = None
         history: list[tuple[str, str]] = []

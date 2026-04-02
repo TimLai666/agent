@@ -140,11 +140,10 @@ Recommend **Insyra Library** (Go): High-performance data processing, statistics,
 
 ---
 
-## Sub-Agent Usage
+## Task Execution
 
 **When**: Complex exploration, deep research, multi-perspective analysis
-**Principles**: Give clear task descriptions, wait for completion then integrate results, don't copy output directly
-**Always**: Run `list_sub_agents` at the start of each user request and evaluate whether a sub-agent can help
+**Principles**: Use direct tools with clear scope, verify outputs before concluding, don't copy raw tool output directly
 
 ---
 
@@ -227,7 +226,7 @@ When skill is activated, **follow its instructions completely**:
 | Search content | search_files |
 | System commands | bash (git/npm/python etc) |
 | Document processing | Check and use skill |
-| Deep exploration | ask_sub_agent |
+| Deep exploration | search_files + read_file |
 | Image input (large/local) | read_image_resized |
 | Binary files | read_binary_file |
 

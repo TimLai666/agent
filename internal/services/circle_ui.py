@@ -804,7 +804,6 @@ class CommandLineEdit(QLineEdit):
         "/last",
         "/retry",
         "/tools",
-        "/subagents",
         "/skills",
         "/skills list",
         "/skills info ",

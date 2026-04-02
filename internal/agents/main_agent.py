@@ -16,7 +16,6 @@ from pydantic_ai.messages import (
     UserContent,
 )
 
-from internal.co_agents.philosopher import PhilosopherCoAgent
 from internal.logger import logger
 from internal.prompts import (
     SYSTEM_PROMPT,
@@ -25,7 +24,6 @@ from internal.prompts import (
     get_system_prompt_processed,
     build_combined_system_prompt,
     load_keyword_triggers,
-    load_subagent_background_config,
 )
 from internal.services.agent_factory import (
     AgentConfig,
@@ -34,7 +32,6 @@ from internal.services.agent_factory import (
 )
 from internal.set_tools import add_all_tools
 from internal.skills_loader import SkillRegistry, load_skill_registry
-from internal.sub_agents import SubAgentRegistry, load_sub_agent_registry
 
 from internal.mcp_server_list import get_all_mcp_servers
 
@@ -142,36 +139,17 @@ class MainAgent:
         base_config: AgentConfig,
         env: dict[str, str],
         http_client: AsyncClient,
-        philosopher: PhilosopherCoAgent,
-        sub_agents: SubAgentRegistry | None = None,
         skills: SkillRegistry | None = None,
         additional_system_prompts: list[str] | None = None,
         auto_load_all_prompts: bool = True,
     ) -> "MainAgent":
-        # Load skills first (so sub-agents can use them)
+        # Load skills first
         if skills is None:
             try:
                 skills = load_skill_registry()
             except Exception:
                 logger.exception("Failed to load skills; continuing without them")
                 skills = SkillRegistry({}, None)
-
-        # Load sub-agents with skills
-        if sub_agents is None:
-            try:
-                sub_agents = cast(
-                    SubAgentRegistry,
-                    load_sub_agent_registry(
-                        base_config,
-                        env,
-                        http_client,
-                        philosopher=philosopher,
-                        skills=skills,
-                    ),
-                )
-            except Exception:
-                logger.exception("Failed to load sub-agents; continuing without them")
-                sub_agents = SubAgentRegistry({}, {})
 
         # Apply MAIN-specific default temperature of 0.5 when MAIN_MODEL_TEMPERATURE is not set.
         main_defaults = AgentConfig(
@@ -184,8 +162,6 @@ class MainAgent:
         config = load_agent_config_chain([cls.ENV_PREFIX], main_defaults, env)
         model = create_openai_model(config, http_client)
         instructions = build_runtime_instructions(get_prompt(cls.PROMPT_KEY))
-        if sub_agents and not sub_agents.is_empty():
-            instructions += "\n\nSub-agents are available via tools: list_sub_agents, ask_sub_agent."
 
         mcp_servers = get_all_mcp_servers()
 
@@ -340,8 +316,6 @@ class MainAgent:
 
         main_agent = cls(
             agent,
-            philosopher,
-            sub_agents,
             planner_agent,
             discussion_agent,
             decider_agent,
@@ -349,14 +323,7 @@ class MainAgent:
             http_client,
         )
         try:
-            add_all_tools(
-                agent,
-                extra_tools=[
-                    main_agent.ask_philosopher,
-                    main_agent.list_sub_agents,
-                    main_agent.ask_sub_agent,
-                ],
-            )
+            add_all_tools(agent)
             logger.info("Registered tools on MainAgent")
         except Exception:
             logger.exception(
@@ -371,8 +338,6 @@ class MainAgent:
     def __init__(
         self,
         agent: Agent[None, str],
-        philosopher: PhilosopherCoAgent,
-        sub_agents: SubAgentRegistry | None = None,
         planner_agent: Agent[None, str] | None = None,
         discussion_agent: Agent[None, str] | None = None,
         decider_agent: Agent[None, str] | None = None,
@@ -380,8 +345,8 @@ class MainAgent:
         http_client: AsyncClient | None = None,
     ) -> None:
         self.agent = agent
-        self.philosopher = philosopher
-        self.sub_agents = sub_agents
+        self.philosopher = None
+        self.sub_agents = None
         self.skills = skills
         self._planner_agent = planner_agent or agent
         self._discussion_agent = discussion_agent
@@ -570,36 +535,6 @@ class MainAgent:
                                 note, current_args, step_outputs, question
                             )
                         }
-                    elif current_tool == "ask_sub_agent":
-                        name = ""
-                        if isinstance(current_args, dict):
-                            name = str(current_args.get("name", "")).strip().lower()
-                        if name in {"philosopher", "哲學家", "philosopher-co-agent"}:
-                            question = ""
-                            if isinstance(current_args, dict):
-                                question = str(current_args.get("prompt", "")).strip()
-                            if not question:
-                                question = self._build_sub_agent_prompt(
-                                    note, current_args, step_outputs
-                                )
-                            current_tool = "ask_philosopher"
-                            current_args = {
-                                "question": self._build_philosopher_prompt(
-                                    note, current_args, step_outputs, question
-                                )
-                            }
-
-                if (
-                    self.sub_agents
-                    and isinstance(current_tool, str)
-                    and self.sub_agents.get_agent(current_tool)
-                    and "ask_sub_agent" in allowed_names
-                ):
-                    prompt = self._build_sub_agent_prompt(
-                        note, current_args, step_outputs
-                    )
-                    current_args = {"name": current_tool, "prompt": prompt}
-                    current_tool = "ask_sub_agent"
 
                 if not current_tool:
                     current_error = "Missing 'tool' field."
@@ -732,13 +667,11 @@ class MainAgent:
         note: str | None,
     ) -> dict[str, Any] | None:
         tools_text: str = self._format_tools_context().strip()
-        sub_agents_text = self._format_sub_agents_context().strip()
         note_text = f"Note: {note}\n" if note else ""
         prompt = (
             "工具呼叫失敗。你必須修正 tool 名稱與/或 args，並且只輸出 JSON。\n"
-            "可使用 ask_sub_agent 協助。\n\n"
+            "\n"
             f"{tools_text}\n"
-            f"{sub_agents_text}\n"
             f"{note_text}"
             f"失敗的 tool：{tool}\n"
             f"args：{args}\n"
@@ -903,59 +836,13 @@ class MainAgent:
                 break
 
     def list_sub_agents(self) -> list[dict[str, str]]:
-        """Tool: list available sub-agents (name + short description)."""
-        if not self.sub_agents:
-            return []
-        return self.sub_agents.list_summaries()
+        return []
 
     async def ask_sub_agent(self, name: str = "", prompt: str = "", **kwargs) -> str:
-        """Tool: delegate a task to a sub-agent by name.
-
-        Args:
-            name: Name of the sub-agent to use
-            prompt: The task or question for the sub-agent
-            **kwargs: Additional arguments (ignored for compatibility)
-
-        Returns:
-            The sub-agent's response
-        """
-        if not name:
-            return "Error: 'name' argument is required for ask_sub_agent."
-        if not prompt:
-            return "Error: 'prompt' argument is required for ask_sub_agent."
-
-        # Ignore extra kwargs (e.g., 'role') for compatibility
-        if kwargs:
-            logger.debug(
-                f"ask_sub_agent ignoring extra arguments: {list(kwargs.keys())}"
-            )
-
-        if not self.sub_agents or self.sub_agents.is_empty():
-            return "No sub-agents are registered."
-
-        agent = self.sub_agents.get_agent(name)
-        if not agent:
-            available = ", ".join(self.sub_agents.list_names())
-            return f"Unknown sub-agent '{name}'. Available: {available}"
-
-        if hasattr(agent, "run_stream"):
-            collected = ""
-            async for chunk in agent.run_stream(prompt):
-                collected += chunk
-            return collected
-        return await agent.run(prompt)
+        return "Sub-agent mechanism has been removed."
 
     def _format_sub_agents_context(self) -> str:
-        if not self.sub_agents or self.sub_agents.is_empty():
-            return "Available sub-agents: (none)\n\n"
-        lines = ["Available sub-agents:"]
-        for spec in self.sub_agents.list_specs():
-            desc = spec.short_description()
-            if desc:
-                lines.append(f"- {spec.name}: {desc}")
-            else:
-                lines.append(f"- {spec.name}")
-        return "\n".join(lines) + "\n\n"
+        return ""
 
     def _format_tools_context(self) -> str:
         """格式化所有可用工具的說明，包含直接註冊的工具和 MCP Server。"""
@@ -1385,12 +1272,7 @@ class MainAgent:
         return plan_list
 
     def _prepare_prompt(self, prompt: str) -> tuple[str, list[str]]:
-        if not prompt or not self.sub_agents or self.sub_agents.is_empty():
-            return prompt, []
-        tools_meta = self._get_function_tools()
-        if "ask_sub_agent" not in tools_meta:
-            return prompt, []
-        return self.sub_agents.extract_mentions(prompt)
+        return prompt, []
 
     def _strip_code_blocks(self, text: str) -> str:
         if not text:
@@ -1506,16 +1388,6 @@ class MainAgent:
         return prompt, {"names": matched, "background": background_enabled}
 
     def _plan_requests_subagent(self, plan_list: list[dict[str, Any] | Any]) -> bool:
-        if not self.sub_agents or self.sub_agents.is_empty():
-            return False
-        for step in plan_list:
-            if not isinstance(step, dict):
-                continue
-            tool_name = step.get("tool")
-            if tool_name == "ask_sub_agent":
-                return True
-            if isinstance(tool_name, str) and self.sub_agents.resolve_name(tool_name):
-                return True
         return False
 
     def _filter_plan_subagent_steps(
@@ -1523,100 +1395,19 @@ class MainAgent:
         plan_list: list[dict[str, Any] | Any],
         names: list[str],
     ) -> list[dict[str, Any] | Any]:
-        if not names or not self.sub_agents or self.sub_agents.is_empty():
-            return plan_list
-        normalized = {self.sub_agents.resolve_name(name) for name in names}
-        normalized = {name for name in normalized if name}
-        if not normalized:
-            return plan_list
-        filtered: list[dict[str, Any] | Any] = []
-        for step in plan_list:
-            if not isinstance(step, dict):
-                filtered.append(step)
-                continue
-            tool_name = step.get("tool")
-            if tool_name == "ask_sub_agent":
-                target = ""
-                if isinstance(step.get("args"), dict):
-                    target = str(step.get("args", {}).get("name", "")).strip()
-                resolved = self.sub_agents.resolve_name(target) if target else None
-                if resolved and resolved in normalized:
-                    continue
-            if isinstance(tool_name, str):
-                resolved = self.sub_agents.resolve_name(tool_name)
-                if resolved and resolved in normalized:
-                    continue
-            filtered.append(step)
-        return filtered
+        return plan_list
 
     async def _decide_sub_agents(
         self,
         prompt: str,
         message_history: list[ModelRequest | ModelResponse] | None = None,
     ) -> list[str]:
-        if not prompt or not self.sub_agents or self.sub_agents.is_empty():
-            return []
-        tools_meta = self._get_function_tools()
-        if "ask_sub_agent" not in tools_meta:
-            return []
-
-        summaries = self.sub_agents.list_summaries()
-        if not summaries:
-            return []
-
-        candidates = "\n".join(
-            f"- {item['name']}: {item['description']}"
-            if item.get("description")
-            else f"- {item['name']}"
-            for item in summaries
-        )
-
-        config = load_subagent_background_config()
-        max_auto_agents = int(config.get("max_auto_agents", 2))
-        decision_prompt = (
-            "你是主 agent 的子代理選擇器。根據使用者需求，從清單挑選最合適的子代理。\n"
-            "若沒有明確需要，回傳空陣列。\n"
-            '只回傳 JSON：{"agents": ["name1", "name2"]}。\n'
-            f"最多選 {max_auto_agents} 個，必須是清單中的名稱，不要輸出其他文字。\n\n"
-            "可用子代理：\n"
-            f"{candidates}\n\n"
-            "使用者需求：\n"
-            f"{prompt}\n"
-        )
-
-        try:
-            result = await self.agent.run(
-                decision_prompt, message_history=message_history
-            )
-            out = (result.output or "").strip()
-            parsed = json.loads(out)
-            agents = parsed.get("agents", [])
-            if not isinstance(agents, list):
-                return []
-            normalized = []
-            for name in agents:
-                if not isinstance(name, str):
-                    continue
-                resolved = self.sub_agents.resolve_name(name)
-                if resolved and resolved not in normalized:
-                    normalized.append(resolved)
-            return normalized[:max_auto_agents]
-        except Exception:
-            return []
+        return []
 
     def _resolve_background_mode(self, trigger_state: dict[str, Any]) -> bool:
-        config = load_subagent_background_config()
-        if config.get("background_always") is True:
-            return True
-        if config.get("background_on_trigger") is False:
-            return False
-        return bool(trigger_state.get("background"))
+        return False
 
     def _get_subagent_concurrency(self) -> int:
-        config = load_subagent_background_config()
-        value = config.get("max_concurrency", 3)
-        if isinstance(value, int):
-            return max(1, value)
         return 3
 
     async def _run_subagent_with_semaphore(
@@ -1625,31 +1416,14 @@ class MainAgent:
         prompt: str,
         semaphore: asyncio.Semaphore,
     ) -> str:
-        async with semaphore:
-            return await self.ask_sub_agent(name, prompt)
+        return "Sub-agent mechanism has been removed."
 
     def _start_subagent_tasks(
         self,
         names: list[str],
         prompt: str,
     ) -> tuple[list[str], list[asyncio.Task]]:
-        if not names or not self.sub_agents or self.sub_agents.is_empty():
-            return [], []
-        max_concurrency = self._get_subagent_concurrency()
-        semaphore = asyncio.Semaphore(max_concurrency)
-        order: list[str] = []
-        tasks: list[asyncio.Task] = []
-        for name in names:
-            resolved = self.sub_agents.resolve_name(name)
-            if not resolved:
-                continue
-            order.append(resolved)
-            tasks.append(
-                asyncio.create_task(
-                    self._run_subagent_with_semaphore(resolved, prompt, semaphore)
-                )
-            )
-        return order, tasks
+        return [], []
 
     async def _collect_subagent_results(
         self,
@@ -1657,27 +1431,7 @@ class MainAgent:
         tasks: list[asyncio.Task],
         prompt: str,
     ) -> tuple[list[str], list[dict[str, Any]]]:
-        if not order or not tasks:
-            return [], []
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        output_lines: list[str] = []
-        steps_meta: list[dict[str, Any]] = []
-        for name, result in zip(order, results):
-            header = f"Parallel sub-agent: {name}"
-            output_lines.append(header)
-            step_meta: dict[str, Any] = {
-                "tool": "ask_sub_agent",
-                "args": {"name": name, "prompt": prompt},
-            }
-            if isinstance(result, Exception):
-                error_text = f"Execution error: {result}"
-                output_lines.append(f"  -> execution error: {error_text}")
-                step_meta["error"] = error_text
-            else:
-                output_lines.append(f"  -> result: {result}")
-                step_meta["result"] = result
-            steps_meta.append(step_meta)
-        return output_lines, steps_meta
+        return [], []
 
     async def _should_end_discussion(
         self,

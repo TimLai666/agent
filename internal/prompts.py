@@ -140,7 +140,7 @@ def _process_variables(text: str, variables: dict[str, str] | None = None) -> st
         # 系統名稱
         "SYSTEM_NAME": SYSTEM_NAME,
         # 工具名稱（映射到專案實際的工具）
-        "TASK_TOOL_NAME": "ask_sub_agent",  # 委派任務給 sub-agent
+        "TASK_TOOL_NAME": "todo",  # 任務規劃
         "BASH_TOOL_NAME": "run_terminal_command",  # 執行終端命令
         "READ_TOOL_NAME": "read_file",  # 讀取檔案
         "WRITE_TOOL_NAME": "create_new_file",  # 創建新檔案
@@ -170,8 +170,8 @@ def _process_variables(text: str, variables: dict[str, str] | None = None) -> st
         "BASH_TOOL_EXTRA_NOTES": "",  # Bash 工具額外說明
         "BASH_BACKGROUND_TASK_NOTES_FN": "",  # Bash 背景任務說明
         "AGENT_TOOL_USAGE_NOTES": "",  # Agent 工具使用說明
-        "TODO_TOOL_OBJECT": "ask_sub_agent",  # 待辦事項工具對象
-        "AVAILABLE_TOOLS_SET": "list_sub_agents",  # 可用工具集合
+        "TODO_TOOL_OBJECT": "todo",  # 待辦事項工具對象
+        "AVAILABLE_TOOLS_SET": "tools",  # 可用工具集合
     }
 
     # 合併使用者提供的變量
@@ -227,7 +227,6 @@ SYSTEM_PROMPT: str = _build_system_prompt()
 
 _LOCAL_INSTRUCTION_FILES = ("AGENTS.md", "CLAUDE.md", "CONTEXT.md")
 _KEYWORD_TRIGGER_FILE = PROMPTS_DIR / "KEYWORD_TRIGGERS.json"
-_SUBAGENT_BACKGROUND_FILE = PROMPTS_DIR / "SUBAGENT_BACKGROUND.json"
 
 
 def _find_upwards(start_dir: Path, filename: str) -> Path | None:
@@ -331,30 +330,3 @@ def load_keyword_triggers() -> list[dict[str, str | bool]]:
     return triggers
 
 
-@lru_cache(maxsize=1)
-def load_subagent_background_config() -> dict[str, int | bool]:
-    defaults: dict[str, int | bool] = {
-        "max_concurrency": 3,
-        "max_auto_agents": 2,
-        "background_on_trigger": True,
-        "background_always": False,
-    }
-    if not _SUBAGENT_BACKGROUND_FILE.exists():
-        return defaults
-    try:
-        raw = _SUBAGENT_BACKGROUND_FILE.read_text(encoding="utf-8")
-        data = json.loads(raw)
-    except Exception:
-        return defaults
-
-    result = defaults.copy()
-    if isinstance(data, dict):
-        if isinstance(data.get("max_concurrency"), int):
-            result["max_concurrency"] = max(1, int(data["max_concurrency"]))
-        if isinstance(data.get("max_auto_agents"), int):
-            result["max_auto_agents"] = max(1, int(data["max_auto_agents"]))
-        if isinstance(data.get("background_on_trigger"), bool):
-            result["background_on_trigger"] = data["background_on_trigger"]
-        if isinstance(data.get("background_always"), bool):
-            result["background_always"] = data["background_always"]
-    return result

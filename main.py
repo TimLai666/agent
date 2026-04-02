@@ -15,7 +15,6 @@ from PySide6.QtWidgets import QApplication
 
 
 from internal.agents import MainAgent
-from internal.co_agents import PhilosopherCoAgent
 from internal.logger import logger
 from internal.runtime.stream_printer import BACKLOG_SCALE, BASE_DELAY, MIN_FACTOR
 from internal.runtime.system import run_cli
@@ -43,7 +42,6 @@ class AgentRuntime(QThread):
         self.env = env
         self.loop: asyncio.AbstractEventLoop | None = None
         self.http_client: AsyncClient | None = None
-        self.philosopher: PhilosopherCoAgent | None = None
         self.main_agent: MainAgent | None = None
         self.mcp_stack: AsyncExitStack | None = None
         self._ready_event: asyncio.Event | None = None
@@ -73,12 +71,7 @@ class AgentRuntime(QThread):
     async def _initialize(self):
         try:
             self.http_client = AsyncClient(verify=False)
-            self.philosopher = PhilosopherCoAgent.create(
-                self.base_config, self.env, self.http_client
-            )
-            self.main_agent = MainAgent.create(
-                self.base_config, self.env, self.http_client, self.philosopher
-            )
+            self.main_agent = MainAgent.create(self.base_config, self.env, self.http_client)
             self.main_agent.set_tool_event_callback(self._emit_tool_event)
             self.mcp_stack = AsyncExitStack()
             try:
