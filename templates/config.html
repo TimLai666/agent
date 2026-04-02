@@ -547,22 +547,6 @@
                 </div>
             </div>
 
-            <!-- Co-agent 默認配置 -->
-            <div class="card" style="margin-bottom: 30px;">
-                <div class="card-header">
-                    <div class="card-title">🤝 Co-agent 默認配置</div>
-                    <button class="btn btn-primary" onclick="showCoagentDefaultModal()">
-                        ⚙️ 設定
-                    </button>
-                </div>
-                <div class="card-body">
-                    <div id="coagent-default-status">載入中...</div>
-                    <p style="color: #888; font-size: 0.9em; margin-top: 10px;">
-                        適用於所有 Co-agent（優先於全域默認）
-                    </p>
-                </div>
-            </div>
-
             <!-- 類別默認配置 -->
             <div class="card">
                 <div class="card-header">
@@ -946,59 +930,6 @@
                     <button type="button" class="btn btn-danger" onclick="deleteCoreDefault()"
                         id="delete-core-default-btn" style="display: none;">
                         刪除 Core 默認配置
-                    </button>
-                    <button type="submit" class="btn btn-primary">
-                        儲存
-                    </button>
-                </div>
-            </form>
-        </div>
-    </div>
-
-    <!-- Co-agent Default Config Modal -->
-    <div id="coagent-default-modal" class="modal">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h3 class="modal-title">Co-agent 默認配置</h3>
-                <button class="close-btn" onclick="closeModal('coagent-default-modal')">&times;</button>
-            </div>
-            <form id="coagent-default-form">
-                <p style="color: #666; margin-bottom: 20px;">
-                    設定 Co-agent 默認配置後，所有未配置的 Co-agent 將自動使用此設定（優先於全域默認）
-                </p>
-
-                <div class="form-group">
-                    <label for="coagent_provider">提供者 *</label>
-                    <select id="coagent_provider" required onchange="loadCoagentProviderModels()">
-                        <option value="">請選擇提供者</option>
-                    </select>
-                </div>
-
-                <div class="form-group">
-                    <label for="coagent_model">模型名稱 *</label>
-                    <select id="coagent_model" required>
-                        <option value="">先選擇提供者</option>
-                    </select>
-                    <small id="coagent-model-loading" style="color: #666; display: none; margin-top: 5px;">
-                        載入模型列表中...
-                    </small>
-                </div>
-
-                <div class="form-group">
-                    <label for="coagent_temperature">Temperature (可選)</label>
-                    <input type="number" id="coagent_temperature" min="0" max="2" step="0.1" value="0.2">
-                    <small style="color: #666; display: block; margin-top: 5px;">
-                        0.0 = 更確定，2.0 = 更隨機
-                    </small>
-                </div>
-
-                <div class="modal-footer">
-                    <button type="button" class="btn btn-secondary" onclick="closeModal('coagent-default-modal')">
-                        取消
-                    </button>
-                    <button type="button" class="btn btn-danger" onclick="deleteCoagentDefault()"
-                        id="delete-coagent-default-btn" style="display: none;">
-                        刪除 Co-agent 默認配置
                     </button>
                     <button type="submit" class="btn btn-primary">
                         儲存
@@ -1889,7 +1820,6 @@
             await loadGlobalDefaultStatus();
             await loadSubagentDefaultStatus();
             await loadCoreDefaultStatus();
-            await loadCoagentDefaultStatus();
             await loadCategoryDefaults();
         }
 
@@ -2150,155 +2080,6 @@
             }
         }
 
-        // ========== Co-agent 默認配置相關函數 ==========
-
-        // 載入 Co-agent 默認狀態
-        async function loadCoagentDefaultStatus() {
-            const statusDiv = document.getElementById('coagent-default-status');
-
-            try {
-                const response = await fetch('/api/category-default-config/co-agent');
-                const result = await response.json();
-
-                if (result.success && result.config) {
-                    statusDiv.innerHTML = `
-                        <p><strong>提供者:</strong> ${result.config.provider_name}</p>
-                        <p><strong>模型:</strong> ${result.config.model_name}</p>
-                        <p><strong>Temperature:</strong> ${result.config.temperature}</p>
-                        <p style="color: #4caf50; margin-top: 10px;">✅ 所有未配置的 Co-agent 將使用此設定</p>
-                    `;
-                } else {
-                    statusDiv.innerHTML = `
-                        <p style="color: #ff9800;">⚠️ 尚未設定 Co-agent 默認配置</p>
-                        <p style="color: #666; font-size: 14px;">未設定時將使用全域默認配置</p>
-                    `;
-                }
-            } catch (error) {
-                console.error('載入 Co-agent 默認狀態失敗:', error);
-                statusDiv.innerHTML = '<p style="color: #f44336;">載入失敗</p>';
-            }
-        }
-
-        // 載入 Co-agent 的提供者列表
-        async function loadProvidersForCoagent() {
-            const select = document.getElementById('coagent_provider');
-            select.innerHTML = '<option value="">載入中...</option>';
-
-            try {
-                const response = await fetch('/api/providers');
-                const providers = await response.json();
-
-                let html = '<option value="">請選擇提供者</option>';
-                providers.forEach(p => {
-                    html += `<option value="${p.provider_id}">${p.name} (${p.provider_type})</option>`;
-                });
-
-                select.innerHTML = html;
-            } catch (error) {
-                select.innerHTML = '<option value="">載入失敗</option>';
-                console.error('載入提供者失敗:', error);
-            }
-        }
-
-        // 載入 Co-agent 的模型列表
-        async function loadCoagentProviderModels() {
-            const providerId = document.getElementById('coagent_provider').value;
-            const modelSelect = document.getElementById('coagent_model');
-            const loadingText = document.getElementById('coagent-model-loading');
-
-            if (!providerId) {
-                modelSelect.innerHTML = '<option value="">先選擇提供者</option>';
-                modelSelect.disabled = true;
-                loadingText.style.display = 'none';
-                return;
-            }
-
-            modelSelect.innerHTML = '<option value="">載入中...</option>';
-            modelSelect.disabled = true;
-            loadingText.style.display = 'block';
-            loadingText.textContent = '載入模型列表中...';
-            loadingText.style.color = '#666';
-
-            try {
-                const response = await fetch(`/api/providers/${providerId}/models`);
-
-                if (!response.ok) {
-                    throw new Error(`HTTP ${response.status}`);
-                }
-
-                const data = await response.json();
-
-                if (data.models && data.models.length > 0) {
-                    modelSelect.innerHTML = data.models.map(model =>
-                        `<option value="${model}">${model}</option>`
-                    ).join('');
-                    loadingText.style.display = 'none';
-                } else {
-                    modelSelect.innerHTML = '<option value="">無可用模型</option>';
-                    loadingText.textContent = '提示: 請檢查提供者配置或 API 連接';
-                    loadingText.style.color = '#ff9800';
-                }
-            } catch (error) {
-                console.error('載入模型失敗:', error);
-                modelSelect.innerHTML = '<option value="">載入失敗</option>';
-                loadingText.textContent = `錯誤: ${error.message}`;
-                loadingText.style.color = '#f44336';
-            } finally {
-                modelSelect.disabled = false;
-            }
-        }
-
-        // 顯示 Co-agent 默認配置模態框
-        async function showCoagentDefaultModal() {
-            await loadProvidersForCoagent();
-
-            try {
-                const response = await fetch('/api/category-default-config/co-agent');
-                const result = await response.json();
-
-                if (result.success && result.config) {
-                    document.getElementById('coagent_provider').value = result.config.provider_id;
-                    syncCustomSelectById('coagent_provider');
-                    await loadCoagentProviderModels();
-                    document.getElementById('coagent_model').value = result.config.model_name;
-                    syncCustomSelectById('coagent_model');
-                    document.getElementById('coagent_temperature').value = result.config.temperature || 0.2;
-                    document.getElementById('delete-coagent-default-btn').style.display = 'inline-block';
-                } else {
-                    document.getElementById('coagent-default-form').reset();
-                    document.getElementById('delete-coagent-default-btn').style.display = 'none';
-                }
-            } catch (error) {
-                console.error('載入 Co-agent 默認配置失敗:', error);
-            }
-
-            document.getElementById('coagent-default-modal').classList.add('active');
-        }
-
-        // 刪除 Co-agent 默認配置
-        async function deleteCoagentDefault() {
-            if (!confirm('確定要刪除 Co-agent 默認配置嗎？')) return;
-
-            try {
-                const response = await fetch('/api/category-default-config/co-agent', {
-                    method: 'DELETE'
-                });
-
-                const result = await response.json();
-
-                if (result.success) {
-                    alert('Co-agent 默認配置已刪除');
-                    closeModal('coagent-default-modal');
-                    await loadCoagentDefaultStatus();
-                } else {
-                    alert('刪除失敗: ' + result.error);
-                }
-            } catch (error) {
-                console.error('刪除 Co-agent 默認配置失敗:', error);
-                alert('刪除失敗');
-            }
-        }
-
         // 載入類別默認配置列表
         async function loadCategoryDefaults() {
             const container = document.getElementById('category-defaults-list');
@@ -2310,8 +2091,8 @@
                 const categoriesData = await categoriesResp.json();
                 let categories = categoriesData.categories;
 
-                // 過濾掉 core 和 co-agent，它們與 subagent 同層級，不屬於類別默認配置
-                categories = categories.filter(cat => cat !== 'core' && cat !== 'co-agent');
+                // 過濾掉 core，它與 subagent 類別同層級，不屬於類別默認配置
+                categories = categories.filter(cat => cat !== 'core');
 
                 if (categories.length === 0) {
                     container.innerHTML = '<p style="color: #666;">沒有發現任何 Subagent 類別</p>';
@@ -2682,42 +2463,6 @@
                     closeModal('core-default-modal');
                     loadCoreDefaultStatus();
                     alert('✅ Core 默認配置保存成功！');
-                } else {
-                    alert('❌ ' + result.error);
-                }
-            } catch (error) {
-                alert('❌ 保存失敗: ' + error.message);
-            }
-        });
-
-        // Co-agent Default Form Submit
-        document.getElementById('coagent-default-form').addEventListener('submit', async (e) => {
-            e.preventDefault();
-
-            const data = {
-                provider_id: document.getElementById('coagent_provider').value,
-                model_name: document.getElementById('coagent_model').value,
-                temperature: parseFloat(document.getElementById('coagent_temperature').value)
-            };
-
-            if (!data.provider_id || !data.model_name) {
-                alert('請選擇提供者和模型');
-                return;
-            }
-
-            try {
-                const response = await fetch('/api/category-default-config/co-agent', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(data)
-                });
-
-                const result = await response.json();
-
-                if (result.success) {
-                    closeModal('coagent-default-modal');
-                    loadCoagentDefaultStatus();
-                    alert('✅ Co-agent 默認配置保存成功！');
                 } else {
                     alert('❌ ' + result.error);
                 }

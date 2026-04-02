@@ -273,13 +273,12 @@ def get_agent_config(agent_name: str, use_default: bool = True, category: Option
     4. Category-level defaults:
        - default:subagents (for sub-agent/* categories)
        - default:core (for core category)
-       - default:co-agents (for co-agent category)
     5. Global default (default) - for all agents
 
     Args:
         agent_name: Name of the agent
         use_default: Whether to fall back to default config if not found
-        category: Category of the agent (e.g., "core", "co-agent", "sub-agent/marketing")
+        category: Category of the agent (e.g., "core", "sub-agent/marketing")
 
     Returns:
         AgentModelConfig with resolved configuration, or None if not found
@@ -329,18 +328,6 @@ def get_agent_config(agent_name: str, use_default: bool = True, category: Option
                                     temperature=category_default.temperature,
                                     inherit_from="default:core",
                                 )
-                        # Co-agents: default:co-agents
-                        elif category == "co-agent":
-                            category_default = get_agent_config("default:co-agents", use_default=False)
-                            if category_default:
-                                return AgentModelConfig(
-                                    agent_name=agent_name,
-                                    provider_id=category_default.provider_id,
-                                    model_name=category_default.model_name,
-                                    temperature=category_default.temperature,
-                                    inherit_from="default:co-agents",
-                                )
-
                     # 3. 最後嘗試全域默認配置
                     default_config = get_agent_config("default", use_default=False)
                     if default_config:
