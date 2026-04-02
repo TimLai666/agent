@@ -1,12 +1,10 @@
 import argparse
 import asyncio
-import os
 import sys
 import warnings
 from collections import deque
 from contextlib import AsyncExitStack
 
-from dotenv import load_dotenv
 from httpx import AsyncClient
 from pydantic_ai.messages import ModelRequest, ModelResponse
 from PySide6.QtCore import QThread, QTimer, Signal
@@ -36,10 +34,9 @@ class AgentRuntime(QThread):
     error_occurred = Signal(int, str)
     tool_event = Signal(object)
 
-    def __init__(self, base_config, env: dict[str, str]):
+    def __init__(self, base_config):
         super().__init__()
         self.base_config = base_config
-        self.env = env
         self.loop: asyncio.AbstractEventLoop | None = None
         self.http_client: AsyncClient | None = None
         self.main_agent: MainAgent | None = None
@@ -71,7 +68,7 @@ class AgentRuntime(QThread):
     async def _initialize(self):
         try:
             self.http_client = AsyncClient(verify=False)
-            self.main_agent = MainAgent.create(self.base_config, self.env, self.http_client)
+            self.main_agent = MainAgent.create(self.base_config, self.http_client)
             self.main_agent.set_tool_event_callback(self._emit_tool_event)
             self.mcp_stack = AsyncExitStack()
             try:
@@ -176,16 +173,7 @@ class AgentRuntime(QThread):
                 self.chunk_ready.emit(request_id, chunk)
                 logger.debug(f"Received chunk: {len(chunk)} chars")
 
-        # Support disabling or customizing the response timeout via AGENT_RESPONSE_TIMEOUT env var.
-        # If unset, empty, or set to 'none'/'0'/'off', the agent will wait indefinitely for a response.
-        timeout_str = os.getenv("AGENT_RESPONSE_TIMEOUT", "0").strip()
-        if timeout_str and timeout_str.lower() not in ("none", "0", "off", "infinite"):
-            try:
-                timeout_val = int(timeout_str)
-            except Exception:
-                timeout_val = 120
-        else:
-            timeout_val = None
+        timeout_val = None
 
         if timeout_val is None:
             await collect()
@@ -235,13 +223,11 @@ class AgentRuntime(QThread):
 
 class GUIAgentApp:
     def __init__(self):
-        load_dotenv()
         warnings.filterwarnings("ignore", category=DeprecationWarning)
         warnings.filterwarnings("ignore", category=ResourceWarning)
 
         self.app = QApplication(sys.argv)
-        self.env = dict(os.environ)
-        self.base_config = load_base_config(self.env)
+        self.base_config = load_base_config()
         self.voice_manager = VoiceManager()
         self.chat_history: list[ModelRequest | ModelResponse] | None = None
         self.runtime_ready = False
@@ -288,7 +274,7 @@ class GUIAgentApp:
         # 設置 GUI 確認處理器
         set_gui_confirm_handler(self._gui_confirm_handler)
         
-        self.runtime = AgentRuntime(self.base_config, self.env)
+        self.runtime = AgentRuntime(self.base_config)
         self.runtime.ready.connect(self.handle_runtime_ready)
         self.runtime.result_ready.connect(self.handle_result)
         self.runtime.chunk_ready.connect(self.handle_chunk)

@@ -1,8 +1,6 @@
-import os
 import warnings
 from contextlib import AsyncExitStack
 
-from dotenv import load_dotenv
 from httpx import AsyncClient
 from pydantic_ai.messages import ModelRequest, ModelResponse
 
@@ -257,15 +255,13 @@ async def run_cli(prompt_once: str | None = None, single_turn: bool = False) -> 
     warnings.filterwarnings("ignore", category=DeprecationWarning)
     warnings.filterwarnings("ignore", category=ResourceWarning)
 
-    load_dotenv()
     logger.info("Starting agent...")
 
     voice_manager = VoiceManager()
-    env = dict(os.environ)
-    base_config = load_base_config(env)
+    base_config = load_base_config()
 
     async with AsyncClient(verify=False) as http_client:
-        main_agent = MainAgent.create(base_config, env, http_client)
+        main_agent = MainAgent.create(base_config, http_client)
 
         chat_history: list[ModelRequest | ModelResponse] | None = None
         history: list[tuple[str, str]] = []

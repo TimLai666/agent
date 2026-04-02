@@ -143,7 +143,6 @@ class MainAgent:
     def create(
         cls,
         base_config: AgentConfig,
-        env: dict[str, str],
         http_client: AsyncClient,
         skills: SkillRegistry | None = None,
         additional_system_prompts: list[str] | None = None,
@@ -165,7 +164,7 @@ class MainAgent:
             model_name=base_config.model_name,
             temperature=0.5,
         )
-        config = load_agent_config_chain([cls.ENV_PREFIX], main_defaults, env)
+        config = load_agent_config_chain([cls.ENV_PREFIX], main_defaults)
         model = create_openai_model(config, http_client)
         instructions = build_runtime_instructions(
             get_prompt(cls.PROMPT_KEY),

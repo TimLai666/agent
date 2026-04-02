@@ -1,5 +1,4 @@
 from dataclasses import dataclass
-from typing import Any
 
 from httpx import AsyncClient
 from pydantic_ai.models.openai import OpenAIChatModel
@@ -42,10 +41,10 @@ def create_openai_model(config: AgentConfig, http_client: AsyncClient) -> OpenAI
     return model
 
 
-def load_agent_config_chain(prefixes: list[str], defaults: AgentConfig, env: dict[str, str]) -> AgentConfig:
+def load_agent_config_chain(prefixes: list[str], defaults: AgentConfig) -> AgentConfig:
     """
     Returns the default config - actual configuration is loaded from database.
-    This function is kept for API compatibility but env parameter is ignored.
+    This function is kept for API compatibility.
     """
     # Return base config with the last prefix name
     return AgentConfig(
@@ -57,11 +56,11 @@ def load_agent_config_chain(prefixes: list[str], defaults: AgentConfig, env: dic
     )
 
 
-def load_base_config(env: dict[str, str]) -> AgentConfig:
+def load_base_config() -> AgentConfig:
     """
     Returns a placeholder base config.
     Actual configuration is loaded from database.
-    This function is kept for API compatibility but env parameter is ignored.
+    This function is kept for API compatibility.
     """
     return AgentConfig(
         name="base",
@@ -70,21 +69,3 @@ def load_base_config(env: dict[str, str]) -> AgentConfig:
         model_name="",
         temperature=0.2,
     )
-
-
-def _get_env_value(env: dict[str, str], prefix: str, key: str, default: Any) -> Any:
-    prefixed_key = f"{prefix}_{key}"
-    if prefixed_key in env and env[prefixed_key]:
-        return env[prefixed_key]
-    return default
-
-
-def _get_env_float(env: dict[str, str], prefix: str, key: str, default: float) -> float:
-    raw = _get_env_value(env, prefix, key, "")
-    if raw == "":
-        return default
-    try:
-        return float(raw)
-    except ValueError:
-        logger.warning(f"Invalid {prefix}_{key} '{raw}', using default {default}.")
-        return default
