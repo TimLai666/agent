@@ -172,15 +172,8 @@ class AgentRuntime(QThread):
         if is_skill_call:
             if stage == "skill-activated":
                 return f"[SKILL] {label}"
-            if stage == "start":
-                return f"[SKILL>] {label}"
-            if stage == "end":
-                return f"[SKILL OK] {label}"
-            if stage == "error":
-                error = str(event.get("error") or "")
-                suffix = f": {error}" if error else ""
-                return f"[SKILL ERR] {label}{suffix}"
-            return f"[SKILL] {label}"
+            # Suppress use_skill start/end/error lines to keep only one [SKILL] hint.
+            return ""
 
         if stage == "start":
             return f"[>] {label}"
@@ -197,6 +190,8 @@ class AgentRuntime(QThread):
             line = self._format_tool_line(event)
         except Exception as exc:
             logger.debug(f"Tool event format failed: {exc}")
+            return
+        if not line:
             return
         payload = {"request_id": self._active_request_id, "line": line}
         self.tool_event.emit(payload)

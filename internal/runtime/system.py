@@ -89,15 +89,8 @@ def _format_tool_line(event: dict) -> str:
     if is_skill_call:
         if stage == "skill-activated":
             return f"[SKILL] {label}"
-        if stage == "start":
-            return f"[SKILL>] {label}"
-        if stage == "end":
-            return f"[SKILL OK] {label}"
-        if stage == "error":
-            error = str(event.get("error") or "")
-            suffix = f": {error}" if error else ""
-            return f"[SKILL ERR] {label}{suffix}"
-        return f"[SKILL] {label}"
+        # Suppress use_skill start/end/error lines to keep only one [SKILL] hint.
+        return ""
 
     if stage == "start":
         return f"[>] {label}"
@@ -132,7 +125,10 @@ async def run_cli(
 
         def emit_tool_event(event: dict) -> None:
             try:
-                print("\n[TOOL] " + _format_tool_line(event), flush=True)
+                line = _format_tool_line(event)
+                if not line:
+                    return
+                print("\n[TOOL] " + line, flush=True)
             except Exception as exc:
                 logger.debug(f"Failed to print tool event: {exc}")
 
