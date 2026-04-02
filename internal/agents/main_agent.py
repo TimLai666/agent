@@ -64,12 +64,14 @@ class MainAgent:
         cls,
         additional_prompts: list[str] | None = None,
         auto_load_all: bool = True,
+        model_name: str | None = None,
     ) -> str:
         """建立增強的 system prompt。
 
         Args:
             additional_prompts: 要加入的額外 system prompt 名稱列表
             auto_load_all: 是否自動載入所有可用的 system prompts（預設 True）
+            model_name: 當前使用的模型名稱
 
         Returns:
             組合後的 system prompt
@@ -106,6 +108,7 @@ class MainAgent:
 
         weekday_en = weekday_names[now.weekday()]
         weekday_zh = weekday_chinese[now.weekday()]
+        active_model = model_name or "unknown"
 
         # 構建時間與環境資訊
         environment_context = build_environment_context()
@@ -121,6 +124,10 @@ class MainAgent:
 - **System**: {platform.system()}
 
 **Use this information** when responding to user greetings or when time-sensitive context is needed.
+
+    # Model Information
+
+- **Active Model**: {active_model}
 
     # Runtime Environment
 
@@ -168,6 +175,11 @@ class MainAgent:
         )
         config = load_agent_config_chain([cls.ENV_PREFIX], main_defaults)
         model = create_openai_model(config, http_client)
+        active_model_name = (
+            getattr(model, "model_name", None)
+            or getattr(model, "model", None)
+            or config.model_name
+        )
         instructions = build_runtime_instructions(
             get_prompt(cls.PROMPT_KEY),
             include_environment_context=False,
@@ -178,7 +190,8 @@ class MainAgent:
         # 建立增強的 system prompt（預設自動載入所有可用的 prompts）
         enhanced_system_prompt = cls._build_enhanced_system_prompt(
             additional_prompts=additional_system_prompts,
-            auto_load_all=auto_load_all_prompts
+            auto_load_all=auto_load_all_prompts,
+            model_name=active_model_name,
         )
 
         agent: Agent[None, str] = Agent(
