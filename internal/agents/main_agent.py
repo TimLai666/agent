@@ -25,7 +25,6 @@ from internal.prompts import (
     get_prompt,
     get_system_prompt_processed,
     build_combined_system_prompt,
-    load_keyword_triggers,
 )
 from internal.services.agent_factory import (
     AgentConfig,
@@ -1134,41 +1133,6 @@ class MainAgent:
     ) -> list[UserContent]:
         return [*content, error_context]
 
-    def _apply_keyword_triggers(self, prompt: str) -> tuple[str, dict[str, Any]]:
-        triggers = load_keyword_triggers()
-        if not triggers or not prompt:
-            return prompt, {"names": [], "background": False}
-        cleaned = self._strip_code_blocks(prompt)
-        matched: list[str] = []
-        prefix_blocks: list[str] = []
-        suffix_blocks: list[str] = []
-        background_enabled = False
-        for trigger in triggers:
-            pattern = str(trigger.get("pattern", ""))
-            try:
-                regex = re.compile(pattern)
-            except re.error:
-                continue
-            if not regex.search(cleaned):
-                continue
-            name = str(trigger.get("name", "keyword"))
-            inject = str(trigger.get("inject", ""))
-            if not inject:
-                continue
-            if trigger.get("background") is True:
-                background_enabled = True
-            block = f"[keyword:{name}]\n{inject}"
-            if trigger.get("position") == "suffix":
-                suffix_blocks.append(block)
-            else:
-                prefix_blocks.append(block)
-            matched.append(name)
-        if prefix_blocks:
-            prompt = "\n\n".join(prefix_blocks) + "\n\n" + prompt
-        if suffix_blocks:
-            prompt = prompt + "\n\n" + "\n\n".join(suffix_blocks)
-        return prompt, {"names": matched, "background": background_enabled}
-
     def _plan_requests_subagent(self, plan_list: list[dict[str, Any] | Any]) -> bool:
         return False
 
@@ -1185,9 +1149,6 @@ class MainAgent:
         message_history: list[ModelRequest | ModelResponse] | None = None,
     ) -> list[str]:
         return []
-
-    def _resolve_background_mode(self, trigger_state: dict[str, Any]) -> bool:
-        return False
 
     def _get_subagent_concurrency(self) -> int:
         return 3
@@ -1227,7 +1188,6 @@ class MainAgent:
         self._previous_user_prompt = self._last_user_prompt
         self._last_user_prompt = prompt
         prompt, explicit_subagents = self._prepare_prompt(prompt)
-        prompt, trigger_state = self._apply_keyword_triggers(prompt)
 
         # 如果啟用 skip_plan_execution，直接讓 agent.run() 自己調用工具
         if skip_plan_execution:
@@ -1315,7 +1275,6 @@ class MainAgent:
             else await self._decide_sub_agents(prompt, message_history=message_history)
         )
         parallel_subagents = explicit_subagents or auto_subagents
-        background_mode = self._resolve_background_mode(trigger_state)
         exec_results: list[str] = []
         parallel_results: list[str] = []
         parallel_meta: list[dict[str, Any]] = []
@@ -1379,7 +1338,6 @@ class MainAgent:
         self._previous_user_prompt = self._last_user_prompt
         self._last_user_prompt = prompt
         prompt, explicit_subagents = self._prepare_prompt(prompt)
-        prompt, trigger_state = self._apply_keyword_triggers(prompt)
 
         # 如果啟用 skip_plan_execution，直接讓 agent.run_stream() 自己調用工具
         if skip_plan_execution:
@@ -1498,7 +1456,6 @@ class MainAgent:
             else await self._decide_sub_agents(prompt, message_history=message_history)
         )
         parallel_subagents = explicit_subagents or auto_subagents
-        background_mode = self._resolve_background_mode(trigger_state)
         exec_results: list[str] = []
         step_outputs: list[str] = []
         steps_meta: list[dict[str, Any]] = []
@@ -1507,7 +1464,7 @@ class MainAgent:
         parallel_meta: list[dict[str, Any]] = []
         order, tasks = self._start_subagent_tasks(parallel_subagents, prompt)
         pending_parallel = bool(order and tasks)
-        if pending_parallel and (not background_mode or not plan_list):
+        if pending_parallel:
             parallel_results, parallel_meta = await self._collect_subagent_results(
                 order, tasks, prompt
             )
