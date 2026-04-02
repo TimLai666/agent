@@ -232,11 +232,6 @@ class MainAgent:
             tools=[],
             model_settings={"temperature": config.temperature},
         )
-        # Register skill tool (Claude Code compatible)
-        from internal.tools.skill_tools import register_skill_tool
-
-        register_skill_tool(agent, skills)
-
         # register global tools directly on the main agent
         # Wrap agent.tool_plain temporarily so that each registered tool is
         # wrapped to log calls, arguments, results and exceptions.
@@ -346,6 +341,11 @@ class MainAgent:
             skill_root_dirs,
         )
         try:
+            # Register skill tool inside wrapped phase so skill activations
+            # also emit start/end/error events for GUI/CLI display.
+            from internal.tools.skill_tools import register_skill_tool
+
+            register_skill_tool(agent, skills)
             add_all_tools(agent)
             logger.info("Registered tools on MainAgent")
         except Exception:
