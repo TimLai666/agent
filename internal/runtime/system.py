@@ -17,6 +17,58 @@ HISTORY_LIMIT = 30
 COMMAND_PREFIX = "/"
 
 
+def _format_tool_line(event: dict) -> str:
+    tool = str(event.get("tool") or "tool")
+    args = event.get("args") or ()
+    kwargs = event.get("kwargs") or {}
+    stage = str(event.get("stage") or "")
+
+    def _trim(value: str, limit: int = 80) -> str:
+        value = value.strip()
+        if len(value) <= limit:
+            return value
+        return value[: limit - 3] + "..."
+
+    detail = ""
+    if tool == "use_skill":
+        skill_name = ""
+        if isinstance(kwargs, dict):
+            raw = kwargs.get("skill_name")
+            if isinstance(raw, str):
+                skill_name = raw.strip()
+        if not skill_name and args:
+            first = args[0]
+            if isinstance(first, str):
+                skill_name = first.strip()
+        if skill_name:
+            detail = f"skill={_trim(skill_name)}"
+    elif isinstance(kwargs, dict):
+        for key in ("command", "path", "url", "query"):
+            value = kwargs.get(key)
+            if isinstance(value, str) and value.strip():
+                detail = f"{key}={_trim(value)}"
+                break
+
+    if not detail and args:
+        try:
+            first = args[0]
+            if isinstance(first, str) and first.strip():
+                detail = f"arg={_trim(first)}"
+        except Exception:
+            pass
+
+    label = tool if not detail else f"{tool} ({detail})"
+    if stage == "start":
+        return f"[>] {label}"
+    if stage == "end":
+        return f"[OK] {label}"
+    if stage == "error":
+        error = str(event.get("error") or "")
+        suffix = f": {error}" if error else ""
+        return f"[ERR] {label}{suffix}"
+    return f"[*] {label}"
+
+
 async def run_cli(
     prompt_once: str | None = None,
     single_turn: bool = False,
@@ -37,6 +89,14 @@ async def run_cli(
             skill_root_dirs=skill_root_dirs,
         )
 
+        def emit_tool_event(event: dict) -> None:
+            try:
+                print("\n[TOOL] " + _format_tool_line(event), flush=True)
+            except Exception as exc:
+                logger.debug(f"Failed to print tool event: {exc}")
+
+        main_agent.set_tool_event_callback(emit_tool_event)
+
         chat_history: list[ModelRequest | ModelResponse] | None = None
         history: list[tuple[str, str]] = []
         
@@ -54,6 +114,13 @@ async def run_cli(
                 await stack.enter_async_context(main_agent.agent.run_mcp_servers())
             except Exception as exc:  # pragma: no cover - best effort when MCP fails
                 logger.warning("MCP browser tools failed to start; continuing without them.", exc_info=exc)
+                # Keep CLI behavior consistent with GUI: remove unavailable MCP toolsets
+                # so the agent won't repeatedly attempt calls to broken MCP servers.
+                try:
+                    main_agent.agent._user_toolsets = []
+                    logger.info("Cleared MCP toolsets from agent to prevent tool call failures")
+                except Exception as clear_exc:
+                    logger.debug("Failed to clear MCP toolsets in CLI", exc_info=clear_exc)
             else:
                 mcp_started = True
 

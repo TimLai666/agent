@@ -104,20 +104,41 @@ class AgentRuntime(QThread):
         kwargs = event.get("kwargs") or {}
         stage = str(event.get("stage") or "")
 
-        label = tool
-        if isinstance(kwargs, dict):
+        def _trim(value: str, limit: int = 80) -> str:
+            value = value.strip()
+            if len(value) <= limit:
+                return value
+            return value[: limit - 3] + "..."
+
+        detail = ""
+        if tool == "use_skill":
+            skill_name = ""
+            if isinstance(kwargs, dict):
+                raw = kwargs.get("skill_name")
+                if isinstance(raw, str):
+                    skill_name = raw.strip()
+            if not skill_name and args:
+                first = args[0]
+                if isinstance(first, str):
+                    skill_name = first.strip()
+            if skill_name:
+                detail = f"skill={_trim(skill_name)}"
+        elif isinstance(kwargs, dict):
             for key in ("command", "path", "url", "query"):
                 value = kwargs.get(key)
                 if isinstance(value, str) and value.strip():
-                    label = value.strip()
+                    detail = f"{key}={_trim(value)}"
                     break
-        if label == tool and args:
+
+        if not detail and args:
             try:
                 first = args[0]
                 if isinstance(first, str) and first.strip():
-                    label = f"{tool} {first.strip()}"
+                    detail = f"arg={_trim(first)}"
             except Exception:
                 pass
+
+        label = tool if not detail else f"{tool} ({detail})"
 
         if stage == "start":
             return f"[>] {label}"
@@ -687,6 +708,11 @@ def main() -> None:
         "--gui",
         action="store_true",
         help="Launch the GUI version.",
+    )
+    parser.add_argument(
+        "--cli",
+        action="store_true",
+        help="Launch the CLI version (default behavior; kept for compatibility).",
     )
     parser.add_argument(
         "--config",
