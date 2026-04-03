@@ -33,7 +33,7 @@ def run_terminal_command(command: str) -> str:
     IMPORTANT:
     1. Always call `get_platform_info` first to determine if you are on Windows, Linux, or macOS.
     2. Prohibited keywords (e.g., rm, del, format, sudo) will cause the command to be blocked.
-    3. Manual user confirmation is required for every execution.
+    3. Safe read-only commands are auto-approved; other commands still require manual confirmation.
     4. There is a 120-second timeout.
     5. Windows commands run through PowerShell by default.
     """
@@ -77,12 +77,8 @@ def run_terminal_command(command: str) -> str:
         "killall",
         "taskkill",
         # Shell/Escaping (prevent bypassing checks)
-        "bash",
         "sh",
-        "zsh",
         "cmd",
-        "powershell",
-        "pwsh",
         "alias",
         "unalias",
         # Windows system sensitive
@@ -102,13 +98,16 @@ def run_terminal_command(command: str) -> str:
         return f"Error: Command execution denied. The command contains prohibited keywords: {forbidden}."
 
     try:
-        # User confirmation is the final safety gate
-        if not confirm(
-            message=f"Agent wants to execute terminal command: `{command}`. Allow?",
-            default_choice="N",
-        ):
-            logger.info(f"User denied command execution: {command}")
-            return "❌ User denied permission to execute this command. The operation was cancelled."
+        if _is_read_only_safe_command(command):
+            logger.info("Auto-approved safe read-only command: %s", command)
+        else:
+            # User confirmation is the final safety gate for non-read-only commands
+            if not confirm(
+                message=f"Agent wants to execute terminal command: `{command}`. Allow?",
+                default_choice="N",
+            ):
+                logger.info(f"User denied command execution: {command}")
+                return "❌ User denied permission to execute this command. The operation was cancelled."
 
         process = _run_command(command)
 
@@ -141,6 +140,99 @@ def add_terminal_tools(agent: Agent) -> None:
     """Add terminal execution tools to the agent."""
     agent.tool_plain(get_platform_info)
     agent.tool_plain(run_terminal_command)
+
+
+def _is_read_only_safe_command(command: str) -> bool:
+    """Return True when command is a simple, read-only, low-risk command."""
+    if not command or not command.strip():
+        return False
+
+    normalized = command.strip().lower()
+
+    # Require single command without chaining or redirection to keep auto-approval strict.
+    disallowed_operators = ["&&", "||", ";", ">", "<"]
+    if any(op in normalized for op in disallowed_operators):
+        return False
+
+    # Normalize first token for quick classification.
+    match = re.match(r"^\s*([a-z0-9_.-]+)", normalized)
+    if not match:
+        return False
+    first = match.group(1)
+
+    safe_single_commands = {
+        "pwd",
+        "ls",
+        "dir",
+        "whoami",
+        "hostname",
+        "date",
+        "ver",
+        "where",
+        "which",
+        "uname",
+        "cat",
+        "type",
+        "head",
+        "tail",
+        "get-date",
+        "get-location",
+        "get-content",
+        "get-childitem",
+        "get-command",
+    }
+    if first in safe_single_commands:
+        return True
+
+    # Explicitly allow safe inspection commands for common toolchains/shell binaries.
+    safe_exact_commands = {
+        # go
+        "go version",
+        "go env",
+        "go help",
+        "go tool dist list",
+        # bun
+        "bun --version",
+        "bun -v",
+        "bun --help",
+        "bun pm --version",
+        # shell binaries: version/help only (no -c / -command execution)
+        "powershell --version",
+        "powershell -version",
+        "pwsh --version",
+        "pwsh -v",
+        "bash --version",
+        "bash -version",
+        "zsh --version",
+    }
+    if normalized in safe_exact_commands:
+        return True
+
+    # Explicitly allow read-only git inspection commands.
+    git_prefixes = (
+        "git status",
+        "git log",
+        "git show",
+        "git diff",
+        "git branch",
+        "git rev-parse",
+    )
+    if normalized.startswith(git_prefixes):
+        return True
+
+    # Allow version checks only.
+    if normalized in {
+        "python --version",
+        "python -v",
+        "uv --version",
+        "node --version",
+        "go version",
+        "bun --version",
+        "bun -v",
+    }:
+        return True
+
+    return False
 
 
 def _run_command(command: str) -> subprocess.CompletedProcess[str]:
