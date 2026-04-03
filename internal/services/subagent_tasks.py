@@ -19,6 +19,8 @@ TaskMode = Literal["spawn", "fork"]
 
 _FILES_PATTERN = re.compile(r"\b[\w./-]+\.(?:py|ts|tsx|js|json|md|yml|yaml|toml|ini|cfg)\b")
 _COMMAND_PATTERN = re.compile(r"^\s*(?:\$\s*)?(uv|python|pytest|npm|pnpm|yarn|make|git)\b.*$", re.IGNORECASE)
+IDLE_WAIT_TIMEOUT_SECONDS = 90
+MAX_REPAIR_ATTEMPTS = 3
 
 
 @dataclass
@@ -51,6 +53,7 @@ class BaseTask:
     verificationNeeded: bool = False
     evidence: list[str] = field(default_factory=list)
     unresolvedIssues: list[str] = field(default_factory=list)
+    repairAttempts: int = 0
 
 
 class TaskRegistry:
@@ -206,7 +209,7 @@ class SubagentTaskManager:
                 if event is None:
                     return
                 try:
-                    await asyncio.wait_for(event.wait(), timeout=300)
+                    await asyncio.wait_for(event.wait(), timeout=IDLE_WAIT_TIMEOUT_SECONDS)
                     event.clear()
                     continue
                 except asyncio.TimeoutError:
@@ -253,6 +256,24 @@ class SubagentTaskManager:
                     continue
 
                 if decision.nextAction == "retry-worker":
+                    if current.repairAttempts >= MAX_REPAIR_ATTEMPTS:
+                        reason = (
+                            "Exceeded maximum repair attempts; stopping to avoid retry loop. "
+                            "Please revise task plan or switch implementation approach."
+                        )
+                        self.registry.updateTask(
+                            task_id,
+                            lambda t: replace(
+                                t,
+                                status="failed",
+                                summary=reason,
+                                error=reason,
+                                notified=False,
+                            ),
+                        )
+                        self._enqueue_once(task_id)
+                        return
+
                     retry_reason = decision.reason
                     if verification_result_text:
                         retry_reason += "\n" + verification_result_text
@@ -260,8 +281,15 @@ class SubagentTaskManager:
                         task_id,
                         lambda t: replace(
                             t,
-                            pendingMessages=[*t.pendingMessages, f"Please fix and continue. {retry_reason}"],
+                            pendingMessages=[
+                                *t.pendingMessages,
+                                (
+                                    "Please fix and continue using a different approach than previous attempts. "
+                                    f"Attempt {t.repairAttempts + 1}/{MAX_REPAIR_ATTEMPTS}. {retry_reason}"
+                                ),
+                            ],
                             summary=retry_reason,
+                            repairAttempts=t.repairAttempts + 1,
                             notified=False,
                         ),
                     )

@@ -43,6 +43,10 @@ from internal.skills_loader import SkillRegistry, load_skill_registry
 
 from internal.mcp_server_list import get_all_mcp_servers
 from internal.compaction import serialize_compaction_input
+from internal.core.protocol.image_output_paths import (
+    ImagePathStreamNormalizer,
+    enforce_absolute_image_paths,
+)
 
 PROMPT_KEY = "MAIN_AGENT_PROMPT"
 ENV_PREFIX = "MAIN"
@@ -637,12 +641,13 @@ class MainAgent:
 
         try:
             result = await self.agent.run(user_content, message_history=message_history)
+            output_text = enforce_absolute_image_paths(result.output or "")
             try:
                 self._last_messages = result.all_messages()
             except Exception:
                 self._last_messages = None
-            self._last_assistant_reply = self._extract_user_reply(result.output or "")
-            return result.output or ""
+            self._last_assistant_reply = self._extract_user_reply(output_text)
+            return output_text
         except Exception as e:
             error_msg = str(e)
             logger.warning("Tool execution error in agent.run(): %s", error_msg)
@@ -660,12 +665,13 @@ class MainAgent:
                 result = await self.agent.run(
                     user_content_with_error, message_history=message_history
                 )
+                output_text = enforce_absolute_image_paths(result.output or "")
                 try:
                     self._last_messages = result.all_messages()
                 except Exception:
                     self._last_messages = None
-                self._last_assistant_reply = self._extract_user_reply(result.output or "")
-                return result.output or ""
+                self._last_assistant_reply = self._extract_user_reply(output_text)
+                return output_text
             except Exception as final_error:
                 logger.error("All retry attempts failed: %s", final_error)
                 final_prompt = (
@@ -676,7 +682,9 @@ class MainAgent:
                 )
                 try:
                     result = await self.agent.run(final_prompt)
-                    return result.output or "抱歉，目前無法連接到外部服務。請稍後再試。"
+                    return enforce_absolute_image_paths(
+                        result.output or "抱歉，目前無法連接到外部服務。請稍後再試。"
+                    )
                 except Exception:
                     return "抱歉，系統暫時無法處理您的請求。請稍後再試。"
 
@@ -713,12 +721,19 @@ class MainAgent:
                 user_prompt=user_content, message_history=message_history
             ) as result:
                 collected = ""
+                normalizer = ImagePathStreamNormalizer()
                 try:
                     async for chunk in result.stream_text(delta=True):
                         if not chunk:
                             continue
-                        collected += chunk
-                        yield chunk
+                        normalized_chunk = normalizer.feed(chunk)
+                        if normalized_chunk:
+                            collected += normalized_chunk
+                            yield normalized_chunk
+                    tail = normalizer.flush()
+                    if tail:
+                        collected += tail
+                        yield tail
                 except Exception as stream_error:
                     error_msg = str(stream_error)
                     logger.warning("Tool execution error during streaming: %s", error_msg)
@@ -749,11 +764,18 @@ class MainAgent:
                     user_prompt=user_content_with_error, message_history=message_history
                 ) as result:
                     collected = ""
+                    normalizer = ImagePathStreamNormalizer()
                     async for chunk in result.stream_text(delta=True):
                         if not chunk:
                             continue
-                        collected += chunk
-                        yield chunk
+                        normalized_chunk = normalizer.feed(chunk)
+                        if normalized_chunk:
+                            collected += normalized_chunk
+                            yield normalized_chunk
+                    tail = normalizer.flush()
+                    if tail:
+                        collected += tail
+                        yield tail
                     try:
                         self._last_messages = result.all_messages()
                     except Exception:

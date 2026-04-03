@@ -114,3 +114,32 @@ def test_verification_fail_must_retry_worker_before_complete():
     assert result["status"] == "completed"
     assert calls["worker"] >= 2
     assert calls["verifier"] >= 2
+
+
+def test_retry_loop_has_max_attempts_and_fails():
+    notifications: list[str] = []
+    calls = {"worker": 0, "verifier": 0}
+
+    async def fake_worker(task: BaseTask, prompt: str) -> str:
+        if task.subagentType == "verification":
+            calls["verifier"] += 1
+            return "VERDICT: FAIL\n$ pytest -q\nstill failing"
+        calls["worker"] += 1
+        return "Attempt implementation\nEdited a.py b.py c.py\n$ pytest -q"
+
+    manager = SubagentTaskManager(fake_worker, notifications.append)
+
+    result = asyncio.run(
+        manager.spawnAgentTask(
+            AgentToolInput(
+                prompt="修 API bug",
+                subagent_type="implementation",
+                run_in_background=False,
+            ),
+            session_id="s1",
+        )
+    )
+
+    assert result["status"] == "failed"
+    assert calls["worker"] == 4
+    assert calls["verifier"] == 4

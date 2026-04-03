@@ -1,5 +1,6 @@
 import argparse
 import asyncio
+import concurrent.futures
 import sys
 import warnings
 from collections import deque
@@ -318,7 +319,8 @@ class AgentRuntime(QThread):
             try:
                 result, updated_history = fut.result()
                 self.result_ready.emit(request_id, result, updated_history or [])
-            except asyncio.CancelledError:
+            except (asyncio.CancelledError, concurrent.futures.CancelledError):
+                logger.debug("AgentRuntime request %s was cancelled", request_id)
                 pass
             except Exception as e:
                 logger.error(f"AgentRuntime run error: {e}", exc_info=e)
