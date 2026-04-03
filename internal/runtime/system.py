@@ -144,7 +144,7 @@ def _format_tool_line(event: dict) -> str:
     if stage == "start":
         return f"[>] {label}"
     if stage == "end":
-        return f"[OK] {label}"
+        return "[OK]"
     if stage == "error":
         error = str(event.get("error") or "")
         suffix = f": {error}" if error else ""
