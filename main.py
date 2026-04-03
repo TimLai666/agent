@@ -219,7 +219,7 @@ class AgentRuntime(QThread):
         if stage == "start":
             return f"[>] {label}"
         if stage == "end":
-            return f"[OK] {label}"
+            return "[OK]"
         if stage == "error":
             error = str(event.get("error") or "")
             suffix = f": {error}" if error else ""
@@ -484,7 +484,14 @@ class GUIAgentApp:
         text = self._display_text if base_text is None else base_text
         if not self._tool_log_lines:
             return text
-        tool_block = ("<tool-execution>\n" + "\n".join(self._tool_log_lines) + "\n</tool-execution>")
+        tool_lines = "\n".join(self._tool_log_lines)
+        tool_block = (
+            "<tool-execution>\n"
+            "```text\n"
+            f"{tool_lines}\n"
+            "```\n"
+            "</tool-execution>"
+        )
         if text:
             return tool_block + "\n\n" + text
         return tool_block

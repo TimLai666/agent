@@ -45,6 +45,21 @@ def _is_no_results_error(err: Exception) -> bool:
     return False
 
 
+def _is_transient_backend_error(err: Exception) -> bool:
+    """判斷是否屬於後端暫時性網路錯誤（可重試/可降級）。"""
+    text = str(err).lower()
+    markers = [
+        "sendrequest",
+        "connection error",
+        "broken pipe",
+        "stream closed",
+        "timed out",
+        "timeout",
+        "network",
+    ]
+    return any(marker in text for marker in markers)
+
+
 def add_web_search_tools(agent: Agent) -> None:
     """
     註冊免費的網路搜索工具到 agent
@@ -87,7 +102,12 @@ async def _run_backend_callable(
                 logger.info(f"{backend} returned no results (attempt {attempt})")
                 return {"backend": backend, "results": []}
             last_err = str(e)
-            logger.error(f"後端 {backend} 搜索時發生錯誤: {str(e)}", exc_info=e)
+            if _is_transient_backend_error(e):
+                logger.warning(
+                    f"後端 {backend} 暫時性錯誤（attempt {attempt}）: {last_err}"
+                )
+            else:
+                logger.error(f"後端 {backend} 搜索時發生錯誤: {last_err}")
 
         # 重試前等待（指數回退，選擇性 jitter）
         if attempt < retries:
