@@ -2,9 +2,11 @@ import asyncio
 import functools
 import inspect
 import json
+import platform
 import re
 import sys
 import uuid
+from datetime import datetime
 from pathlib import Path
 from typing import Any, cast
 
@@ -17,6 +19,7 @@ from pydantic_ai.messages import (
     ModelResponse,
     UserContent,
 )
+from pydantic_ai.mcp import MCPServerStdio
 
 from internal.logger import logger
 from internal.prompts import (
@@ -26,6 +29,7 @@ from internal.prompts import (
     get_prompt,
     get_system_prompt_processed,
     build_combined_system_prompt,
+    list_available_system_prompts,
 )
 from internal.services.agent_factory import (
     AgentConfig,
@@ -65,6 +69,8 @@ class MainAgent:
     TOOL_RECOVERY_MAX_ATTEMPTS = 2
     _IMAGE_DIRECTIVE_RE = re.compile(r"(?mi)^\s*(?:image|img)\s*:\s*(?P<target>.+?)\s*$")
     _IMAGE_MARKDOWN_RE = re.compile(r"!\[(?P<alt>[^\]]*)\]\((?P<target>[^)]+)\)")
+    _WEEKDAY_EN = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
+    _WEEKDAY_ZH = ("週一", "週二", "週三", "週四", "週五", "週六", "週日")
 
     @classmethod
     def _build_enhanced_system_prompt(
@@ -83,41 +89,15 @@ class MainAgent:
         Returns:
             組合後的 system prompt
         """
-        from internal.prompts import list_available_system_prompts
-        from datetime import datetime
-        import platform
-
-        # 如果啟用自動載入，載入所有可用的 prompts
         if auto_load_all and additional_prompts is None:
             additional_prompts = list_available_system_prompts()
-            logger.info(f"Auto-loading {len(additional_prompts)} system prompts")
+            logger.info("Auto-loading %d system prompts", len(additional_prompts))
 
-        # 獲取當前時間資訊
         now = datetime.now()
-        weekday_names = {
-            0: "Monday",
-            1: "Tuesday",
-            2: "Wednesday",
-            3: "Thursday",
-            4: "Friday",
-            5: "Saturday",
-            6: "Sunday"
-        }
-        weekday_chinese = {
-            0: "週一",
-            1: "週二",
-            2: "週三",
-            3: "週四",
-            4: "週五",
-            5: "週六",
-            6: "週日"
-        }
-
-        weekday_en = weekday_names[now.weekday()]
-        weekday_zh = weekday_chinese[now.weekday()]
+        weekday_en = cls._WEEKDAY_EN[now.weekday()]
+        weekday_zh = cls._WEEKDAY_ZH[now.weekday()]
         active_model = model_name or "unknown"
 
-        # 構建時間與環境資訊
         environment_context = build_environment_context()
         time_info = f"""
     # Current Date and Time
@@ -141,13 +121,11 @@ class MainAgent:
     {environment_context}
 """
 
-        # 基礎 prompt + 時間資訊
         base_with_time = SYSTEM_PROMPT + "\n\n" + time_info
 
         if not additional_prompts:
             return base_with_time
 
-        # 使用 build_combined_system_prompt 組合 prompts
         return build_combined_system_prompt(
             base_prompt=base_with_time,
             additional_prompts=additional_prompts,
@@ -520,16 +498,12 @@ class MainAgent:
         setattr(self.agent, "_tool_event_callback", callback)
 
     def _reload_model_from_db(self) -> None:
-        """從資料庫重新載入配置並更新 model。
-        
-        每次 run() 或 run_stream() 時都會調用，確保使用最新的配置。
-        """
+        """Pick up any model config changes made via the UI since the last call."""
         if not self._http_client:
             logger.warning("無法重載 model：沒有 http_client")
             return
-        
+
         try:
-            # 從資料庫載入最新配置
             config = AgentConfig(
                 name="main",
                 base_url=None,
@@ -538,8 +512,7 @@ class MainAgent:
                 temperature=0.5,
             )
             new_model = create_openai_model(config, self._http_client)
-            
-            # 更新所有 agent 的 model
+
             self.agent._model = new_model
             if self._planner_agent and self._planner_agent is not self.agent:
                 self._planner_agent._model = new_model
@@ -643,6 +616,8 @@ class MainAgent:
 
         step_outputs: list[str] = []
         steps_meta: list[dict[str, Any]] = []
+        registered = self._get_function_tools()
+        allowed_names = set(registered.keys())
         for idx, step in enumerate(plan):
             tool_name = step.get("tool") if isinstance(step, dict) else None
             args = step.get("args", {}) if isinstance(step, dict) else {}
@@ -652,9 +627,6 @@ class MainAgent:
                 header += f"  ({note})"
             results.append(header)
             step_meta: dict[str, Any] = {"tool": tool_name, "args": args, "note": note}
-
-            registered = self._get_function_tools()
-            allowed_names = set(registered.keys())
 
             attempts = 0
             current_tool = tool_name
@@ -677,7 +649,7 @@ class MainAgent:
                     else:
                         current_error = f"Tool '{current_tool}' is not registered."
                 
-                if not current_error and current_tool in allowed_names:
+                if not current_error:
                     
                     if current_args:
                         current_args = self._resolve_args(current_args, step_outputs)
@@ -913,7 +885,6 @@ class MainAgent:
     def _get_mcp_servers(self) -> list:
         """取得所有 MCP Server 實例。"""
         user_toolsets = getattr(self.agent, "_user_toolsets", [])
-        from pydantic_ai.mcp import MCPServerStdio
         return [ts for ts in user_toolsets if isinstance(ts, MCPServerStdio)]
     
     def _try_get_mcp_tool_names(self) -> set[str] | None:
@@ -1374,7 +1345,7 @@ class MainAgent:
             except Exception as e:
                 # 捕獲 MCP 工具錯誤，將錯誤資訊附加到 prompt 中，讓 LLM 生成友好的回應
                 error_msg = str(e)
-                logger.warning(f"Tool execution error in agent.run(): {error_msg}")
+                logger.warning("Tool execution error in agent.run(): %s", error_msg)
                 
                 # 將錯誤作為執行結果附加到 prompt
                 error_context = (
@@ -1398,15 +1369,13 @@ class MainAgent:
                     self._last_assistant_reply = self._extract_user_reply(result.output or "")
                     return result.output or ""
                 except Exception as final_error:
-                    # 最後的 fallback - 建立簡單的錯誤說明讓 agent 理解
-                    logger.error(f"All retry attempts failed: {final_error}")
+                    logger.error("All retry attempts failed: %s", final_error)
                     final_prompt = (
                         f"The user asked: {self._last_user_prompt}\n\n"
                         f"A tool execution error occurred: {error_msg}\n"
                         "The external service is currently unavailable. "
                         "Please provide a helpful and friendly response to the user."
                     )
-                    # 最後一次嘗試，不帶歷史記錄，簡單調用
                     try:
                         result = await self.agent.run(final_prompt)
                         return result.output or "抱歉，目前無法連接到外部服務。請稍後再試。"
@@ -1414,8 +1383,6 @@ class MainAgent:
                         # 真的完全失敗了，返回基本訊息
                         return "抱歉，系統暫時無法處理您的請求。請稍後再試。"
 
-        # 舊的 plan execution 模式（保留以備需要）
-        # Skills are now tool-based (use_skill tool) - no automatic injection
         plan_list = await self._build_plan_list(prompt, message_history=message_history)
         if explicit_subagents:
             plan_list = self._filter_plan_subagent_steps(plan_list, explicit_subagents)
@@ -1460,7 +1427,7 @@ class MainAgent:
             if suggested_lines:
                 exec_results.extend(suggested_lines)
         # Record combined metadata (suggested plan steps + any parallel sub-agent meta)
-        self._last_execution_steps = list(plan_meta) + (parallel_meta if 'parallel_meta' in locals() else [])
+        self._last_execution_steps = list(plan_meta) + parallel_meta
         current_time = self._extract_current_time()
         if current_time:
             prompt = f"Current time: {current_time}\n\n{prompt}"
@@ -1526,11 +1493,9 @@ class MainAgent:
                             collected += chunk
                             yield chunk
                     except Exception as stream_error:
-                        # 捕獲 stream 過程中的錯誤（例如 MCP 工具錯誤）
                         error_msg = str(stream_error)
-                        logger.warning(f"Tool execution error during streaming: {error_msg}")
-                        
-                        # yield 錯誤提示給 LLM，讓它生成友好回應
+                        logger.warning("Tool execution error during streaming: %s", error_msg)
+
                         error_prompt = (
                             f"\n\n[System Note: A tool execution error occurred: {error_msg}. "
                             "Please provide a helpful response explaining the service is temporarily unavailable.]"
@@ -1544,9 +1509,8 @@ class MainAgent:
                     self._last_assistant_reply = self._extract_user_reply(collected)
                 return
             except Exception as e:
-                # 捕獲 context manager 層級的錯誤
                 error_msg = str(e)
-                logger.warning(f"Tool execution error in agent.run_stream(): {error_msg}")
+                logger.warning("Tool execution error in agent.run_stream(): %s", error_msg)
                 
                 # 將錯誤作為執行結果附加到 prompt
                 error_context = (
@@ -1576,15 +1540,13 @@ class MainAgent:
                         self._last_assistant_reply = self._extract_user_reply(collected)
                     return
                 except Exception as final_error:
-                    # 最後的 fallback - 建立簡單的錯誤說明讓 agent 理解
-                    logger.error(f"All retry attempts failed: {final_error}")
+                    logger.error("All retry attempts failed: %s", final_error)
                     final_prompt = (
                         f"The user asked: {self._last_user_prompt}\n\n"
                         f"A tool execution error occurred: {error_msg}\n"
                         "The external service is currently unavailable. "
                         "Please provide a helpful and friendly response to the user."
                     )
-                    # 最後一次嘗試
                     try:
                         async with self.agent.run_stream(user_prompt=final_prompt) as result:
                             async for chunk in result.stream_text(delta=True):
@@ -1596,8 +1558,6 @@ class MainAgent:
                         yield "抱歉，系統暫時無法處理您的請求。請稍後再試。"
                         return
 
-        # 舊的 plan execution 模式（保留以備需要）
-        # Skills are now tool-based (use_skill tool) - no automatic injection
         plan_list = await self._build_plan_list(prompt, message_history=message_history)
         if explicit_subagents:
             plan_list = self._filter_plan_subagent_steps(plan_list, explicit_subagents)
@@ -1624,11 +1584,8 @@ class MainAgent:
             exec_results.extend(parallel_results)
             pending_parallel = False
         if parallel_results or plan_list or pending_parallel:
-            # Present the plan as suggestions (do not execute tools in plan mode).
             yield "<plan-suggestion>\n"
             suggestion_lines: list[str] = []
-            steps_meta: list[dict[str, Any]] = []
-            # include parallel results first (no change)
             for line in parallel_results:
                 yield line + "\n"
                 suggestion_lines.append(line)
@@ -1684,11 +1641,9 @@ class MainAgent:
                         collected += chunk
                         yield chunk
                 except Exception as stream_error:
-                    # 捕獲 stream 過程中的錯誤（例如 MCP 工具錯誤）
                     error_msg = str(stream_error)
-                    logger.warning(f"Tool execution error during streaming: {error_msg}")
-                    
-                    # 建立錯誤上下文給 agent
+                    logger.warning("Tool execution error during streaming: %s", error_msg)
+
                     error_context = (
                         f"\n\n[System Note: A tool execution error occurred: {error_msg}. "
                         "Please provide a helpful response to the user explaining the situation "
@@ -1702,11 +1657,9 @@ class MainAgent:
                     self._last_messages = None
                 self._last_assistant_reply = self._extract_user_reply(collected)
         except Exception as e:
-            # 捕獲 context manager 層級的錯誤
             error_msg = str(e)
-            logger.warning(f"Error in agent.run_stream(): {error_msg}")
-            
-            # 讓 agent 看到錯誤並生成回應
+            logger.warning("Error in agent.run_stream(): %s", error_msg)
+
             error_prompt = (
                 f"The user asked: {self._last_user_prompt}\n\n"
                 f"A tool execution error occurred: {error_msg}\n"

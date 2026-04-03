@@ -161,17 +161,12 @@ def _run_windows_command(command: str) -> subprocess.CompletedProcess[str]:
         command,
     ]
 
-    startupinfo = subprocess.STARTUPINFO()
-    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-    startupinfo.wShowWindow = subprocess.SW_HIDE
-
     return subprocess.run(
         powershell,
         text=True,
         capture_output=True,
         timeout=120,
         creationflags=subprocess.CREATE_NO_WINDOW,
-        startupinfo=startupinfo,
     )
 
 
