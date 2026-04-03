@@ -213,6 +213,13 @@ def _run_command(command: str) -> subprocess.CompletedProcess[str]:
 
 
 def _run_windows_command(command: str) -> subprocess.CompletedProcess[str]:
+    # Force UTF-8 output to avoid locale decode crashes (e.g., cp950 on Windows).
+    utf8_bootstrap = (
+        "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); "
+        "$OutputEncoding = [System.Text.UTF8Encoding]::new($false); "
+        "chcp 65001 > $null; "
+    )
+
     # Default to PowerShell to handle common cmdlets and pipelines reliably.
     powershell = [
         "powershell",
@@ -220,12 +227,14 @@ def _run_windows_command(command: str) -> subprocess.CompletedProcess[str]:
         "-ExecutionPolicy",
         "Bypass",
         "-Command",
-        command,
+        utf8_bootstrap + command,
     ]
 
     return subprocess.run(
         powershell,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         capture_output=True,
         timeout=120,
         creationflags=subprocess.CREATE_NO_WINDOW,
@@ -234,4 +243,11 @@ def _run_windows_command(command: str) -> subprocess.CompletedProcess[str]:
 
 def _run_posix_command(command: str) -> subprocess.CompletedProcess[str]:
     shell = ["/bin/bash", "-lc", command]
-    return subprocess.run(shell, text=True, capture_output=True, timeout=120)
+    return subprocess.run(
+        shell,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        capture_output=True,
+        timeout=120,
+    )
