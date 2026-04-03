@@ -22,6 +22,6 @@ Usage notes:
 \`\`\`
 # AGENTS.md
 
-This file provides guidance to ${SYSTEM_NAME} (claude.ai/code) when working with code in this repository.
+This file provides guidance to ${SYSTEM_NAME} when working with code in this repository.
 \`\`\`
 

@@ -71,7 +71,7 @@ uv run python main.py --gui
 - **異步處理**：QThread + asyncio
 - **語音識別**：Whisper + SpeechRecognition
 - **繁簡轉換**：opencc-python-reimplemented
-- **AI 架構**：pydantic-ai + MainAgent + PhilosopherCoAgent
+- **AI 架構**：pydantic-ai + MainAgent
 
 ### 架構
 
@@ -83,7 +83,6 @@ main.py (--gui 模式)
 │   │   ├── Speech Bubble (對話框)
 │   │   └── Input Container (輸入區)
 │   ├── MainAgent (AI 代理)
-│   ├── PhilosopherCoAgent (協作代理)
 │   ├── VoiceManager (語音管理)
 │   └── AIWorker (異步 AI 處理線程)
 ```

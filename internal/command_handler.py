@@ -70,19 +70,13 @@ class CommandHandler:
             self._show_help()
             return None
         
-        # /clear - 清空（CLI 下清屏，GUI 下清空對話框）
+        # /clear - 清空對話 context
         elif name == "/clear":
-            self._handle_clear()
-            return None
+            return "__clear_context__"
         
         # /tools - 列出工具
         elif name == "/tools":
             self._list_tools()
-            return None
-        
-        # /subagents - 列出子代理
-        elif name == "/subagents":
-            self._list_subagents()
             return None
         
         # /skills - Skills 相關指令
@@ -103,6 +97,10 @@ class CommandHandler:
         # /retry - 重新執行最後的輸入
         elif name == "/retry":
             return self._handle_retry()
+
+        # /compact - 手動觸發一次上下文壓縮
+        elif name == "/compact":
+            return "__compact__"
 
         # /config - 啟動設定 CLI 菜單（CLI 下同步，GUI 下非同步）
         elif name == "/config":
@@ -154,13 +152,12 @@ class CommandHandler:
 基本指令：
   /help              顯示此幫助訊息
   /exit, /quit       退出程式
-  /clear             清空屏幕/對話框
+    /clear             清空對話 context（歷史與模型上下文）
     /config            開啟文字式設定選單（CLI）或在終端中顯示（GUI）
     /config-web        打開配置頁面（GUI 中使用內建 webview，CLI 中使用瀏覽器）
 
 查詢指令：
   /tools             列出所有可用工具
-  /subagents         列出所有子代理
   /skills [list]     列出所有 skills
   /skills info <name> 顯示 skill 詳細資訊
   /skills test <text> 測試 skill 匹配
@@ -169,20 +166,18 @@ class CommandHandler:
   /history [N]       顯示最近 N 輪對話（預設 5）
   /last              顯示最後的助手回覆
   /retry             重新執行最後的輸入
+    /compact           手動觸發一次上下文壓縮
 
 Skills 管理：
   /skills reload     重新載入 skills
 """
         self.output_callback(help_text)
     
-    def _handle_clear(self):
-        """處理清空指令"""
-        # CLI 模式下清屏
-        if self.output_callback == print:
-            print("\n" * 80)
-        else:
-            # GUI 模式下通知清空
-            self.output_callback("__clear__")
+    def clear_context_state(self):
+        """重置 CommandHandler 內的上下文狀態。"""
+        self.history.clear()
+        self.last_user_prompt = ""
+        self.last_assistant_reply = ""
     
     def _list_tools(self):
         """列出所有工具"""
@@ -194,22 +189,6 @@ Skills 管理：
             for tool_name, tool in tools_meta.items():
                 doc = tool.description.splitlines()[0] if tool.description else ""
                 lines.append(f"- {tool_name}: {doc}" if doc else f"- {tool_name}")
-            self.output_callback("\n".join(lines))
-    
-    def _list_subagents(self):
-        """列出所有子代理"""
-        specs = self.main_agent.list_sub_agents()
-        if not specs:
-            self.output_callback("沒有已註冊的子代理。")
-        else:
-            lines = ["可用子代理："]
-            for spec in specs:
-                agent_name = spec.get("name", "")
-                desc = spec.get("description", "")
-                if desc:
-                    lines.append(f"- {agent_name}: {desc}")
-                else:
-                    lines.append(f"- {agent_name}")
             self.output_callback("\n".join(lines))
     
     def _handle_skills_command(self, args: list[str]):
@@ -331,7 +310,8 @@ Skills 管理：
         """重新載入 skills"""
         try:
             from internal.skills_loader import load_skill_registry
-            self.main_agent.skills = load_skill_registry()
+            root_dirs = getattr(self.main_agent, "skill_root_dirs", None)
+            self.main_agent.skills = load_skill_registry(root_dirs=root_dirs)
             count = len(self.main_agent.skills.list_names())
             self.output_callback(f"Skills 已重新載入。載入了 {count} 個 skills。")
         except Exception as e:

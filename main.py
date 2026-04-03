@@ -1,12 +1,12 @@
 import argparse
 import asyncio
-import os
+import concurrent.futures
 import sys
 import warnings
 from collections import deque
 from contextlib import AsyncExitStack
+from pathlib import Path
 
-from dotenv import load_dotenv
 from httpx import AsyncClient
 from pydantic_ai.messages import ModelRequest, ModelResponse
 from PySide6.QtCore import QThread, QTimer, Signal
@@ -15,18 +15,29 @@ from PySide6.QtWidgets import QApplication
 
 
 from internal.agents import MainAgent
-from internal.co_agents import PhilosopherCoAgent
+from internal.app.handle_user_turn import create_runtime
 from internal.logger import logger
 from internal.runtime.stream_printer import BACKLOG_SCALE, BASE_DELAY, MIN_FACTOR
 from internal.runtime.system import run_cli
 from internal.services.agent_factory import load_base_config
 from internal.services.circle_ui import MainWindow, ConfirmDialog, CommandLineEdit
 from internal.services.voice_manager import VoiceManager
+from internal.services.config_db import (
+    list_agent_configs,
+    list_mcp_tools,
+    list_providers,
+    list_remote_mcps,
+)
 from internal.cli import set_gui_confirm_handler
 from internal.command_handler import CommandHandler
 from internal.services import config_webui, config_cli
+from internal.compaction import (
+    CompactCoordinator,
+    ConversationState,
+    MAX_CONTEXT_TOKENS,
+    recalc_total_tokens,
+)
 
-HISTORY_LIMIT = 30
 COMMAND_PREFIX = "/"
 
 
@@ -37,19 +48,21 @@ class AgentRuntime(QThread):
     error_occurred = Signal(int, str)
     tool_event = Signal(object)
 
-    def __init__(self, base_config, env: dict[str, str]):
+    def __init__(self, base_config, skill_root_dirs: list[Path] | None = None):
         super().__init__()
         self.base_config = base_config
-        self.env = env
+        self.skill_root_dirs = list(skill_root_dirs or [])
         self.loop: asyncio.AbstractEventLoop | None = None
         self.http_client: AsyncClient | None = None
-        self.philosopher: PhilosopherCoAgent | None = None
         self.main_agent: MainAgent | None = None
         self.mcp_stack: AsyncExitStack | None = None
         self._ready_event: asyncio.Event | None = None
         self._current_future = None
         self._request_id = 0
         self._active_request_id = 0
+        self._conversation_state = ConversationState(fullMessages=[])
+        self._compact_coordinator: CompactCoordinator | None = None
+        self._orchestration_runtime = None
 
     def run(self):
         loop = asyncio.new_event_loop()
@@ -68,18 +81,64 @@ class AgentRuntime(QThread):
                     asyncio.gather(*pending, return_exceptions=True)
                 )
         finally:
+            try:
+                config_webui.register_skills_reload_handler(None)
+            except Exception:
+                pass
             loop.close()
+
+    @staticmethod
+    def _summarize_exception(exc: Exception) -> str:
+        """Extract a concise root-cause message from nested exception groups."""
+        current: BaseException | None = exc
+        visited: set[int] = set()
+
+        while current is not None and id(current) not in visited:
+            visited.add(id(current))
+            nested = getattr(current, "exceptions", None)
+            if isinstance(nested, (list, tuple)) and nested:
+                current = nested[0]
+                continue
+            if getattr(current, "__cause__", None) is not None:
+                current = current.__cause__
+                continue
+            if getattr(current, "__context__", None) is not None:
+                current = current.__context__
+                continue
+            break
+
+        if current is None:
+            return "Unknown error"
+        return f"{type(current).__name__}: {current}"
 
     async def _initialize(self):
         try:
             self.http_client = AsyncClient(verify=False)
-            self.philosopher = PhilosopherCoAgent.create(
-                self.base_config, self.env, self.http_client
-            )
             self.main_agent = MainAgent.create(
-                self.base_config, self.env, self.http_client, self.philosopher
+                self.base_config,
+                self.http_client,
+                skill_root_dirs=self.skill_root_dirs,
             )
+            self._orchestration_runtime = create_runtime(self.main_agent)
+
+            def _reload_skills_from_webui() -> dict[str, object]:
+                if self.main_agent is None:
+                    return {"success": False, "message": "Agent 尚未就緒"}
+                from internal.skills_loader import load_skill_registry
+
+                root_dirs = getattr(self.main_agent, "skill_root_dirs", None)
+                self.main_agent.skills = load_skill_registry(root_dirs=root_dirs)
+                count = len(self.main_agent.skills.list_names())
+                return {
+                    "success": True,
+                    "count": count,
+                    "message": f"Skills 已自動重新載入（{count} 個）",
+                }
+
+            config_webui.register_skills_reload_handler(_reload_skills_from_webui)
+
             self.main_agent.set_tool_event_callback(self._emit_tool_event)
+            self._compact_coordinator = CompactCoordinator(runner=self.main_agent.run_compaction_subagent)
             self.mcp_stack = AsyncExitStack()
             try:
                 await self.mcp_stack.enter_async_context(
@@ -87,14 +146,16 @@ class AgentRuntime(QThread):
                 )
                 logger.info("MCP servers started in AgentRuntime")
             except Exception as exc:
+                reason = self._summarize_exception(exc)
                 logger.warning(
-                    "MCP servers failed to start in AgentRuntime; clearing toolsets and continuing.",
-                    exc_info=exc,
+                    "MCP servers failed to start in AgentRuntime; continuing without them. Root cause: %s",
+                    reason,
                 )
                 # 清除已註冊的 MCP toolsets 以防止 agent 嘗試調用不可用的工具
                 self.main_agent.agent._user_toolsets = []
                 logger.info("Cleared MCP toolsets from agent to prevent tool call failures")
-            self._ready_event.set()
+            if self._ready_event:
+                self._ready_event.set()
             self.ready.emit()
         except Exception as e:
             logger.error(f"AgentRuntime init failed: {e}", exc_info=e)
@@ -107,21 +168,52 @@ class AgentRuntime(QThread):
         args = event.get("args") or ()
         kwargs = event.get("kwargs") or {}
         stage = str(event.get("stage") or "")
+        is_skill_call = tool == "use_skill"
+        explicit_skill_name = str(event.get("skill_name") or "").strip()
 
-        label = tool
-        if isinstance(kwargs, dict):
+        def _trim(value: str, limit: int = 80) -> str:
+            value = value.strip()
+            if len(value) <= limit:
+                return value
+            return value[: limit - 3] + "..."
+
+        detail = ""
+        if tool == "use_skill":
+            skill_name = ""
+            if isinstance(kwargs, dict):
+                raw = kwargs.get("skill_name")
+                if isinstance(raw, str):
+                    skill_name = raw.strip()
+            if not skill_name and explicit_skill_name:
+                skill_name = explicit_skill_name
+            if not skill_name and args:
+                first = args[0]
+                if isinstance(first, str):
+                    skill_name = first.strip()
+            if skill_name:
+                detail = f"skill={_trim(skill_name)}"
+        elif isinstance(kwargs, dict):
             for key in ("command", "path", "url", "query"):
                 value = kwargs.get(key)
                 if isinstance(value, str) and value.strip():
-                    label = value.strip()
+                    detail = f"{key}={_trim(value)}"
                     break
-        if label == tool and args:
+
+        if not detail and args:
             try:
                 first = args[0]
                 if isinstance(first, str) and first.strip():
-                    label = f"{tool} {first.strip()}"
+                    detail = f"arg={_trim(first)}"
             except Exception:
                 pass
+
+        label = tool if not detail else f"{tool} ({detail})"
+
+        if is_skill_call:
+            if stage == "skill-activated":
+                return f"[SKILL] {label}"
+            # Suppress use_skill start/end/error lines to keep only one [SKILL] hint.
+            return ""
 
         if stage == "start":
             return f"[>] {label}"
@@ -138,6 +230,8 @@ class AgentRuntime(QThread):
             line = self._format_tool_line(event)
         except Exception as exc:
             logger.debug(f"Tool event format failed: {exc}")
+            return
+        if not line:
             return
         payload = {"request_id": self._active_request_id, "line": line}
         self.tool_event.emit(payload)
@@ -174,8 +268,11 @@ class AgentRuntime(QThread):
         chunks: list[str] = []
 
         async def collect():
-            async for chunk in self.main_agent.run_stream(
-                user_input, message_history=chat_history
+            if self._orchestration_runtime is None:
+                raise RuntimeError("Orchestration runtime not initialized")
+            async for chunk in self._orchestration_runtime.handle_user_turn_stream(
+                user_input,
+                message_history=chat_history,
             ):
                 if not chunk:
                     continue
@@ -183,16 +280,7 @@ class AgentRuntime(QThread):
                 self.chunk_ready.emit(request_id, chunk)
                 logger.debug(f"Received chunk: {len(chunk)} chars")
 
-        # Support disabling or customizing the response timeout via AGENT_RESPONSE_TIMEOUT env var.
-        # If unset, empty, or set to 'none'/'0'/'off', the agent will wait indefinitely for a response.
-        timeout_str = os.getenv("AGENT_RESPONSE_TIMEOUT", "0").strip()
-        if timeout_str and timeout_str.lower() not in ("none", "0", "off", "infinite"):
-            try:
-                timeout_val = int(timeout_str)
-            except Exception:
-                timeout_val = 120
-        else:
-            timeout_val = None
+        timeout_val = None
 
         if timeout_val is None:
             await collect()
@@ -201,11 +289,12 @@ class AgentRuntime(QThread):
         result_text = "".join(chunks).strip()
         updated_history = None
         if hasattr(self.main_agent, "_last_messages"):
-            updated_history = (
-                self.main_agent._last_messages[-HISTORY_LIMIT:]
-                if self.main_agent._last_messages is not None
-                else None
-            )
+            messages = self.main_agent._last_messages if self.main_agent._last_messages is not None else []
+            self._conversation_state.fullMessages = messages
+            self._conversation_state.totalTokens = recalc_total_tokens(messages)
+            if self._compact_coordinator is not None:
+                self._conversation_state = await self._compact_coordinator.maybeCompact(self._conversation_state)
+            updated_history = self._conversation_state.fullMessages
         return result_text, updated_history
 
     def submit(
@@ -230,7 +319,8 @@ class AgentRuntime(QThread):
             try:
                 result, updated_history = fut.result()
                 self.result_ready.emit(request_id, result, updated_history or [])
-            except asyncio.CancelledError:
+            except (asyncio.CancelledError, concurrent.futures.CancelledError):
+                logger.debug("AgentRuntime request %s was cancelled", request_id)
                 pass
             except Exception as e:
                 logger.error(f"AgentRuntime run error: {e}", exc_info=e)
@@ -239,16 +329,62 @@ class AgentRuntime(QThread):
         future.add_done_callback(done_callback)
         return request_id
 
+    async def _force_compact(self):
+        if self._ready_event:
+            await self._ready_event.wait()
+        if not self.main_agent:
+            raise RuntimeError("Main agent not initialized")
+
+        base_messages = (
+            self._conversation_state.fullMessages
+            or getattr(self.main_agent, "_last_messages", None)
+            or []
+        )
+        if not base_messages:
+            return False, 0, 0, []
+
+        self._conversation_state.fullMessages = list(base_messages)
+        before_count = len(self._conversation_state.fullMessages)
+        self._conversation_state.totalTokens = max(
+            recalc_total_tokens(self._conversation_state.fullMessages),
+            MAX_CONTEXT_TOKENS,
+        )
+        if self._compact_coordinator is not None:
+            self._conversation_state = await self._compact_coordinator.maybeCompact(self._conversation_state)
+        after_messages = self._conversation_state.fullMessages
+        after_count = len(after_messages)
+        changed = after_count < before_count
+        return changed, before_count, after_count, after_messages
+
+    def force_compact(self):
+        if not self.loop:
+            raise RuntimeError("Initialization failed. Check logs.")
+        future = asyncio.run_coroutine_threadsafe(self._force_compact(), self.loop)
+        return future.result()
+
+    def clear_context(self):
+        if not self.loop:
+            raise RuntimeError("Initialization failed. Check logs.")
+
+        async def _clear_context():
+            if self._ready_event:
+                await self._ready_event.wait()
+            self._conversation_state = ConversationState(fullMessages=[])
+            if self.main_agent is not None:
+                self.main_agent._last_messages = None
+                self.main_agent._last_assistant_reply = None
+
+        future = asyncio.run_coroutine_threadsafe(_clear_context(), self.loop)
+        future.result()
+
 
 class GUIAgentApp:
-    def __init__(self):
-        load_dotenv()
+    def __init__(self, skill_root_dirs: list[Path] | None = None):
         warnings.filterwarnings("ignore", category=DeprecationWarning)
         warnings.filterwarnings("ignore", category=ResourceWarning)
 
-        self.app = QApplication(sys.argv)
-        self.env = dict(os.environ)
-        self.base_config = load_base_config(self.env)
+        self.app = QApplication.instance() or QApplication(sys.argv)
+        self.base_config = load_base_config()
         self.voice_manager = VoiceManager()
         self.chat_history: list[ModelRequest | ModelResponse] | None = None
         self.runtime_ready = False
@@ -281,6 +417,7 @@ class GUIAgentApp:
         self._last_user_input = ""  # 記錄最後的用戶輸入（用於 /retry）
         self._last_assistant_reply = ""  # 記錄最後的助手回覆（用於 /last）
         self._gui_history: list[tuple[str, str]] = []  # GUI 對話歷史
+        self._auto_config_panel_opened = False
         
         # UI 更新節流機制
         self._update_throttle_timer = QTimer()
@@ -295,7 +432,7 @@ class GUIAgentApp:
         # 設置 GUI 確認處理器
         set_gui_confirm_handler(self._gui_confirm_handler)
         
-        self.runtime = AgentRuntime(self.base_config, self.env)
+        self.runtime = AgentRuntime(self.base_config, skill_root_dirs=skill_root_dirs)
         self.runtime.ready.connect(self.handle_runtime_ready)
         self.runtime.result_ready.connect(self.handle_result)
         self.runtime.chunk_ready.connect(self.handle_chunk)
@@ -380,8 +517,35 @@ class GUIAgentApp:
             self._auto_expand_on_result = False
             self._reset_idle_timer()
 
+    def _is_config_empty(self) -> bool:
+        """Return True when all configurable sections are empty."""
+        try:
+            has_providers = bool(list_providers())
+            has_agents = bool(list_agent_configs())
+            has_mcp_tools = bool(list_mcp_tools())
+            has_remote_mcps = bool(list_remote_mcps())
+            return not (has_providers or has_agents or has_mcp_tools or has_remote_mcps)
+        except Exception:
+            logger.exception("Failed to evaluate config emptiness")
+            return False
+
+    def _auto_open_config_panel_if_needed(self) -> None:
+        if self._auto_config_panel_opened:
+            return
+        if not self._is_config_empty():
+            return
+
+        self._auto_config_panel_opened = True
+        self.main_window.update_speech_bubble(
+            "尚未設定任何 Provider/Agent，已自動打開設定面板。"
+        )
+        QTimer.singleShot(250, self.main_window.open_config_webview)
+
     def handle_runtime_ready(self):
         self.runtime_ready = True
+
+        def _close_window() -> None:
+            self.main_window.close()
         
         # 初始化指令處理器
         if self.runtime and self.runtime.main_agent:
@@ -389,12 +553,13 @@ class GUIAgentApp:
                 main_agent=self.runtime.main_agent,
                 history=self._gui_history,
                 output_callback=self._gui_output_callback,
-                exit_callback=self.main_window.close,
+                exit_callback=_close_window,
                 gui_window=self.main_window,  # 傳入 GUI 窗口以支持 webview
             )
         
         self.main_window.update_speech_bubble("AI ready. Double-click to show input.")
         QTimer.singleShot(500, self.show_input_container)
+        self._auto_open_config_panel_if_needed()
         self._reset_idle_timer()
 
     def handle_result(self, request_id, output, updated_history):
@@ -424,8 +589,6 @@ class GUIAgentApp:
             # 更新 GUI 歷史
             if self._last_user_input:
                 self._gui_history.append((self._last_user_input, output or ""))
-                if len(self._gui_history) > HISTORY_LIMIT:
-                    self._gui_history = self._gui_history[-HISTORY_LIMIT:]
 
         self._waiting_response = False
         if self._auto_expand_on_result:
@@ -610,6 +773,32 @@ class GUIAgentApp:
                     return
                 # 處理指令
                 result = self.command_handler.handle(user_input)
+                if result == "__clear_context__":
+                    try:
+                        self.runtime.clear_context()
+                        self.chat_history = None
+                        self._gui_history.clear()
+                        if self.command_handler:
+                            self.command_handler.clear_context_state()
+                        self._last_user_input = ""
+                        self._last_assistant_reply = ""
+                        self._display_text = ""
+                        self._reset_tool_log()
+                        self.main_window.update_speech_bubble("對話 context 已清空")
+                    except Exception as exc:
+                        self.main_window.update_speech_bubble(f"清空 context 失敗：{exc}")
+                    return
+                if result == "__compact__":
+                    try:
+                        changed, before, after, updated_history = self.runtime.force_compact()
+                        self.chat_history = updated_history or self.chat_history
+                        if changed:
+                            self.main_window.update_speech_bubble(f"已執行壓縮：訊息數 {before} -> {after}")
+                        else:
+                            self.main_window.update_speech_bubble("已嘗試壓縮，但目前可壓縮內容不足（需要超過最近保留訊息量）。")
+                    except Exception as exc:
+                        self.main_window.update_speech_bubble(f"手動壓縮失敗：{exc}")
+                    return
                 if result:
                     # 指令返回了要執行的提示（如 /retry）
                     user_input = result
@@ -658,6 +847,34 @@ class GUIAgentApp:
         return result
 
 
+def _resolve_skill_root_dirs(raw_paths: list[str] | None) -> list[Path]:
+    """Resolve and normalize skill root directories from CLI args."""
+    if not raw_paths:
+        return []
+
+    resolved: list[Path] = []
+    seen: set[str] = set()
+
+    for raw in raw_paths:
+        text = (raw or "").strip()
+        if not text:
+            continue
+
+        path_obj = Path(text).expanduser()
+        if not path_obj.is_absolute():
+            path_obj = (Path.cwd() / path_obj).resolve()
+        else:
+            path_obj = path_obj.resolve()
+
+        key = str(path_obj).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        resolved.append(path_obj)
+
+    return resolved
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run agent CLI or GUI.")
     parser.add_argument(
@@ -676,6 +893,11 @@ def main() -> None:
         help="Launch the GUI version.",
     )
     parser.add_argument(
+        "--cli",
+        action="store_true",
+        help="Launch the CLI version (default behavior; kept for compatibility).",
+    )
+    parser.add_argument(
         "--config",
         action="store_true",
         help="Open configuration menu (CLI) to manage providers and agent settings.",
@@ -685,7 +907,14 @@ def main() -> None:
         action="store_true",
         help="Open configuration Web UI to manage providers and agent settings.",
     )
+    parser.add_argument(
+        "--skills-dir",
+        nargs="+",
+        metavar="PATH",
+        help="One or more skill root directories. Defaults to built-in skills/ when omitted.",
+    )
     args = parser.parse_args()
+    skill_root_dirs = _resolve_skill_root_dirs(args.skills_dir)
 
     try:
         # Ensure Web UI server is running in background (always on)
@@ -709,11 +938,17 @@ def main() -> None:
             except Exception:
                 print("Config web UI available; open your browser to http://127.0.0.1:5000")
         elif args.gui:
-            gui_app = GUIAgentApp()
+            gui_app = GUIAgentApp(skill_root_dirs=skill_root_dirs)
             sys.exit(gui_app.run())
         else:
             prompt = " ".join(args.prompt) if args.prompt else None
-            asyncio.run(run_cli(prompt_once=prompt, single_turn=args.once))
+            asyncio.run(
+                run_cli(
+                    prompt_once=prompt,
+                    single_turn=args.once,
+                    skill_root_dirs=skill_root_dirs,
+                )
+            )
     except KeyboardInterrupt:
         pass
 

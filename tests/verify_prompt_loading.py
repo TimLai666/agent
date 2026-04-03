@@ -46,7 +46,7 @@ def verify_prompt_sources():
         print(f"  - {name}")
 
     # 4. 驗證不包含根目錄的其他檔案
-    root_files_to_exclude = ["MAIN_AGENT_PROMPT", "PHILOSOPHER_PROMPT", "SKILLS_PRIORITY"]
+    root_files_to_exclude = ["MAIN_AGENT_PROMPT", "SKILLS_PRIORITY"]
     print(f"\n檢查是否排除了根目錄的其他檔案：")
     for file in root_files_to_exclude:
         # 移除 .md 後綴，轉大寫
@@ -98,7 +98,6 @@ def show_loading_flow():
 
 3. 不包括
    [X] prompts/MAIN_AGENT_PROMPT.md（這個在 instructions 中）
-   [X] prompts/PHILOSOPHER_PROMPT.md（這個在 instructions 中）
    [X] prompts/SKILLS_PRIORITY.md（這個在 instructions 中）
 
 4. 組合方式

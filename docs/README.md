@@ -24,21 +24,17 @@
 
 ### 📖 Skills 技術文檔
 
-- [Skills 在 Agents 中的使用](SKILLS_USAGE_IN_AGENTS.md)
 - [Skills 命令系統](SKILLS_COMMANDS.md)
 - [Skills 腳本執行](SKILLS_SCRIPT_EXECUTION.md)
 - [Skills 日誌系統](SKILLS_LOGGING.md)
-- [Skills 匹配與優先級](SKILLS_MATCHING_AND_PRIORITY.md)
-- [Skills LLM 匹配](SKILLS_LLM_MATCHING.md)
-- [多語言支援](SKILLS_MULTILINGUAL_SUPPORT.md)
 
 ---
 
 ## 🔗 相關資源
 
 - [專案首頁](../README.md)
-- [Skills 快速參考](../SKILLS_QUICKREF.md)
-- [Skills 摘要](../SKILLS_SUMMARY.md)
+- [Skills 總覽](../skills/README.md)
+- [Skills 快速開始](../skills/QUICKSTART.md)
 
 ## 📝 文檔編寫規範
 

@@ -28,22 +28,6 @@ _MAX_IMAGE_BYTES = 8 * 1024 * 1024
 _MAX_IMAGE_DIM = 1600
 
 
-def _detect_image_mime(data: bytes) -> str | None:
-    if data.startswith(b"\x89PNG\r\n\x1a\n"):
-        return "image/png"
-    if data.startswith(b"\xff\xd8\xff"):
-        return "image/jpeg"
-    if data.startswith(b"GIF87a") or data.startswith(b"GIF89a"):
-        return "image/gif"
-    if data.startswith(b"RIFF") and data[8:12] == b"WEBP":
-        return "image/webp"
-    if data.startswith(b"BM"):
-        return "image/bmp"
-    if data.startswith(b"\x00\x00\x01\x00"):
-        return "image/x-icon"
-    return None
-
-
 def _download_and_encode_image(url: str, max_width: int = 800) -> str:
     """下載圖片並轉為 base64 data URI
 
@@ -402,7 +386,7 @@ class AutoWrapTextBrowser(QTextBrowser):
         except Exception:
             pass
 
-    def setOpenExternalLinks(self, open_external: bool) -> None:
+    def setOpenExternalLinks(self, _open_external: bool) -> None:
         super().setOpenExternalLinks(False)
 
     def _handle_anchor_clicked(self, url: QUrl) -> None:
@@ -803,8 +787,8 @@ class CommandLineEdit(QLineEdit):
         "/history 10",
         "/last",
         "/retry",
+        "/compact",
         "/tools",
-        "/subagents",
         "/skills",
         "/skills list",
         "/skills info ",

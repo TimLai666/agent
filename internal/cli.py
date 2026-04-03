@@ -71,7 +71,6 @@ def confirm(message: str, default_choice: str = '') -> bool:
         result = handler(message, default_choice)
         logger.info(f"GUI confirm result: {result}")
         return result
-        return handler(message, default_choice)
     
     # Use CLI mode
     yes_no_str: Literal['[y/n]'] | Literal['[Y/n]'] | Literal['[y/N]'] = "[y/n]" if not default_choice else "[Y/n]" if default_choice == 'Y' else "[y/N]"

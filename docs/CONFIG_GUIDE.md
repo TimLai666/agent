@@ -97,7 +97,7 @@ API Key: sk-ant-...
 
 **CLI**：
 1. 選擇 "設定 Agent"
-2. 輸入 agent 名稱 (例如: `main`, `philosopher`, `marketing`)
+2. 輸入 agent 名稱 (例如: `main`, `marketing`, `testing`)
 3. 選擇提供者
 4. 輸入模型名稱 (例如: `gpt-4`, `claude-3-5-sonnet-20241022`)
 5. 設定 temperature (預設 0.2)
@@ -106,7 +106,6 @@ API Key: sk-ant-...
 
 專案中的主要 agents：
 - `main` - 主要 agent
-- `philosopher` - 哲學家 co-agent
 - `marketing` - 行銷 sub-agent
 - `testing` - 測試 sub-agent
 - `design` - 設計 sub-agent
@@ -136,7 +135,7 @@ API Key: sk-ant-...
 
 配置存儲在：
 ```
-~/.agent_config/config.db
+~/.tim-agent/config/config.db
 ```
 
 ## 管理命令

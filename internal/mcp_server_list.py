@@ -1,11 +1,8 @@
 from pydantic_ai.mcp import MCPServerStdio
 from internal.mcp.client_builder import McpClient
-from internal.mcp.time import time
 from internal.mcp.fetch import fetch
-from internal.mcp.cook import cook
-from internal.mcp.browser import playwright, chrome
+from internal.mcp.browser import playwright
 from internal.mcp.taiwan_holiday import taiwan_holiday
-from internal.mcp.package_docs import package_docs
 from internal.services.config_db import list_mcp_tools, list_remote_mcps, get_mcp_last_updated
 from internal.mcp.remote_mcp_loader import load_remote_mcp_from_url
 from internal.logger import logger
@@ -20,8 +17,7 @@ _last_cache_timestamp: str | None = None
 def get_built_in_mcp_servers() -> list[MCPServerStdio]:
     """Returns a fresh list of built-in MCP servers."""
     return [
-        time, fetch, cook, playwright, chrome, taiwan_holiday,
-        package_docs,
+        fetch, playwright, taiwan_holiday,
     ]
 
 
@@ -90,9 +86,3 @@ def get_all_mcp_servers() -> list[MCPServerStdio]:
     return _mcp_cache
 
 
-def invalidate_mcp_cache():
-    """Force reload of MCP servers on next get_all_mcp_servers() call."""
-    global _mcp_cache, _last_cache_timestamp
-    _mcp_cache = None
-    _last_cache_timestamp = None
-    logger.debug("MCP cache invalidated")

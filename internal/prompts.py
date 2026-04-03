@@ -1,11 +1,12 @@
-from datetime import date
 from functools import lru_cache
-import json
 from pathlib import Path
+import re
 import sys
 
-# 系統名稱配置
-SYSTEM_NAME = "Claude"
+from internal.paths import TIM_AGENT_SANDBOX_DIR
+
+# 系統名稱配置（避免注入特定廠商或模型身分）
+SYSTEM_NAME = "Assistant"
 
 PROMPTS_DIR = Path(__file__).resolve().parents[1] / "prompts"
 
@@ -75,6 +76,7 @@ def build_combined_system_prompt(
     base_prompt: str | None = None,
     additional_prompts: list[str] | None = None,
     separator: str = "\n\n---\n\n",
+    variables: dict[str, str] | None = None,
 ) -> str:
     """組合多個 system prompts。
 
@@ -92,12 +94,12 @@ def build_combined_system_prompt(
     if base_prompt is None:
         base_prompt = _build_system_prompt()
     if base_prompt:
-        parts.append(_process_variables(base_prompt))
+        parts.append(_process_variables(base_prompt, variables=variables))
 
     # 添加額外的 prompts（進行變數代換）
     if additional_prompts:
         for prompt_name in additional_prompts:
-            prompt = get_system_prompt_processed(prompt_name)
+            prompt = get_system_prompt_processed(prompt_name, variables=variables)
             if prompt:
                 parts.append(prompt)
 
@@ -140,14 +142,14 @@ def _process_variables(text: str, variables: dict[str, str] | None = None) -> st
         # 系統名稱
         "SYSTEM_NAME": SYSTEM_NAME,
         # 工具名稱（映射到專案實際的工具）
-        "TASK_TOOL_NAME": "ask_sub_agent",  # 委派任務給 sub-agent
+        "TASK_TOOL_NAME": "todo",  # 任務規劃
         "BASH_TOOL_NAME": "run_terminal_command",  # 執行終端命令
-        "READ_TOOL_NAME": "read_file",  # 讀取檔案
-        "WRITE_TOOL_NAME": "create_new_file",  # 創建新檔案
-        "EDIT_TOOL_NAME": "modify_existing_file",  # 修改現有檔案
-        "GLOB_TOOL_NAME": "list_files_in_directory",  # 列出目錄檔案
-        "GREP_TOOL_NAME": "find_all_lines_in_file_with_fragment",  # 搜尋檔案內容
-        "SEARCH_TOOL_NAME": "find_files_with_fragment",  # 搜尋檔案
+        "READ_TOOL_NAME": "run_terminal_command",  # 讀取檔案改由終端命令
+        "WRITE_TOOL_NAME": "run_terminal_command",  # 寫檔改由終端命令
+        "EDIT_TOOL_NAME": "run_terminal_command",  # 修改改由終端命令
+        "GLOB_TOOL_NAME": "run_terminal_command",  # 列檔改由終端命令
+        "GREP_TOOL_NAME": "run_terminal_command",  # 搜尋內容改由終端命令
+        "SEARCH_TOOL_NAME": "run_terminal_command",  # 搜尋檔案改由終端命令
         "WEBFETCH_TOOL_NAME": "fetch",  # 瀏覽網站內容
         "WEBSEARCH_TOOL_NAME": "web_search",  # 網路搜尋（使用 DuckDuckGo）
         "ASKUSERQUESTION_TOOL_NAME": "ask_user_question",  # 舊版變數名
@@ -169,16 +171,15 @@ def _process_variables(text: str, variables: dict[str, str] | None = None) -> st
         "RUN_IN_BACKGROUND_NOTE": "",  # 背景執行說明
         "BASH_TOOL_EXTRA_NOTES": "",  # Bash 工具額外說明
         "BASH_BACKGROUND_TASK_NOTES_FN": "",  # Bash 背景任務說明
+            "SCRATCHPAD_DIR_FN": str(TIM_AGENT_SANDBOX_DIR),  # 沙盒/暫存目錄
         "AGENT_TOOL_USAGE_NOTES": "",  # Agent 工具使用說明
-        "TODO_TOOL_OBJECT": "ask_sub_agent",  # 待辦事項工具對象
-        "AVAILABLE_TOOLS_SET": "list_sub_agents",  # 可用工具集合
+        "TODO_TOOL_OBJECT": "todo",  # 待辦事項工具對象
+        "AVAILABLE_TOOLS_SET": "tools",  # 可用工具集合
     }
 
     # 合併使用者提供的變量
     if variables:
         default_vars.update(variables)
-
-    import re
 
     # 處理函數調用格式 ${FUNCTION_NAME()}
     text = re.sub(r'\$\{([A-Z_]+)\(\)\}', lambda m: default_vars.get(m.group(1), m.group(0)), text)
@@ -200,6 +201,10 @@ def _process_variables(text: str, variables: dict[str, str] | None = None) -> st
 
     # 移除複雜的函數調用（帶參數或複雜邏輯）
     text = re.sub(r'\$\{[^}]+\([^)]*\)[^}]*\}', '', text)
+
+    # 清除 Claude/Anthropic 身分注入（保留工具識別字串，不改 mcp__claude-in-chrome 這類名稱）
+    text = re.sub(r'\bClaude\b', 'assistant', text, flags=re.IGNORECASE)
+    text = re.sub(r'\bAnthropic\b', 'provider', text, flags=re.IGNORECASE)
 
     return text
 
@@ -226,8 +231,17 @@ def get_system_prompt_processed(
 SYSTEM_PROMPT: str = _build_system_prompt()
 
 _LOCAL_INSTRUCTION_FILES = ("AGENTS.md", "CLAUDE.md", "CONTEXT.md")
-_KEYWORD_TRIGGER_FILE = PROMPTS_DIR / "KEYWORD_TRIGGERS.json"
-_SUBAGENT_BACKGROUND_FILE = PROMPTS_DIR / "SUBAGENT_BACKGROUND.json"
+
+
+def _strip_generated_metadata(content: str) -> str:
+    """移除本地指示檔中的自動產生中繼資訊（例如 Generated:）。"""
+    cleaned_lines: list[str] = []
+    for line in content.splitlines():
+        normalized = line.strip().lower()
+        if normalized.startswith("generated:") or normalized.startswith("**generated:**"):
+            continue
+        cleaned_lines.append(line)
+    return "\n".join(cleaned_lines).strip()
 
 
 def _find_upwards(start_dir: Path, filename: str) -> Path | None:
@@ -262,6 +276,7 @@ def load_local_instructions(start_dir: Path | None = None) -> list[str]:
             content = path.read_text(encoding="utf-8").strip()
         except Exception:
             continue
+        content = _strip_generated_metadata(content)
         if content:
             instructions.append(f"指示來源：{path}\n{content}")
     return instructions
@@ -269,92 +284,39 @@ def load_local_instructions(start_dir: Path | None = None) -> list[str]:
 
 def build_environment_context(start_dir: Path | None = None) -> str:
     base = start_dir or Path.cwd()
+    home = Path.home()
+    desktop = home / "Desktop"
     git_root = _find_git_root(base)
     lines = [
         "執行環境：",
         f"- 工作目錄：{base}",
+        f"- Home 目錄：{home}",
+        f"- Desktop 目錄：{desktop}",
         f"- Git 專案：{'是' if git_root else '否'}",
     ]
     if git_root:
         lines.append(f"- Git 根目錄：{git_root}")
     lines.append(f"- 平台：{sys.platform}")
-    lines.append(f"- 日期：{date.today().isoformat()}")
+    lines.append("- 時間：由系統在每輪使用者訊息自動注入本地時區時間戳")
     return "\n".join(lines)
 
 
-def build_runtime_instructions(base_instructions: str, start_dir: Path | None = None) -> str:
+def build_runtime_instructions(
+    base_instructions: str,
+    start_dir: Path | None = None,
+    include_environment_context: bool = True,
+) -> str:
     parts: list[str] = []
     base = (base_instructions or "").strip()
     if base:
         parts.append(base)
-    context = build_environment_context(start_dir)
-    if context:
-        parts.append(context)
+    if include_environment_context:
+        context = build_environment_context(start_dir)
+        if context:
+            parts.append(context)
     local_instructions = load_local_instructions(start_dir)
     if local_instructions:
         parts.append("\n\n".join(local_instructions))
     return "\n\n".join(parts)
 
 
-@lru_cache(maxsize=1)
-def load_keyword_triggers() -> list[dict[str, str | bool]]:
-    if not _KEYWORD_TRIGGER_FILE.exists():
-        return []
-    try:
-        raw = _KEYWORD_TRIGGER_FILE.read_text(encoding="utf-8")
-        data = json.loads(raw)
-    except Exception:
-        return []
-
-    triggers: list[dict[str, str | bool]] = []
-    for item in data.get("triggers", []):
-        if not isinstance(item, dict):
-            continue
-        name = str(item.get("name", "")).strip()
-        pattern = str(item.get("pattern", "")).strip()
-        inject = str(item.get("inject", "")).strip()
-        position = str(item.get("position", "prefix")).strip().lower()
-        background = bool(item.get("background", False))
-        if not name or not pattern or not inject:
-            continue
-        if position not in {"prefix", "suffix"}:
-            position = "prefix"
-        triggers.append(
-            {
-                "name": name,
-                "pattern": pattern,
-                "inject": inject,
-                "position": position,
-                "background": background,
-            }
-        )
-    return triggers
-
-
-@lru_cache(maxsize=1)
-def load_subagent_background_config() -> dict[str, int | bool]:
-    defaults: dict[str, int | bool] = {
-        "max_concurrency": 3,
-        "max_auto_agents": 2,
-        "background_on_trigger": True,
-        "background_always": False,
-    }
-    if not _SUBAGENT_BACKGROUND_FILE.exists():
-        return defaults
-    try:
-        raw = _SUBAGENT_BACKGROUND_FILE.read_text(encoding="utf-8")
-        data = json.loads(raw)
-    except Exception:
-        return defaults
-
-    result = defaults.copy()
-    if isinstance(data, dict):
-        if isinstance(data.get("max_concurrency"), int):
-            result["max_concurrency"] = max(1, int(data["max_concurrency"]))
-        if isinstance(data.get("max_auto_agents"), int):
-            result["max_auto_agents"] = max(1, int(data["max_auto_agents"]))
-        if isinstance(data.get("background_on_trigger"), bool):
-            result["background_on_trigger"] = data["background_on_trigger"]
-        if isinstance(data.get("background_always"), bool):
-            result["background_always"] = data["background_always"]
-    return result

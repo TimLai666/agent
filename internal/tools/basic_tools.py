@@ -1,10 +1,5 @@
 import random
 import time
-from datetime import datetime, timedelta
-from typing import Literal
-from zoneinfo import ZoneInfo
-
-import tzlocal
 from pydantic_ai import Agent
 
 from internal.logger import logger
@@ -36,3 +31,4 @@ def add_basic_tools(agent: Agent) -> None:
         logger.info("Wait completed.")
         # todo: 可以接個好看ui或鈴聲之類
         return f"Time's up after {seconds} seconds."
+

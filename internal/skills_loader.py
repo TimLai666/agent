@@ -17,12 +17,18 @@ import json
 import asyncio
 
 from internal.logger import logger
+from internal.paths import TIM_AGENT_SKILLS_DIR
 
 if TYPE_CHECKING:
     from pydantic_ai import Agent
 
 
 SKILLS_DIR = Path(__file__).resolve().parent.parent / "skills"
+DEFAULT_EXTERNAL_SKILLS_DIRS = [
+    TIM_AGENT_SKILLS_DIR,
+    Path.home() / ".agents" / "skills",
+    Path.home() / ".claude" / "skills",
+]
 
 
 @dataclass
@@ -282,26 +288,35 @@ class SkillRegistry:
 
 def load_skill_registry(
     root_dir: Optional[Path] = None,
+    root_dirs: Optional[list[Path]] = None,
     enable_llm_scoring: bool = False,
     agent: Optional[Any] = None
 ) -> SkillRegistry:
     """Load all skills from the skills directory with optional LLM scoring.
 
     Args:
-        root_dir: Skills directory path (defaults to SKILLS_DIR)
+        root_dir: Single skills directory path (legacy, defaults to SKILLS_DIR)
+        root_dirs: Multiple skills directory paths. When provided, root_dir is ignored.
         enable_llm_scoring: Whether to enable LLM-based relevance scoring
         agent: Agent instance for LLM scoring (required if enable_llm_scoring=True)
 
     Returns:
         SkillRegistry instance
     """
-    skills_root = root_dir or SKILLS_DIR
+    if root_dirs:
+        skills_roots = [Path(p) for p in root_dirs]
+    elif root_dir is not None:
+        skills_roots = [Path(root_dir)]
+    else:
+        # Default precedence: user global dirs first, then project-local skills.
+        skills_roots = [*DEFAULT_EXTERNAL_SKILLS_DIRS, SKILLS_DIR]
 
-    if not skills_root.exists():
-        logger.info("Skills directory not found: %s", skills_root)
-        return SkillRegistry({}, None)
-
-    specs = load_skill_specs(skills_root)
+    specs: list[SkillSpec] = []
+    for skills_root in skills_roots:
+        if not skills_root.exists():
+            logger.info("Skills directory not found: %s", skills_root)
+            continue
+        specs.extend(load_skill_specs(skills_root))
 
     skill_map: dict[str, SkillSpec] = {}
     for spec in specs:
@@ -324,7 +339,8 @@ def load_skill_registry(
         except Exception:
             logger.exception("Failed to create LLM scorer; falling back to keyword matching")
 
-    logger.info("Loaded %d skills from %s", len(skill_map), skills_root)
+    roots_text = ", ".join(str(p) for p in skills_roots)
+    logger.info("Loaded %d skills from %s", len(skill_map), roots_text)
     return SkillRegistry(skill_map, llm_scorer)
 
 

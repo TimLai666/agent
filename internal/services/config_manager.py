@@ -47,28 +47,29 @@ def get_model_config(agent_name: str, category: Optional[str] = None) -> Optiona
     Returns None if no configuration exists.
 
     Args:
-        agent_name: Name of the agent
-        category: Optional category for default config fallback (e.g., "core", "co-agent", "sub-agent/...")
+        agent_name: Requested logical agent name (for logging only)
+        category: Deprecated; kept for compatibility
     """
-    # Determine category if not provided
-    if category is None:
-        # Auto-detect category based on agent name
-        if agent_name in ["main"]:
-            category = "core"
-        elif agent_name in ["philosopher"]:
-            category = "co-agent"
-        # Sub-agents are handled by registry with explicit category
+    # System-wide single-model policy:
+    # only resolve from global default configuration.
+    agent_config = get_agent_config("default", use_default=False)
 
-    # Get agent configuration with category support
-    agent_config = get_agent_config(agent_name, category=category)
     if not agent_config:
-        logger.warning(f"No configuration found for agent '{agent_name}'")
+        logger.warning(
+            "No unified model configuration found (expected explicit 'default'). "
+            f"Requested agent was '{agent_name}'"
+        )
         return None
     
     # Get provider configuration
     provider_config = get_provider(agent_config.provider_id)
     if not provider_config:
-        logger.error(f"Provider '{agent_config.provider_id}' not found for agent '{agent_name}'")
+        logger.error(
+            "Provider '%s' not found for unified configuration. "
+            "Requested agent was '%s'",
+            agent_config.provider_id,
+            agent_name,
+        )
         return None
     
     return ModelConfig(
@@ -349,18 +350,20 @@ def _create_github_copilot_model(
 def create_model_for_agent(
     agent_name: str,
     http_client: AsyncClient,
+    category: Optional[str] = None,
 ) -> Optional[OpenAIChatModel]:
     """
-    Create a model for a specific agent.
+    Create the runtime model using the unified default configuration.
     
     Args:
-        agent_name: Name of the agent (e.g., "main", "philosopher")
+        agent_name: Logical caller name (for logging only)
         http_client: HTTP client for API calls
+        category: Deprecated; ignored by runtime model resolution
     
     Returns:
         OpenAIChatModel instance or None if configuration not available
     """
-    config = get_model_config(agent_name)
+    config = get_model_config(agent_name, category=category)
     
     if not config:
         logger.error(

@@ -1,295 +1,206 @@
-import os
 import warnings
 from contextlib import AsyncExitStack
+from pathlib import Path
 
-from dotenv import load_dotenv
 from httpx import AsyncClient
 from pydantic_ai.messages import ModelRequest, ModelResponse
 
 from internal.runtime.stream_printer import stream_print
 
 from internal.agents import MainAgent
-from internal.co_agents import PhilosopherCoAgent
+from internal.app.handle_user_turn import create_runtime
+from internal.cli import confirm
 from internal.logger import logger
 from internal.services.agent_factory import load_base_config
+from internal.services import config_webui
+from internal.services import config_cli
+from internal.services.config_db import (
+    list_agent_configs,
+    list_mcp_tools,
+    list_providers,
+    list_remote_mcps,
+)
 from internal.services.voice_manager import VoiceManager
 from internal.command_handler import CommandHandler
-from internal.services import config_cli, config_webui
+from internal.compaction import (
+    CompactCoordinator,
+    ConversationState,
+    MAX_CONTEXT_TOKENS,
+    recalc_total_tokens,
+)
 
-HISTORY_LIMIT = 30
-TYPEWRITER_DELAY = 0.04
 COMMAND_PREFIX = "/"
 
 
-def _format_tools_list(main_agent: MainAgent) -> str:
-    tools_meta = main_agent._get_function_tools()
-    if not tools_meta:
-        return "No tools registered."
-    lines = ["Available tools:"]
-    for name, tool in tools_meta.items():
-        doc = tool.description.splitlines()[0] if tool.description else ""
-        lines.append(f"- {name}: {doc}" if doc else f"- {name}")
-    return "\n".join(lines)
+def _is_config_empty() -> bool:
+    """Return True when all configurable sections are empty."""
+    try:
+        has_providers = bool(list_providers())
+        has_agents = bool(list_agent_configs())
+        has_mcp_tools = bool(list_mcp_tools())
+        has_remote_mcps = bool(list_remote_mcps())
+        return not (has_providers or has_agents or has_mcp_tools or has_remote_mcps)
+    except Exception:
+        logger.exception("Failed to evaluate config emptiness in CLI")
+        return False
 
 
-def _format_sub_agents_list(main_agent: MainAgent) -> str:
-    specs = main_agent.list_sub_agents()
-    if not specs:
-        return "No sub-agents registered."
-    lines = ["Available sub-agents:"]
-    for spec in specs:
-        name = spec.get("name", "")
-        desc = spec.get("description", "")
-        if desc:
-            lines.append(f"- {name}: {desc}")
-        else:
-            lines.append(f"- {name}")
-    return "\n".join(lines)
+def _guide_user_for_empty_config() -> None:
+    """Show onboarding guidance and optionally open interactive config setup."""
+    print("\n[設定引導] 尚未偵測到任何 Provider/Agent 設定。")
+    print("你可以使用以下方式完成初始設定：")
+    print("  1. 互動式設定選單：/config")
+    print("  2. Web 設定頁：/config-web")
 
-
-def _format_skills_list(main_agent: MainAgent) -> str:
-    """Format list of available skills."""
-    if not main_agent.skills or main_agent.skills.is_empty():
-        return "No skills loaded."
-
-    specs = main_agent.skills.list_summaries()
-    lines = [f"Available skills ({len(specs)} total):"]
-    for spec in specs:
-        name = spec.get("name", "")
-        desc = spec.get("description", "")
-        if desc:
-            # Truncate long descriptions
-            if len(desc) > 80:
-                desc = desc[:77] + "..."
-            lines.append(f"- {name}: {desc}")
-        else:
-            lines.append(f"- {name}")
-    return "\n".join(lines)
-
-
-def _format_skill_info(main_agent: MainAgent, skill_name: str) -> str:
-    """Format detailed information about a specific skill."""
-    if not main_agent.skills or main_agent.skills.is_empty():
-        return "No skills loaded."
-
-    skill = main_agent.skills.get_skill(skill_name)
-    if not skill:
-        return f"Skill '{skill_name}' not found. Use /skills to see available skills."
-
-    lines = [
-        f"Skill: {skill.name}",
-        f"Description: {skill.description}",
-        "",
-    ]
-
-    # Show resources if available
-    if skill.resources.has_resources():
-        lines.append("Bundled resources:")
-        resources = skill.resources.list_all()
-        if resources.get("scripts"):
-            lines.append(f"  Scripts: {', '.join(resources['scripts'])}")
-        if resources.get("references"):
-            lines.append(f"  References: {', '.join(resources['references'])}")
-        if resources.get("assets"):
-            lines.append(f"  Assets: {', '.join(resources['assets'])}")
-        lines.append("")
-
-    # Show content preview
-    content_preview = skill.content[:500] if len(skill.content) > 500 else skill.content
-    lines.append("Content preview:")
-    lines.append("-" * 40)
-    lines.append(content_preview)
-    if len(skill.content) > 500:
-        lines.append(f"... ({len(skill.content) - 500} more characters)")
-    lines.append("-" * 40)
-
-    return "\n".join(lines)
-
-
-def _test_skill_matching(main_agent: MainAgent, prompt: str) -> str:
-    """Test which skills would be matched for a given prompt."""
-    if not main_agent.skills or main_agent.skills.is_empty():
-        return "No skills loaded."
-
-    skills = main_agent.skills.find_relevant_skills(prompt, max_skills=5)
-
-    if not skills:
-        return f"No skills matched for prompt: '{prompt}'"
-
-    lines = [
-        f"Testing prompt: '{prompt}'",
-        f"Matched {len(skills)} skill(s):",
-        "",
-    ]
-
-    for i, skill in enumerate(skills, 1):
-        lines.append(f"{i}. {skill.name}")
-        lines.append(f"   {skill.short_description()}")
-        lines.append("")
-
-    return "\n".join(lines)
-
-
-def _handle_skills_command(args: list[str], main_agent: MainAgent) -> None:
-    """Handle /skills command and its subcommands."""
-    if not args or args[0] == "list":
-        # /skills or /skills list
-        print(_format_skills_list(main_agent))
-    elif args[0] == "info":
-        # /skills info <name>
-        if len(args) < 2:
-            print("Usage: /skills info <skill-name>")
-            return
-        skill_name = args[1]
-        print(_format_skill_info(main_agent, skill_name))
-    elif args[0] == "test":
-        # /skills test <prompt>
-        if len(args) < 2:
-            print("Usage: /skills test <prompt>")
-            return
-        test_prompt = " ".join(args[1:])
-        print(_test_skill_matching(main_agent, test_prompt))
-    elif args[0] == "reload":
-        # /skills reload
-        try:
-            from internal.skills_loader import load_skill_registry
-            main_agent.skills = load_skill_registry()
-            count = len(main_agent.skills.list_names())
-            print(f"Skills reloaded successfully. Loaded {count} skills.")
-        except Exception as e:
-            print(f"Failed to reload skills: {e}")
-    else:
-        print(f"Unknown skills command: {args[0]}")
-        print("Available commands:")
-        print("  /skills [list]        List all available skills")
-        print("  /skills info <name>   Show detailed info about a skill")
-        print("  /skills test <prompt> Test which skills match a prompt")
-        print("  /skills reload        Reload all skills from disk")
-
-
-def _format_history(history: list[tuple[str, str]], limit: int) -> str:
-    if not history:
-        return "No conversation history yet."
-    recent = history[-limit:]
-    lines: list[str] = []
-    for idx, (user_text, assistant_text) in enumerate(recent, start=1):
-        lines.append(f"[{idx}] User: {user_text}")
-        if assistant_text:
-            lines.append(f"[{idx}] Assistant: {assistant_text}")
-    return "\n".join(lines)
-
-
-def _print_help() -> None:
-    print(
-        "\n".join(
-            [
-                "Commands:",
-                "/help              Show this help.",
-                "/exit, /quit       Exit the session.",
-                "/config            Open text configuration menu (CLI).",
-                "/config-web        Open configuration Web UI in browser.",
-                "/clear             Clear the screen.",
-                "/history [N]       Show last N turns (default 5).",
-                "/last              Show last assistant reply.",
-                "/retry             Re-run the last user prompt.",
-                "/tools             List available tools.",
-                "/subagents         List available sub-agents.",
-                "/skills [list]     List available skills.",
-                "/skills info <name> Show detailed info about a skill.",
-                "/skills test <text> Test which skills match a prompt.",
-                "/skills reload     Reload all skills from disk.",
-            ]
-        )
-    )
-
-
-def _handle_command(
-    command: str,
-    main_agent: MainAgent,
-    history: list[tuple[str, str]],
-) -> str | None:
-    parts = command.strip().split()
-    name = parts[0].lower()
-    args = parts[1:]
-
-    if name in ("/exit", "/quit"):
-        return "__exit__"
-    if name == "/help":
-        _print_help()
-        return None
-    if name == "/config":
-        # Launch CLI configuration menu (blocking in CLI)
+    if confirm("是否現在開啟互動式設定選單？", "Y"):
         try:
             config_cli.cmd_config_menu()
-        except Exception as e:
-            print(f"Failed to open config menu: {e}")
-        return None
-    if name == "/config-web":
+        except Exception as exc:
+            logger.error("Failed to open config menu from CLI onboarding", exc_info=exc)
+            print(f"⚠️ 無法開啟設定選單：{exc}")
+
+    if _is_config_empty():
+        print("\n⚠️ 目前仍未完成設定，模型呼叫可能失敗。")
+        print("   你可隨時輸入 /config 或 /config-web 進行設定。")
+    else:
+        print("\n✅ 偵測到有效設定，已可開始對話。")
+
+
+def _summarize_exception(exc: Exception) -> str:
+    """Extract a concise root-cause message from nested exception groups."""
+    current: BaseException | None = exc
+    visited: set[int] = set()
+
+    while current is not None and id(current) not in visited:
+        visited.add(id(current))
+        nested = getattr(current, "exceptions", None)
+        if isinstance(nested, (list, tuple)) and nested:
+            current = nested[0]
+            continue
+        if getattr(current, "__cause__", None) is not None:
+            current = current.__cause__
+            continue
+        if getattr(current, "__context__", None) is not None:
+            current = current.__context__
+            continue
+        break
+
+    if current is None:
+        return "Unknown error"
+    return f"{type(current).__name__}: {current}"
+
+
+def _format_tool_line(event: dict) -> str:
+    tool = str(event.get("tool") or "tool")
+    args = event.get("args") or ()
+    kwargs = event.get("kwargs") or {}
+    stage = str(event.get("stage") or "")
+    is_skill_call = tool == "use_skill"
+    explicit_skill_name = str(event.get("skill_name") or "").strip()
+
+    def _trim(value: str, limit: int = 80) -> str:
+        value = value.strip()
+        if len(value) <= limit:
+            return value
+        return value[: limit - 3] + "..."
+
+    detail = ""
+    if tool == "use_skill":
+        skill_name = ""
+        if isinstance(kwargs, dict):
+            raw = kwargs.get("skill_name")
+            if isinstance(raw, str):
+                skill_name = raw.strip()
+        if not skill_name and explicit_skill_name:
+            skill_name = explicit_skill_name
+        if not skill_name and args:
+            first = args[0]
+            if isinstance(first, str):
+                skill_name = first.strip()
+        if skill_name:
+            detail = f"skill={_trim(skill_name)}"
+    elif isinstance(kwargs, dict):
+        for key in ("command", "path", "url", "query"):
+            value = kwargs.get(key)
+            if isinstance(value, str) and value.strip():
+                detail = f"{key}={_trim(value)}"
+                break
+
+    if not detail and args:
         try:
-            url = config_webui.ensure_webui_running()
-            try:
-                import webbrowser
+            first = args[0]
+            if isinstance(first, str) and first.strip():
+                detail = f"arg={_trim(first)}"
+        except Exception:
+            pass
 
-                opened = webbrowser.open(url, new=2)
-                if opened:
-                    print(f"Opened config web UI in browser: {url}")
-                else:
-                    print(f"Config web UI available at: {url}")
-            except Exception:
-                print(f"Config web UI available at: {url}")
-        except Exception as e:
-            print(f"Failed to ensure config web UI running: {e}")
-        return None
-    if name == "/clear":
-        print("\n" * 80)
-        return None
-    if name == "/history":
-        limit = 5
-        if args and args[0].isdigit():
-            limit = max(1, int(args[0]))
-        print(_format_history(history, limit))
-        return None
-    if name == "/last":
-        last_reply = getattr(main_agent, "_last_assistant_reply", None)
-        print(last_reply or "No assistant reply yet.")
-        return None
-    if name == "/retry":
-        last_prompt = getattr(main_agent, "_last_user_prompt", None)
-        if not last_prompt:
-            print("No previous prompt to retry.")
-            return None
-        return last_prompt
-    if name == "/tools":
-        print(_format_tools_list(main_agent))
-        return None
-    if name == "/subagents":
-        print(_format_sub_agents_list(main_agent))
-        return None
-    if name == "/skills":
-        _handle_skills_command(args, main_agent)
-        return None
+    label = tool if not detail else f"{tool} ({detail})"
+    if is_skill_call:
+        if stage == "skill-activated":
+            return f"[SKILL] {label}"
+        # Suppress use_skill start/end/error lines to keep only one [SKILL] hint.
+        return ""
 
-    print("Unknown command. Type /help for options.")
-    return None
+    if stage == "start":
+        return f"[>] {label}"
+    if stage == "end":
+        return f"[OK] {label}"
+    if stage == "error":
+        error = str(event.get("error") or "")
+        suffix = f": {error}" if error else ""
+        return f"[ERR] {label}{suffix}"
+    return f"[*] {label}"
 
 
-async def run_cli(prompt_once: str | None = None, single_turn: bool = False) -> None:
+async def run_cli(
+    prompt_once: str | None = None,
+    single_turn: bool = False,
+    skill_root_dirs: list[Path] | None = None,
+) -> None:
     warnings.filterwarnings("ignore", category=DeprecationWarning)
     warnings.filterwarnings("ignore", category=ResourceWarning)
 
-    load_dotenv()
     logger.info("Starting agent...")
 
     voice_manager = VoiceManager()
-    env = dict(os.environ)
-    base_config = load_base_config(env)
+    base_config = load_base_config()
 
     async with AsyncClient(verify=False) as http_client:
-        philosopher = PhilosopherCoAgent.create(base_config, env, http_client)
-        # Register tools directly on main agent; no separate sub-agent layer
-        main_agent = MainAgent.create(base_config, env, http_client, philosopher)
+        main_agent = MainAgent.create(
+            base_config,
+            http_client,
+            skill_root_dirs=skill_root_dirs,
+        )
+        orchestration_runtime = create_runtime(main_agent)
+
+        def reload_skills_from_webui() -> dict[str, object]:
+            from internal.skills_loader import load_skill_registry
+
+            root_dirs = getattr(main_agent, "skill_root_dirs", None)
+            main_agent.skills = load_skill_registry(root_dirs=root_dirs)
+            count = len(main_agent.skills.list_names())
+            return {
+                "success": True,
+                "count": count,
+                "message": f"Skills 已自動重新載入（{count} 個）",
+            }
+
+        config_webui.register_skills_reload_handler(reload_skills_from_webui)
+
+        def emit_tool_event(event: dict) -> None:
+            try:
+                line = _format_tool_line(event)
+                if not line:
+                    return
+                print("\n[TOOL] " + line, flush=True)
+            except Exception as exc:
+                logger.debug(f"Failed to print tool event: {exc}")
+
+        main_agent.set_tool_event_callback(emit_tool_event)
 
         chat_history: list[ModelRequest | ModelResponse] | None = None
+        conversation_state = ConversationState(fullMessages=[])
+        compact_coordinator = CompactCoordinator(runner=main_agent.run_compaction_subagent)
         history: list[tuple[str, str]] = []
         
         # 創建共用的指令處理器
@@ -299,41 +210,102 @@ async def run_cli(prompt_once: str | None = None, single_turn: bool = False) -> 
             output_callback=print,
         )
 
-        async with AsyncExitStack() as stack:
-            # MCP servers are run by the main agent (contains browser tools)
-            mcp_started = False
-            try:
-                await stack.enter_async_context(main_agent.agent.run_mcp_servers())
-            except Exception as exc:  # pragma: no cover - best effort when MCP fails
-                logger.warning("MCP browser tools failed to start; continuing without them.", exc_info=exc)
-            else:
-                mcp_started = True
+        # CLI onboarding: guide users when configuration is completely empty.
+        if prompt_once is None and not single_turn and _is_config_empty():
+            _guide_user_for_empty_config()
+
+        try:
+            async with AsyncExitStack() as stack:
+                # MCP servers are run by the main agent (contains browser tools)
+                mcp_started = False
+                try:
+                    await stack.enter_async_context(main_agent.agent.run_mcp_servers())
+                except Exception as exc:  # pragma: no cover - best effort when MCP fails
+                    reason = _summarize_exception(exc)
+                    logger.warning(
+                        "MCP browser tools failed to start; continuing without them. Root cause: %s",
+                        reason,
+                    )
+                    # Keep CLI behavior consistent with GUI: remove unavailable MCP toolsets
+                    # so the agent won't repeatedly attempt calls to broken MCP servers.
+                    try:
+                        main_agent.agent._user_toolsets = []
+                        logger.info("Cleared MCP toolsets from agent to prevent tool call failures")
+                    except Exception as clear_exc:
+                        logger.debug("Failed to clear MCP toolsets in CLI", exc_info=clear_exc)
+                else:
+                    mcp_started = True
 
             ready_msg = "\nAgent ready. Type /help for commands."
             if not mcp_started:
                 ready_msg = (
-                    "\nAgent ready (browser tools disabled). Type /help for commands."
+                    "\nAgent ready. Type /help for commands."
                     "\nNote: install Playwright via `uv run playwright install` if you want browser tooling."
                 )
             print(ready_msg)
+
             if prompt_once is not None:
                 user_input = prompt_once.strip()
                 if not user_input:
                     return
-                await stream_print(main_agent.run_stream(user_input, message_history=chat_history))
+                await stream_print(
+                    orchestration_runtime.handle_user_turn_stream(
+                        user_input,
+                        message_history=chat_history,
+                    )
+                )
                 return
 
-            def update_history() -> None:
+            async def update_history() -> None:
                 nonlocal chat_history
                 try:
                     if getattr(main_agent, "_last_messages", None):
-                        chat_history = (
-                            main_agent._last_messages[-HISTORY_LIMIT:]
-                            if main_agent._last_messages is not None
-                            else None
+                        conversation_state.fullMessages = (
+                            main_agent._last_messages if main_agent._last_messages is not None else []
                         )
+                        conversation_state.totalTokens = recalc_total_tokens(conversation_state.fullMessages)
+                        updated_state = await compact_coordinator.maybeCompact(conversation_state)
+                        conversation_state.fullMessages = updated_state.fullMessages
+                        conversation_state.recentMessages = updated_state.recentMessages
+                        conversation_state.compressedSummary = updated_state.compressedSummary
+                        conversation_state.totalTokens = updated_state.totalTokens
+                        conversation_state.lastCompactedMessageId = updated_state.lastCompactedMessageId
+                        chat_history = updated_state.fullMessages
+                    else:
+                        chat_history = None
                 except Exception:
                     chat_history = None
+
+            async def force_compact() -> tuple[bool, int, int]:
+                nonlocal chat_history
+                base_messages = chat_history or getattr(main_agent, "_last_messages", None) or []
+                if not base_messages:
+                    return False, 0, 0
+
+                conversation_state.fullMessages = list(base_messages)
+                before_count = len(conversation_state.fullMessages)
+                conversation_state.totalTokens = max(
+                    recalc_total_tokens(conversation_state.fullMessages),
+                    MAX_CONTEXT_TOKENS,
+                )
+                updated_state = await compact_coordinator.maybeCompact(conversation_state)
+                conversation_state.fullMessages = updated_state.fullMessages
+                conversation_state.recentMessages = updated_state.recentMessages
+                conversation_state.compressedSummary = updated_state.compressedSummary
+                conversation_state.totalTokens = updated_state.totalTokens
+                conversation_state.lastCompactedMessageId = updated_state.lastCompactedMessageId
+                chat_history = updated_state.fullMessages
+                after_count = len(chat_history)
+                return after_count < before_count, before_count, after_count
+
+            def clear_context() -> None:
+                nonlocal chat_history, conversation_state
+                chat_history = None
+                conversation_state = ConversationState(fullMessages=[])
+                command_handler.clear_context_state()
+                history.clear()
+                main_agent._last_messages = None
+                main_agent._last_assistant_reply = None
 
             def read_input_once() -> str | None:
                 user_input = input("輸入文字或按Enter啟動語音辨識> ").strip()
@@ -352,6 +324,17 @@ async def run_cli(prompt_once: str | None = None, single_turn: bool = False) -> 
                     action = command_handler.handle(user_input)
                     if action == "__exit__":
                         return
+                    if action == "__clear_context__":
+                        clear_context()
+                        print("已清空對話 context。")
+                        return
+                    if action == "__compact__":
+                        changed, before, after = await force_compact()
+                        if changed:
+                            print(f"已執行壓縮：訊息數 {before} -> {after}")
+                        else:
+                            print("已嘗試壓縮，但目前可壓縮內容不足（需要超過最近保留訊息量）。")
+                        return
                     if action:
                         user_input = action
                     else:
@@ -359,8 +342,13 @@ async def run_cli(prompt_once: str | None = None, single_turn: bool = False) -> 
                 if user_input.lower() in ["exit", "quit"]:
                     return
                 command_handler.update_last_prompt(user_input)
-                await stream_print(main_agent.run_stream(user_input, message_history=chat_history))
-                update_history()
+                await stream_print(
+                    orchestration_runtime.handle_user_turn_stream(
+                        user_input,
+                        message_history=chat_history,
+                    )
+                )
+                await update_history()
                 reply = main_agent._last_assistant_reply or ""
                 command_handler.update_last_reply(reply)
                 history.append((user_input, reply))
@@ -375,6 +363,17 @@ async def run_cli(prompt_once: str | None = None, single_turn: bool = False) -> 
                         action = command_handler.handle(user_input)
                         if action == "__exit__":
                             break
+                        if action == "__clear_context__":
+                            clear_context()
+                            print("已清空對話 context。")
+                            continue
+                        if action == "__compact__":
+                            changed, before, after = await force_compact()
+                            if changed:
+                                print(f"已執行壓縮：訊息數 {before} -> {after}")
+                            else:
+                                print("已嘗試壓縮，但目前可壓縮內容不足（需要超過最近保留訊息量）。")
+                            continue
                         if action:
                             user_input = action
                         else:
@@ -382,8 +381,13 @@ async def run_cli(prompt_once: str | None = None, single_turn: bool = False) -> 
                     if user_input.lower() in ["exit", "quit"]:
                         break
                     command_handler.update_last_prompt(user_input)
-                    await stream_print(main_agent.run_stream(user_input, message_history=chat_history))
-                    update_history()
+                    await stream_print(
+                        orchestration_runtime.handle_user_turn_stream(
+                            user_input,
+                            message_history=chat_history,
+                        )
+                    )
+                    await update_history()
                     reply = main_agent._last_assistant_reply or ""
                     command_handler.update_last_reply(reply)
                     history.append((user_input, reply))
@@ -392,3 +396,5 @@ async def run_cli(prompt_once: str | None = None, single_turn: bool = False) -> 
                 except Exception as exc:
                     logger.error("Error: " + str(exc))
                     print("\nError: " + str(exc) + "\n")
+        finally:
+            config_webui.register_skills_reload_handler(None)

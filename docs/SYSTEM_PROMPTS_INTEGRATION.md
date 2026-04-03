@@ -1,5 +1,7 @@
 # System Prompts 整合指南
 
+> 最後更新：2026-04-03
+
 本文檔說明如何使用 `prompts/system-prompts/` 目錄中的 system prompts。
 
 ## 概述
@@ -7,7 +9,16 @@
 專案支援模組化的 system prompts 管理：
 
 - **基礎 prompt**：`prompts/SYSTEM_PROMPT.md` - 核心系統約束和規則
-- **額外 prompts**：`prompts/system-prompts/*.md` - 特定功能的 prompts（從 Claude Code 移植）
+- **額外 prompts**：`prompts/system-prompts/*.md` - 特定功能的 prompts（已去品牌身份化）
+
+## 近期行為變更
+
+1. 已移除 prompt 關鍵字觸發機制。
+- `prompts/KEYWORD_TRIGGERS.json` 已刪除。
+- 主流程不再有關鍵字觸發注入。
+
+2. MainAgent 的 system prompt 會注入當前模型資訊。
+- 在 `# Model Information` 區塊顯示 `Active Model`。
 
 ## 檔案結構
 
@@ -15,7 +26,6 @@
 prompts/
 ├── SYSTEM_PROMPT.md              # 主要的 system prompt（保持不變）
 ├── MAIN_AGENT_PROMPT.md          # Main agent 的指示
-├── PHILOSOPHER_PROMPT.md         # Philosopher agent 的指示
 └── system-prompts/               # 額外的 system prompts
     ├── agent-prompt-explore.md   # Explore agent 的 prompt
     ├── tool-description-bash.md  # Bash 工具描述
@@ -68,7 +78,7 @@ combined = build_combined_system_prompt(
     base_prompt=None,  # None = 使用預設的 SYSTEM_PROMPT
     additional_prompts=[
         "tool_description_bash",
-        "tool_description_grep",
+        "system_prompt_command_usage_practice",
         "agent_prompt_explore",
     ],
     separator="\n\n---\n\n"
@@ -96,12 +106,10 @@ from internal.agents.main_agent import MainAgent
 # 創建帶有額外 system prompts 的 agent
 agent = MainAgent.create(
     base_config=config,
-    env=env,
     http_client=client,
-    philosopher=philosopher,
     additional_system_prompts=[
         "tool_description_bash",
-        "tool_description_grep",
+        "system_prompt_command_usage_practice",
     ]
 )
 ```
@@ -122,19 +130,19 @@ explore_agent = Agent(
 
 ## 變量處理
 
-從 Claude Code 移植的 prompts 包含變量語法（例如 `${VARIABLE_NAME}`）。系統會自動處理這些變量：
+移植的 prompts 可能包含變量語法（例如 `${VARIABLE_NAME}`）。系統會自動處理這些變量：
 
 ### 支援的變量
 
 ```python
 # 工具名稱
 TASK_TOOL_NAME = "Task"
-BASH_TOOL_NAME = "Bash"
-READ_TOOL_NAME = "Read"
-WRITE_TOOL_NAME = "Write"
-EDIT_TOOL_NAME = "Edit"
-GLOB_TOOL_NAME = "Glob"
-GREP_TOOL_NAME = "Grep"
+BASH_TOOL_NAME = "run_terminal_command"
+READ_TOOL_NAME = "run_terminal_command"
+WRITE_TOOL_NAME = "run_terminal_command"
+EDIT_TOOL_NAME = "run_terminal_command"
+GLOB_TOOL_NAME = "run_terminal_command"
+GREP_TOOL_NAME = "run_terminal_command"
 
 # Agent 類型
 EXPLORE_AGENT = "Explore"
@@ -174,8 +182,7 @@ MAX_OUTPUT_CHARS = "30000"
 # Main agent：基礎 + 工具描述
 main_agent_prompts = [
     "tool_description_bash",
-    "tool_description_grep",
-    "tool_description_read",
+    "system_prompt_command_usage_practice",
 ]
 
 # Explore agent：基礎 + explore 特定指導
@@ -186,7 +193,7 @@ explore_agent_prompts = [
 
 ### 4. 微調移植的 prompts
 
-從 Claude Code 移植的 prompts 可能需要調整：
+移植的 prompts 可能需要調整：
 
 1. 檢查變量是否正確映射
 2. 移除不適用的部分

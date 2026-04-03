@@ -7,9 +7,8 @@
 默認配置功能提供**多級默認配置系統**，讓您能靈活地為不同層級的 Agent 設置默認配置：
 
 1. **全域默認配置** (`default`) - 所有未配置 Agent 的最終後備選項
-2. **Agent 類型預設** - 針對 Core、Co-Agent、Sub-Agent 的專屬預設
+2. **Agent 類型預設** - 針對 Core、Sub-Agent 的專屬預設
    - `default:core` - Core agents (如 main)
-   - `default:co-agents` - Co-agents (如 philosopher)
    - `default:subagents` - 所有 Sub-agents
 3. **類別默認配置** (`default:{category}`) - 特定類別的專用配置 (如 marketing、testing)
 
@@ -26,7 +25,6 @@
    ↓ (未找到)
 4. Agent 類型預設
    - Core agents → default:core
-   - Co-agents → default:co-agents
    - Sub-agents → default:subagents
    ↓ (未找到)
 5. 全域默認配置 (default)
@@ -40,7 +38,6 @@
 
 **Agent 類型層級** (新增✨):
 - `default:core` - Core agents 專用預設 (如 main agent)
-- `default:co-agents` - Co-agents 專用預設 (如 philosopher)
 - `default:subagents` - 所有 Sub-agents 的預設
 
 **類別層級**:

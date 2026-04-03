@@ -7,7 +7,7 @@ class DummyRuntime:
     class DummySignal:
         def connect(self, *_):
             pass
-    def __init__(self, *a, **k):
+    def __init__(self, *_args, **_kwargs):
         self.ready = DummyRuntime.DummySignal()
         self.result_ready = DummyRuntime.DummySignal()
         self.chunk_ready = DummyRuntime.DummySignal()
@@ -19,7 +19,7 @@ class DummyRuntime:
 
 def test_typing_resets_idle_timer(monkeypatch):
     # Ensure a QApplication exists for widgets
-    app = QApplication.instance() or QApplication(sys.argv)
+    QApplication.instance() or QApplication(sys.argv)
 
     # Monkeypatch AgentRuntime to avoid starting real runtime threads
     monkeypatch.setattr(main, "AgentRuntime", DummyRuntime)

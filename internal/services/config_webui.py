@@ -6,9 +6,12 @@ Provides a browser-based interface for managing providers and agent configuratio
 from flask import Flask, render_template, request, jsonify
 from pathlib import Path
 import json
-from typing import Optional
+from typing import Optional, Callable
 import threading
 import webbrowser
+import shutil
+import tempfile
+import zipfile
 
 from internal.services.config_db import (
     AgentModelConfig,
@@ -31,6 +34,7 @@ from internal.services.config_db import (
     delete_remote_mcp,
 )
 from internal.logger import logger
+from internal.paths import TIM_AGENT_SKILLS_DIR
 from internal.services.github_oauth import authenticate_github
 from internal.services.agent_discovery import discover_agents
 
@@ -44,9 +48,152 @@ app = Flask(
 # Background web UI thread handles
 _webui_thread: threading.Thread | None = None
 _webui_url: str | None = None
+_skills_reload_handler: Callable[[], dict[str, object]] | None = None
 
 DEFAULT_WEBUI_HOST = "127.0.0.1"
 DEFAULT_WEBUI_PORT = 5000
+USER_SKILLS_DIR = TIM_AGENT_SKILLS_DIR
+
+
+def register_skills_reload_handler(handler: Callable[[], dict[str, object]] | None) -> None:
+    """Register a callback used to reload in-memory skills after WebUI file changes."""
+    global _skills_reload_handler
+    _skills_reload_handler = handler
+
+
+def _trigger_skills_reload() -> dict[str, object]:
+    """Try to reload runtime skills, returning status metadata for API responses."""
+    if _skills_reload_handler is None:
+        return {
+            "attempted": False,
+            "success": False,
+            "message": "沒有可用的執行中 Agent，請手動執行 /skills reload",
+        }
+
+    try:
+        result = _skills_reload_handler()
+        if isinstance(result, dict):
+            return {
+                "attempted": True,
+                "success": bool(result.get("success", True)),
+                **result,
+            }
+        return {
+            "attempted": True,
+            "success": True,
+            "message": "Skills 已自動重新載入",
+        }
+    except Exception as e:
+        logger.exception(f"Failed to auto reload skills: {e}")
+        return {
+            "attempted": True,
+            "success": False,
+            "message": f"自動 reload 失敗: {e}",
+        }
+
+
+def _ensure_user_skills_dir() -> Path:
+    USER_SKILLS_DIR.mkdir(parents=True, exist_ok=True)
+    return USER_SKILLS_DIR
+
+
+def _is_safe_child_name(name: str) -> bool:
+    if not name or name in {".", ".."}:
+        return False
+    return Path(name).name == name
+
+
+def _parse_skill_metadata(skill_dir: Path) -> dict[str, str]:
+    skill_file = skill_dir / "SKILL.md"
+    if not skill_file.exists():
+        return {"skill_name": skill_dir.name, "description": ""}
+
+    try:
+        text = skill_file.read_text(encoding="utf-8")
+    except Exception:
+        return {"skill_name": skill_dir.name, "description": ""}
+
+    frontmatter = ""
+    if text.startswith("---"):
+        parts = text.split("---", 2)
+        if len(parts) >= 3:
+            frontmatter = parts[1]
+
+    skill_name = skill_dir.name
+    description = ""
+    for line in frontmatter.splitlines():
+        if line.startswith("name:"):
+            skill_name = line.split(":", 1)[1].strip().strip('"').strip("'") or skill_name
+        if line.startswith("description:"):
+            description = line.split(":", 1)[1].strip().strip('"').strip("'")
+
+    return {"skill_name": skill_name, "description": description}
+
+
+def _list_user_skills() -> list[dict[str, str]]:
+    skills_root = _ensure_user_skills_dir()
+    items: list[dict[str, str]] = []
+    for child in sorted(skills_root.iterdir(), key=lambda p: p.name.lower()):
+        if not child.is_dir():
+            continue
+        if not (child / "SKILL.md").exists():
+            continue
+        metadata = _parse_skill_metadata(child)
+        items.append(
+            {
+                "dir_name": child.name,
+                "skill_name": metadata["skill_name"],
+                "description": metadata["description"],
+            }
+        )
+    return items
+
+
+def _safe_extract_zip(zip_path: Path, extract_to: Path) -> None:
+    with zipfile.ZipFile(zip_path) as archive:
+        for member in archive.infolist():
+            member_path = Path(member.filename)
+            if member_path.is_absolute() or ".." in member_path.parts:
+                raise ValueError(f"Zip 內容包含不安全路徑: {member.filename}")
+        archive.extractall(extract_to)
+
+
+def _discover_skill_dirs(root_dir: Path) -> list[Path]:
+    candidates = {p.parent for p in root_dir.rglob("SKILL.md") if p.is_file()}
+    return sorted(candidates, key=lambda p: str(p).lower())
+
+
+def _install_skills_from_zip(zip_path: Path) -> dict[str, object]:
+    skills_root = _ensure_user_skills_dir()
+    with tempfile.TemporaryDirectory(prefix="tim-agent-skill-upload-") as tmp_dir:
+        extract_root = Path(tmp_dir)
+        _safe_extract_zip(zip_path, extract_root)
+        skill_dirs = _discover_skill_dirs(extract_root)
+
+        if not skill_dirs:
+            raise ValueError("zip 內找不到任何 SKILL.md，無法安裝")
+
+        replaced: list[str] = []
+        added: list[str] = []
+
+        for src_dir in skill_dirs:
+            target_name = src_dir.name
+            if not _is_safe_child_name(target_name):
+                raise ValueError(f"無效的 skill 目錄名稱: {target_name}")
+
+            target_dir = skills_root / target_name
+            if target_dir.exists():
+                shutil.rmtree(target_dir)
+                replaced.append(target_name)
+            else:
+                added.append(target_name)
+
+            shutil.copytree(src_dir, target_dir)
+
+    return {
+        "added": sorted(set(added)),
+        "replaced": sorted(set(replaced)),
+    }
 
 
 def get_available_models(provider_id: str) -> list[str]:
@@ -158,13 +305,6 @@ def _get_github_copilot_models(provider: ProviderConfig) -> list[str]:
     except Exception as e:
         print(f"無法連接到 models.dev: {type(e).__name__}: {e}")
         return []
-
-
-def _get_fallback_models(provider: ProviderConfig) -> list[str]:
-    """此函數已棄用 - 不再使用假資料"""
-    return []
-
-
 # ===== API Routes =====
 
 @app.route('/')
@@ -252,12 +392,9 @@ def api_available_agents():
 
 @app.route('/api/agents', methods=['GET'])
 def api_list_agents():
-    """列出所有 agent 配置
-    
-    只返回已明確配置的 agents（直接配置或繼承配置）
-    未配置的 agents 會在運行時自動使用默認配置
-    """
+    """列出可編輯的單一模型配置（僅 default）。"""
     configs = list_agent_configs()
+    visible_agent_names = {"default"}
     
     return jsonify([
         {
@@ -266,15 +403,19 @@ def api_list_agents():
             "model_name": c.model_name,
             "temperature": c.temperature,
             "inherit_from": c.inherit_from,
-            "uses_default": False  # 已配置的 agent 不使用默認
+            "uses_default": False
         }
         for c in configs
+        if c.agent_name in visible_agent_names
     ])
 
 
 @app.route('/api/agents/<agent_name>', methods=['GET'])
 def api_get_agent(agent_name: str):
-    """獲取單個 agent 配置"""
+    """獲取單一模型配置（僅 default）。"""
+    if agent_name != "default":
+        return jsonify({"error": "single config mode: only default is supported"}), 400
+
     config = get_agent_config(agent_name)
     if not config:
         return jsonify({"error": "Agent not found"}), 404
@@ -290,11 +431,30 @@ def api_get_agent(agent_name: str):
 
 @app.route('/api/agents', methods=['POST'])
 def api_set_agent():
-    """設定 agent 配置"""
+    """設定單一模型配置（僅 default）。"""
     data = request.json
+    agent_name = data.get("agent_name")
+
+    if agent_name != "default":
+        return jsonify({
+            "success": False,
+            "error": "系統已改為單一模型配置；僅支援設定 default。"
+        }), 400
+
+    if data.get("inherit_from"):
+        return jsonify({
+            "success": False,
+            "error": "單一模型模式不支援繼承配置。"
+        }), 400
+
+    if not data.get("provider_id") or not data.get("model_name"):
+        return jsonify({
+            "success": False,
+            "error": "請提供 provider_id 與 model_name。"
+        }), 400
     
     config = AgentModelConfig(
-        agent_name=data["agent_name"],
+        agent_name=agent_name,
         provider_id=data.get("provider_id"),
         model_name=data.get("model_name"),
         temperature=float(data.get("temperature", 0.2)),
@@ -302,18 +462,24 @@ def api_set_agent():
     )
     
     if set_agent_config(config):
-        return jsonify({"success": True, "message": "Agent 配置成功"})
+        return jsonify({"success": True, "message": "模型配置成功"})
     else:
-        return jsonify({"success": False, "error": "Agent 配置失敗"}), 400
+        return jsonify({"success": False, "error": "模型配置失敗"}), 400
 
 
 @app.route('/api/agents/<agent_name>', methods=['DELETE'])
 def api_delete_agent(agent_name: str):
-    """刪除 agent 配置"""
+    """刪除單一模型配置（僅 default）。"""
+    if agent_name != "default":
+        return jsonify({
+            "success": False,
+            "error": "系統已改為單一模型配置；僅可刪除 default 配置。"
+        }), 400
+
     if delete_agent_config(agent_name):
-        return jsonify({"success": True, "message": "Agent 配置刪除成功"})
+        return jsonify({"success": True, "message": "模型配置刪除成功"})
     else:
-        return jsonify({"success": False, "error": "Agent 配置刪除失敗"}), 400
+        return jsonify({"success": False, "error": "模型配置刪除失敗"}), 400
 
 
 @app.route('/api/default-config', methods=['GET'])
@@ -368,52 +534,35 @@ def api_delete_default_config():
 
 @app.route('/api/category-default-config/<path:category>', methods=['GET'])
 def api_get_category_default_config(category: str):
-    """獲取類別默認配置"""
-    config = get_agent_config(f"default:{category}", use_default=False)
-    if not config:
-        return jsonify({"success": True, "config": None})
-    
-    # 獲取提供者信息
-    provider = get_provider(config.provider_id)
-    provider_name = provider.name if provider else config.provider_id
-    
+    """Deprecated: 類別默認配置已停用。"""
     return jsonify({
-        "success": True,
-        "config": {
-            "provider_id": config.provider_id,
-            "provider_name": provider_name,
-            "model_name": config.model_name,
-            "temperature": config.temperature,
-        }
-    })
+        "success": False,
+        "deprecated": True,
+        "error": "類別默認配置已停用；請改用全域默認配置 default。",
+        "category": category,
+    }), 410
 
 
 @app.route('/api/category-default-config/<path:category>', methods=['POST'])
 def api_set_category_default_config(category: str):
-    """設置類別默認配置"""
-    data = request.json
-    
-    config = AgentModelConfig(
-        agent_name=f"default:{category}",
-        provider_id=data["provider_id"],
-        model_name=data["model_name"],
-        temperature=float(data.get("temperature", 0.2)),
-        inherit_from=None,
-    )
-    
-    if set_agent_config(config):
-        return jsonify({"success": True, "message": f"{category} 類別默認配置設置成功"})
-    else:
-        return jsonify({"success": False, "error": "類別默認配置設置失敗"}), 400
+    """Deprecated: 類別默認配置已停用。"""
+    return jsonify({
+        "success": False,
+        "deprecated": True,
+        "error": "類別默認配置已停用；請改用全域默認配置 default。",
+        "category": category,
+    }), 410
 
 
 @app.route('/api/category-default-config/<path:category>', methods=['DELETE'])
 def api_delete_category_default_config(category: str):
-    """刪除類別默認配置"""
-    if delete_agent_config(f"default:{category}"):
-        return jsonify({"success": True, "message": f"{category} 類別默認配置刪除成功"})
-    else:
-        return jsonify({"success": False, "error": "類別默認配置刪除失敗"}), 400
+    """Deprecated: 類別默認配置已停用。"""
+    return jsonify({
+        "success": False,
+        "deprecated": True,
+        "error": "類別默認配置已停用；無需刪除此配置。",
+        "category": category,
+    }), 410
 
 
 @app.route('/api/agent-categories', methods=['GET'])
@@ -426,52 +575,32 @@ def api_get_agent_categories():
 
 @app.route('/api/subagent-default-config', methods=['GET'])
 def api_get_subagent_default_config():
-    """獲取 Subagent 整體默認配置"""
-    config = get_agent_config("default:subagents", use_default=False)
-    if not config:
-        return jsonify({"success": True, "config": None})
-    
-    # 獲取提供者信息
-    provider = get_provider(config.provider_id)
-    provider_name = provider.name if provider else config.provider_id
-    
+    """Deprecated: Subagent 默認配置已停用。"""
     return jsonify({
-        "success": True,
-        "config": {
-            "provider_id": config.provider_id,
-            "provider_name": provider_name,
-            "model_name": config.model_name,
-            "temperature": config.temperature,
-        }
-    })
+        "success": False,
+        "deprecated": True,
+        "error": "Subagent 默認配置已停用；請改用全域默認配置 default。",
+    }), 410
 
 
 @app.route('/api/subagent-default-config', methods=['POST'])
 def api_set_subagent_default_config():
-    """設置 Subagent 整體默認配置"""
-    data = request.json
-    
-    config = AgentModelConfig(
-        agent_name="default:subagents",
-        provider_id=data["provider_id"],
-        model_name=data["model_name"],
-        temperature=float(data.get("temperature", 0.2)),
-        inherit_from=None,
-    )
-    
-    if set_agent_config(config):
-        return jsonify({"success": True, "message": "Subagent 整體默認配置設置成功"})
-    else:
-        return jsonify({"success": False, "error": "Subagent 整體默認配置設置失敗"}), 400
+    """Deprecated: Subagent 默認配置已停用。"""
+    return jsonify({
+        "success": False,
+        "deprecated": True,
+        "error": "Subagent 默認配置已停用；請改用全域默認配置 default。",
+    }), 410
 
 
 @app.route('/api/subagent-default-config', methods=['DELETE'])
 def api_delete_subagent_default_config():
-    """刪除 Subagent 整體默認配置"""
-    if delete_agent_config("default:subagents"):
-        return jsonify({"success": True, "message": "Subagent 整體默認配置刪除成功"})
-    else:
-        return jsonify({"success": False, "error": "Subagent 整體默認配置刪除失敗"}), 400
+    """Deprecated: Subagent 默認配置已停用。"""
+    return jsonify({
+        "success": False,
+        "deprecated": True,
+        "error": "Subagent 默認配置已停用；無需刪除此配置。",
+    }), 410
 
 
 
@@ -560,6 +689,86 @@ def api_delete_remote_mcp(remote_mcp_id: str):
         return jsonify({"success": True, "message": "遠端 MCP 刪除成功"})
     else:
         return jsonify({"success": False, "error": "遠端 MCP 刪除失敗"}), 400
+
+
+@app.route('/api/skills', methods=['GET'])
+def api_list_skills():
+    """List user-managed skills under ~/.tim-agent/skills"""
+    try:
+        return jsonify({
+            "skills_root": str(_ensure_user_skills_dir()),
+            "skills": _list_user_skills(),
+        })
+    except Exception as e:
+        logger.exception(f"Failed to list skills: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/api/skills/<skill_dir_name>', methods=['DELETE'])
+def api_delete_skill(skill_dir_name: str):
+    """Delete one skill package by directory name from ~/.tim-agent/skills"""
+    if not _is_safe_child_name(skill_dir_name):
+        return jsonify({"success": False, "error": "無效的 skill 名稱"}), 400
+
+    target_dir = _ensure_user_skills_dir() / skill_dir_name
+    if not target_dir.exists() or not target_dir.is_dir():
+        return jsonify({"success": False, "error": "找不到指定 skill"}), 404
+
+    try:
+        shutil.rmtree(target_dir)
+        reload_result = _trigger_skills_reload()
+        return jsonify(
+            {
+                "success": True,
+                "message": f"已刪除 skill: {skill_dir_name}",
+                "reload": reload_result,
+            }
+        )
+    except Exception as e:
+        logger.exception(f"Failed to delete skill {skill_dir_name}: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/api/skills/upload', methods=['POST'])
+def api_upload_skills_zip():
+    """Upload zip and install skill packages into ~/.tim-agent/skills"""
+    upload = request.files.get("file")
+    if upload is None:
+        return jsonify({"success": False, "error": "缺少上傳檔案 file"}), 400
+
+    filename = (upload.filename or "").lower()
+    if not filename.endswith(".zip"):
+        return jsonify({"success": False, "error": "僅支援 .zip 檔案"}), 400
+
+    with tempfile.NamedTemporaryFile(prefix="tim-agent-upload-", suffix=".zip", delete=False) as tmp_file:
+        tmp_path = Path(tmp_file.name)
+
+    try:
+        upload.save(str(tmp_path))
+        result = _install_skills_from_zip(tmp_path)
+        reload_result = _trigger_skills_reload()
+        return jsonify(
+            {
+                "success": True,
+                "message": "Skills 安裝完成",
+                "skills_root": str(_ensure_user_skills_dir()),
+                "added": result["added"],
+                "replaced": result["replaced"],
+                "reload": reload_result,
+            }
+        )
+    except zipfile.BadZipFile:
+        return jsonify({"success": False, "error": "無法解析 zip，檔案可能已損壞"}), 400
+    except ValueError as e:
+        return jsonify({"success": False, "error": str(e)}), 400
+    except Exception as e:
+        logger.exception(f"Failed to upload skills zip: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+    finally:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except Exception:
+            pass
 
 
 @app.route('/api/github/authenticate', methods=['POST'])

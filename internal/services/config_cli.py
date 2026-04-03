@@ -1,6 +1,4 @@
-"""
-CLI commands for managing agent configurations.
-"""
+"""CLI commands for managing provider and single-model configuration."""
 import sys
 from pathlib import Path
 from typing import Optional
@@ -14,7 +12,6 @@ from internal.services.config_db import (
     delete_provider,
     get_agent_config,
     get_provider,
-    list_agent_configs,
     list_providers,
     set_agent_config,
 )
@@ -40,8 +37,8 @@ def print_provider(provider: ProviderConfig):
 
 
 def print_agent_config(config: AgentModelConfig):
-    """Print agent configuration"""
-    print(f"\n  Agent: {config.agent_name}")
+    """Print single model configuration"""
+    print(f"\n  配置鍵: {config.agent_name}")
     print(f"  提供者: {config.provider_id}")
     print(f"  模型: {config.model_name}")
     print(f"  Temperature: {config.temperature}")
@@ -226,21 +223,20 @@ def cmd_config_delete_provider():
 
 
 def cmd_config_list_agents():
-    """List all agent configurations"""
-    print_header("Agent 設定")
-    configs = list_agent_configs()
+    """Show active single model configuration (default)."""
+    print_header("單一模型設定 (default)")
+    config = get_agent_config("default", use_default=False)
     
-    if not configs:
+    if not config:
         print("\n  (尚無設定)")
         return
     
-    for config in configs:
-        print_agent_config(config)
+    print_agent_config(config)
 
 
 def cmd_config_set_agent():
-    """Configure a specific agent"""
-    print_header("設定 Agent")
+    """Configure the single runtime model (default)."""
+    print_header("設定單一模型 (default)")
     
     # List available providers
     providers = list_providers()
@@ -252,11 +248,7 @@ def cmd_config_set_agent():
     for i, provider in enumerate(providers, 1):
         print(f"  {i}. {provider.provider_id} ({provider.name})")
     
-    # Get agent name
-    agent_name = input("\nAgent 名稱 (例如: main, philosopher, marketing): ").strip()
-    if not agent_name:
-        print("錯誤: Agent 名稱不可為空")
-        return
+    config_key = "default"
     
     # Get provider
     choice = input("選擇提供者編號 (或輸入 ID): ").strip()
@@ -288,46 +280,35 @@ def cmd_config_set_agent():
         return
     
     config = AgentModelConfig(
-        agent_name=agent_name,
+        agent_name=config_key,
         provider_id=provider_id,
         model_name=model_name,
         temperature=temperature,
     )
     
     if set_agent_config(config):
-        print(f"✓ 成功設定 Agent: {agent_name}")
+        print("✓ 成功設定單一模型配置: default")
     else:
         print(f"✗ 設定失敗")
 
 
 def cmd_config_delete_agent():
-    """Delete agent configuration"""
-    print_header("刪除 Agent 設定")
-    
-    configs = list_agent_configs()
-    if not configs:
+    """Delete single model configuration (default)."""
+    print_header("刪除單一模型設定 (default)")
+
+    config = get_agent_config("default", use_default=False)
+    if not config:
         print("\n  (尚無設定)")
         return
-    
-    print("\n已設定的 Agents:")
-    for i, config in enumerate(configs, 1):
-        print(f"  {i}. {config.agent_name} ({config.model_name})")
-    
-    choice = input("\n選擇要刪除的 Agent 編號 (或輸入名稱): ").strip()
-    
-    # Try as number first
-    try:
-        idx = int(choice) - 1
-        if 0 <= idx < len(configs):
-            agent_name = configs[idx].agent_name
-        else:
-            print("錯誤: 無效的編號")
-            return
-    except ValueError:
-        agent_name = choice
-    
-    if delete_agent_config(agent_name):
-        print(f"✓ 成功刪除 Agent 設定: {agent_name}")
+
+    print_agent_config(config)
+    confirm = input("\n確定要刪除 default 配置嗎？(y/N): ").strip().lower()
+    if confirm not in {"y", "yes"}:
+        print("已取消")
+        return
+
+    if delete_agent_config("default"):
+        print("✓ 成功刪除單一模型設定: default")
     else:
         print(f"✗ 刪除失敗")
 
@@ -335,15 +316,15 @@ def cmd_config_delete_agent():
 def cmd_config_menu():
     """Display configuration menu"""
     while True:
-        print_header("Agent 設定管理")
+        print_header("配置管理")
         print("""
   1. 列出所有提供者
   2. 新增 OpenAI 相容 API 提供者
   3. 新增 GitHub Copilot 提供者
   4. 刪除提供者
-  5. 列出所有 Agent 設定
-  6. 設定 Agent
-  7. 刪除 Agent 設定
+  5. 顯示單一模型設定 (default)
+  6. 設定單一模型 (default)
+  7. 刪除單一模型設定 (default)
   0. 返回
         """)
         

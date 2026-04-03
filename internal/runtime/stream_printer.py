@@ -3,7 +3,7 @@ from collections import deque
 from typing import AsyncIterable
 
 # 可配置參數：基礎每字延遲（seconds）、backlog 尺度、最小因子
-BASE_DELAY = 0.1
+BASE_DELAY = 0.02
 BACKLOG_SCALE = 20.0
 MIN_FACTOR = 0.1
 
