@@ -17,6 +17,7 @@ import json
 import asyncio
 
 from internal.logger import logger
+from internal.paths import TIM_AGENT_SKILLS_DIR
 
 if TYPE_CHECKING:
     from pydantic_ai import Agent
@@ -24,6 +25,7 @@ if TYPE_CHECKING:
 
 SKILLS_DIR = Path(__file__).resolve().parent.parent / "skills"
 DEFAULT_EXTERNAL_SKILLS_DIRS = [
+    TIM_AGENT_SKILLS_DIR,
     Path.home() / ".agents" / "skills",
     Path.home() / ".claude" / "skills",
 ]

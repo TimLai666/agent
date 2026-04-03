@@ -8,11 +8,11 @@ from pydantic_ai import Agent
 
 from internal.cli import confirm
 from internal.logger import logger
+from internal.paths import TIM_AGENT_SANDBOX_DIR
 
 
 WORKSPACE_ROOT = Path.cwd().resolve()
-TIM_AGENT_ROOT = Path.home() / ".tim-agent"
-SANDBOX_ROOT = TIM_AGENT_ROOT / "sandbox"
+SANDBOX_ROOT = TIM_AGENT_SANDBOX_DIR
 
 
 def _ensure_sandbox_dir() -> Path:

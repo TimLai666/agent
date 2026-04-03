@@ -9,6 +9,9 @@ import json
 from typing import Optional
 import threading
 import webbrowser
+import shutil
+import tempfile
+import zipfile
 
 from internal.services.config_db import (
     AgentModelConfig,
@@ -31,6 +34,7 @@ from internal.services.config_db import (
     delete_remote_mcp,
 )
 from internal.logger import logger
+from internal.paths import TIM_AGENT_SKILLS_DIR
 from internal.services.github_oauth import authenticate_github
 from internal.services.agent_discovery import discover_agents
 
@@ -47,6 +51,111 @@ _webui_url: str | None = None
 
 DEFAULT_WEBUI_HOST = "127.0.0.1"
 DEFAULT_WEBUI_PORT = 5000
+USER_SKILLS_DIR = TIM_AGENT_SKILLS_DIR
+
+
+def _ensure_user_skills_dir() -> Path:
+    USER_SKILLS_DIR.mkdir(parents=True, exist_ok=True)
+    return USER_SKILLS_DIR
+
+
+def _is_safe_child_name(name: str) -> bool:
+    if not name or name in {".", ".."}:
+        return False
+    return Path(name).name == name
+
+
+def _parse_skill_metadata(skill_dir: Path) -> dict[str, str]:
+    skill_file = skill_dir / "SKILL.md"
+    if not skill_file.exists():
+        return {"skill_name": skill_dir.name, "description": ""}
+
+    try:
+        text = skill_file.read_text(encoding="utf-8")
+    except Exception:
+        return {"skill_name": skill_dir.name, "description": ""}
+
+    frontmatter = ""
+    if text.startswith("---"):
+        parts = text.split("---", 2)
+        if len(parts) >= 3:
+            frontmatter = parts[1]
+
+    skill_name = skill_dir.name
+    description = ""
+    for line in frontmatter.splitlines():
+        if line.startswith("name:"):
+            skill_name = line.split(":", 1)[1].strip().strip('"').strip("'") or skill_name
+        if line.startswith("description:"):
+            description = line.split(":", 1)[1].strip().strip('"').strip("'")
+
+    return {"skill_name": skill_name, "description": description}
+
+
+def _list_user_skills() -> list[dict[str, str]]:
+    skills_root = _ensure_user_skills_dir()
+    items: list[dict[str, str]] = []
+    for child in sorted(skills_root.iterdir(), key=lambda p: p.name.lower()):
+        if not child.is_dir():
+            continue
+        if not (child / "SKILL.md").exists():
+            continue
+        metadata = _parse_skill_metadata(child)
+        items.append(
+            {
+                "dir_name": child.name,
+                "skill_name": metadata["skill_name"],
+                "description": metadata["description"],
+            }
+        )
+    return items
+
+
+def _safe_extract_zip(zip_path: Path, extract_to: Path) -> None:
+    with zipfile.ZipFile(zip_path) as archive:
+        for member in archive.infolist():
+            member_path = Path(member.filename)
+            if member_path.is_absolute() or ".." in member_path.parts:
+                raise ValueError(f"Zip 內容包含不安全路徑: {member.filename}")
+        archive.extractall(extract_to)
+
+
+def _discover_skill_dirs(root_dir: Path) -> list[Path]:
+    candidates = {p.parent for p in root_dir.rglob("SKILL.md") if p.is_file()}
+    return sorted(candidates, key=lambda p: str(p).lower())
+
+
+def _install_skills_from_zip(zip_path: Path) -> dict[str, object]:
+    skills_root = _ensure_user_skills_dir()
+    with tempfile.TemporaryDirectory(prefix="tim-agent-skill-upload-") as tmp_dir:
+        extract_root = Path(tmp_dir)
+        _safe_extract_zip(zip_path, extract_root)
+        skill_dirs = _discover_skill_dirs(extract_root)
+
+        if not skill_dirs:
+            raise ValueError("zip 內找不到任何 SKILL.md，無法安裝")
+
+        replaced: list[str] = []
+        added: list[str] = []
+
+        for src_dir in skill_dirs:
+            target_name = src_dir.name
+            if not _is_safe_child_name(target_name):
+                raise ValueError(f"無效的 skill 目錄名稱: {target_name}")
+
+            target_dir = skills_root / target_name
+            if target_dir.exists():
+                shutil.rmtree(target_dir)
+                replaced.append(target_name)
+            else:
+                added.append(target_name)
+
+            shutil.copytree(src_dir, target_dir)
+
+    return {
+        "added": sorted(set(added)),
+        "replaced": sorted(set(replaced)),
+    }
 
 
 def get_available_models(provider_id: str) -> list[str]:
@@ -553,6 +662,77 @@ def api_delete_remote_mcp(remote_mcp_id: str):
         return jsonify({"success": True, "message": "遠端 MCP 刪除成功"})
     else:
         return jsonify({"success": False, "error": "遠端 MCP 刪除失敗"}), 400
+
+
+@app.route('/api/skills', methods=['GET'])
+def api_list_skills():
+    """List user-managed skills under ~/.tim-agent/skills"""
+    try:
+        return jsonify({
+            "skills_root": str(_ensure_user_skills_dir()),
+            "skills": _list_user_skills(),
+        })
+    except Exception as e:
+        logger.exception(f"Failed to list skills: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/api/skills/<skill_dir_name>', methods=['DELETE'])
+def api_delete_skill(skill_dir_name: str):
+    """Delete one skill package by directory name from ~/.tim-agent/skills"""
+    if not _is_safe_child_name(skill_dir_name):
+        return jsonify({"success": False, "error": "無效的 skill 名稱"}), 400
+
+    target_dir = _ensure_user_skills_dir() / skill_dir_name
+    if not target_dir.exists() or not target_dir.is_dir():
+        return jsonify({"success": False, "error": "找不到指定 skill"}), 404
+
+    try:
+        shutil.rmtree(target_dir)
+        return jsonify({"success": True, "message": f"已刪除 skill: {skill_dir_name}"})
+    except Exception as e:
+        logger.exception(f"Failed to delete skill {skill_dir_name}: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/api/skills/upload', methods=['POST'])
+def api_upload_skills_zip():
+    """Upload zip and install skill packages into ~/.tim-agent/skills"""
+    upload = request.files.get("file")
+    if upload is None:
+        return jsonify({"success": False, "error": "缺少上傳檔案 file"}), 400
+
+    filename = (upload.filename or "").lower()
+    if not filename.endswith(".zip"):
+        return jsonify({"success": False, "error": "僅支援 .zip 檔案"}), 400
+
+    with tempfile.NamedTemporaryFile(prefix="tim-agent-upload-", suffix=".zip", delete=False) as tmp_file:
+        tmp_path = Path(tmp_file.name)
+
+    try:
+        upload.save(str(tmp_path))
+        result = _install_skills_from_zip(tmp_path)
+        return jsonify(
+            {
+                "success": True,
+                "message": "Skills 安裝完成",
+                "skills_root": str(_ensure_user_skills_dir()),
+                "added": result["added"],
+                "replaced": result["replaced"],
+            }
+        )
+    except zipfile.BadZipFile:
+        return jsonify({"success": False, "error": "無法解析 zip，檔案可能已損壞"}), 400
+    except ValueError as e:
+        return jsonify({"success": False, "error": str(e)}), 400
+    except Exception as e:
+        logger.exception(f"Failed to upload skills zip: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+    finally:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except Exception:
+            pass
 
 
 @app.route('/api/github/authenticate', methods=['POST'])

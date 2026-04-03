@@ -9,9 +9,10 @@ from pathlib import Path
 from typing import Optional
 
 from internal.logger import logger
+from internal.paths import TIM_AGENT_CONFIG_DIR
 
 # Database location
-DB_PATH = Path.home() / ".tim-agent" / "config" / "config.db"
+DB_PATH = TIM_AGENT_CONFIG_DIR / "config.db"
 
 
 @dataclass

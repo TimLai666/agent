@@ -4,9 +4,9 @@ Run this script to update existing database schema.
 """
 
 import sqlite3
-from pathlib import Path
+from internal.paths import TIM_AGENT_CONFIG_DIR
 
-DB_PATH = Path.home() / ".tim-agent" / "config" / "config.db"
+DB_PATH = TIM_AGENT_CONFIG_DIR / "config.db"
 
 
 def migrate_database():
