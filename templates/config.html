@@ -2214,7 +2214,10 @@
 
                 if (result.success) {
                     await loadSkills();
-                    alert('✅ Skill 刪除成功！');
+                    const reloadMsg = result.reload && result.reload.message
+                        ? `\n${result.reload.success ? '🔄' : '⚠️'} ${result.reload.message}`
+                        : '';
+                    alert('✅ Skill 刪除成功！' + reloadMsg);
                 } else {
                     alert('❌ ' + (result.error || '刪除失敗'));
                 }
@@ -2250,7 +2253,10 @@
                         await loadSkills();
                         const addedCount = (result.added || []).length;
                         const replacedCount = (result.replaced || []).length;
-                        alert(`✅ 安裝完成！新增 ${addedCount} 個，替換 ${replacedCount} 個 skills。`);
+                        const reloadMsg = result.reload && result.reload.message
+                            ? `\n${result.reload.success ? '🔄' : '⚠️'} ${result.reload.message}`
+                            : '';
+                        alert(`✅ 安裝完成！新增 ${addedCount} 個，替換 ${replacedCount} 個 skills。${reloadMsg}`);
                     } else {
                         alert('❌ ' + (result.error || '上傳失敗'));
                     }

@@ -6,7 +6,7 @@ Provides a browser-based interface for managing providers and agent configuratio
 from flask import Flask, render_template, request, jsonify
 from pathlib import Path
 import json
-from typing import Optional
+from typing import Optional, Callable
 import threading
 import webbrowser
 import shutil
@@ -48,10 +48,48 @@ app = Flask(
 # Background web UI thread handles
 _webui_thread: threading.Thread | None = None
 _webui_url: str | None = None
+_skills_reload_handler: Callable[[], dict[str, object]] | None = None
 
 DEFAULT_WEBUI_HOST = "127.0.0.1"
 DEFAULT_WEBUI_PORT = 5000
 USER_SKILLS_DIR = TIM_AGENT_SKILLS_DIR
+
+
+def register_skills_reload_handler(handler: Callable[[], dict[str, object]] | None) -> None:
+    """Register a callback used to reload in-memory skills after WebUI file changes."""
+    global _skills_reload_handler
+    _skills_reload_handler = handler
+
+
+def _trigger_skills_reload() -> dict[str, object]:
+    """Try to reload runtime skills, returning status metadata for API responses."""
+    if _skills_reload_handler is None:
+        return {
+            "attempted": False,
+            "success": False,
+            "message": "沒有可用的執行中 Agent，請手動執行 /skills reload",
+        }
+
+    try:
+        result = _skills_reload_handler()
+        if isinstance(result, dict):
+            return {
+                "attempted": True,
+                "success": bool(result.get("success", True)),
+                **result,
+            }
+        return {
+            "attempted": True,
+            "success": True,
+            "message": "Skills 已自動重新載入",
+        }
+    except Exception as e:
+        logger.exception(f"Failed to auto reload skills: {e}")
+        return {
+            "attempted": True,
+            "success": False,
+            "message": f"自動 reload 失敗: {e}",
+        }
 
 
 def _ensure_user_skills_dir() -> Path:
@@ -689,7 +727,14 @@ def api_delete_skill(skill_dir_name: str):
 
     try:
         shutil.rmtree(target_dir)
-        return jsonify({"success": True, "message": f"已刪除 skill: {skill_dir_name}"})
+        reload_result = _trigger_skills_reload()
+        return jsonify(
+            {
+                "success": True,
+                "message": f"已刪除 skill: {skill_dir_name}",
+                "reload": reload_result,
+            }
+        )
     except Exception as e:
         logger.exception(f"Failed to delete skill {skill_dir_name}: {e}")
         return jsonify({"success": False, "error": str(e)}), 500
@@ -712,6 +757,7 @@ def api_upload_skills_zip():
     try:
         upload.save(str(tmp_path))
         result = _install_skills_from_zip(tmp_path)
+        reload_result = _trigger_skills_reload()
         return jsonify(
             {
                 "success": True,
@@ -719,6 +765,7 @@ def api_upload_skills_zip():
                 "skills_root": str(_ensure_user_skills_dir()),
                 "added": result["added"],
                 "replaced": result["replaced"],
+                "reload": reload_result,
             }
         )
     except zipfile.BadZipFile:

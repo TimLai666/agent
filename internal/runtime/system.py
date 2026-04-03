@@ -10,6 +10,7 @@ from internal.runtime.stream_printer import stream_print
 from internal.agents import MainAgent
 from internal.logger import logger
 from internal.services.agent_factory import load_base_config
+from internal.services import config_webui
 from internal.services.voice_manager import VoiceManager
 from internal.command_handler import CommandHandler
 from internal.compaction import (
@@ -128,6 +129,20 @@ async def run_cli(
             skill_root_dirs=skill_root_dirs,
         )
 
+        def reload_skills_from_webui() -> dict[str, object]:
+            from internal.skills_loader import load_skill_registry
+
+            root_dirs = getattr(main_agent, "skill_root_dirs", None)
+            main_agent.skills = load_skill_registry(root_dirs=root_dirs)
+            count = len(main_agent.skills.list_names())
+            return {
+                "success": True,
+                "count": count,
+                "message": f"Skills 已自動重新載入（{count} 個）",
+            }
+
+        config_webui.register_skills_reload_handler(reload_skills_from_webui)
+
         def emit_tool_event(event: dict) -> None:
             try:
                 line = _format_tool_line(event)
@@ -151,26 +166,27 @@ async def run_cli(
             output_callback=print,
         )
 
-        async with AsyncExitStack() as stack:
-            # MCP servers are run by the main agent (contains browser tools)
-            mcp_started = False
-            try:
-                await stack.enter_async_context(main_agent.agent.run_mcp_servers())
-            except Exception as exc:  # pragma: no cover - best effort when MCP fails
-                reason = _summarize_exception(exc)
-                logger.warning(
-                    "MCP browser tools failed to start; continuing without them. Root cause: %s",
-                    reason,
-                )
-                # Keep CLI behavior consistent with GUI: remove unavailable MCP toolsets
-                # so the agent won't repeatedly attempt calls to broken MCP servers.
+        try:
+            async with AsyncExitStack() as stack:
+                # MCP servers are run by the main agent (contains browser tools)
+                mcp_started = False
                 try:
-                    main_agent.agent._user_toolsets = []
-                    logger.info("Cleared MCP toolsets from agent to prevent tool call failures")
-                except Exception as clear_exc:
-                    logger.debug("Failed to clear MCP toolsets in CLI", exc_info=clear_exc)
-            else:
-                mcp_started = True
+                    await stack.enter_async_context(main_agent.agent.run_mcp_servers())
+                except Exception as exc:  # pragma: no cover - best effort when MCP fails
+                    reason = _summarize_exception(exc)
+                    logger.warning(
+                        "MCP browser tools failed to start; continuing without them. Root cause: %s",
+                        reason,
+                    )
+                    # Keep CLI behavior consistent with GUI: remove unavailable MCP toolsets
+                    # so the agent won't repeatedly attempt calls to broken MCP servers.
+                    try:
+                        main_agent.agent._user_toolsets = []
+                        logger.info("Cleared MCP toolsets from agent to prevent tool call failures")
+                    except Exception as clear_exc:
+                        logger.debug("Failed to clear MCP toolsets in CLI", exc_info=clear_exc)
+                else:
+                    mcp_started = True
 
             ready_msg = "\nAgent ready. Type /help for commands."
             if not mcp_started:
@@ -178,46 +194,46 @@ async def run_cli(
                     "\nAgent ready. Type /help for commands."
                     "\nNote: install Playwright via `uv run playwright install` if you want browser tooling."
                 )
-            print(ready_msg)
-            if prompt_once is not None:
-                user_input = prompt_once.strip()
-                if not user_input:
+                print(ready_msg)
+                if prompt_once is not None:
+                    user_input = prompt_once.strip()
+                    if not user_input:
+                        return
+                    await stream_print(main_agent.run_stream(user_input, message_history=chat_history))
                     return
-                await stream_print(main_agent.run_stream(user_input, message_history=chat_history))
-                return
 
-            async def update_history() -> None:
-                nonlocal chat_history
-                try:
-                    if getattr(main_agent, "_last_messages", None):
-                        conversation_state.fullMessages = (
-                            main_agent._last_messages if main_agent._last_messages is not None else []
-                        )
-                        conversation_state.totalTokens = recalc_total_tokens(conversation_state.fullMessages)
-                        updated_state = await compact_coordinator.maybeCompact(conversation_state)
-                        conversation_state.fullMessages = updated_state.fullMessages
-                        conversation_state.recentMessages = updated_state.recentMessages
-                        conversation_state.compressedSummary = updated_state.compressedSummary
-                        conversation_state.totalTokens = updated_state.totalTokens
-                        conversation_state.lastCompactedMessageId = updated_state.lastCompactedMessageId
-                        chat_history = updated_state.fullMessages
-                    else:
+                async def update_history() -> None:
+                    nonlocal chat_history
+                    try:
+                        if getattr(main_agent, "_last_messages", None):
+                            conversation_state.fullMessages = (
+                                main_agent._last_messages if main_agent._last_messages is not None else []
+                            )
+                            conversation_state.totalTokens = recalc_total_tokens(conversation_state.fullMessages)
+                            updated_state = await compact_coordinator.maybeCompact(conversation_state)
+                            conversation_state.fullMessages = updated_state.fullMessages
+                            conversation_state.recentMessages = updated_state.recentMessages
+                            conversation_state.compressedSummary = updated_state.compressedSummary
+                            conversation_state.totalTokens = updated_state.totalTokens
+                            conversation_state.lastCompactedMessageId = updated_state.lastCompactedMessageId
+                            chat_history = updated_state.fullMessages
+                        else:
+                            chat_history = None
+                    except Exception:
                         chat_history = None
-                except Exception:
-                    chat_history = None
 
-            async def force_compact() -> tuple[bool, int, int]:
-                nonlocal chat_history
-                base_messages = chat_history or getattr(main_agent, "_last_messages", None) or []
-                if not base_messages:
-                    return False, 0, 0
+                async def force_compact() -> tuple[bool, int, int]:
+                    nonlocal chat_history
+                    base_messages = chat_history or getattr(main_agent, "_last_messages", None) or []
+                    if not base_messages:
+                        return False, 0, 0
 
-                conversation_state.fullMessages = list(base_messages)
-                before_count = len(conversation_state.fullMessages)
-                conversation_state.totalTokens = max(
-                    recalc_total_tokens(conversation_state.fullMessages),
-                    MAX_CONTEXT_TOKENS,
-                )
+                    conversation_state.fullMessages = list(base_messages)
+                    before_count = len(conversation_state.fullMessages)
+                    conversation_state.totalTokens = max(
+                        recalc_total_tokens(conversation_state.fullMessages),
+                        MAX_CONTEXT_TOKENS,
+                    )
                 updated_state = await compact_coordinator.maybeCompact(conversation_state)
                 conversation_state.fullMessages = updated_state.fullMessages
                 conversation_state.recentMessages = updated_state.recentMessages
@@ -316,3 +332,5 @@ async def run_cli(
                 except Exception as exc:
                     logger.error("Error: " + str(exc))
                     print("\nError: " + str(exc) + "\n")
+        finally:
+            config_webui.register_skills_reload_handler(None)

@@ -72,6 +72,10 @@ class AgentRuntime(QThread):
                     asyncio.gather(*pending, return_exceptions=True)
                 )
         finally:
+            try:
+                config_webui.register_skills_reload_handler(None)
+            except Exception:
+                pass
             loop.close()
 
     @staticmethod
@@ -106,6 +110,23 @@ class AgentRuntime(QThread):
                 self.http_client,
                 skill_root_dirs=self.skill_root_dirs,
             )
+
+            def _reload_skills_from_webui() -> dict[str, object]:
+                if self.main_agent is None:
+                    return {"success": False, "message": "Agent 尚未就緒"}
+                from internal.skills_loader import load_skill_registry
+
+                root_dirs = getattr(self.main_agent, "skill_root_dirs", None)
+                self.main_agent.skills = load_skill_registry(root_dirs=root_dirs)
+                count = len(self.main_agent.skills.list_names())
+                return {
+                    "success": True,
+                    "count": count,
+                    "message": f"Skills 已自動重新載入（{count} 個）",
+                }
+
+            config_webui.register_skills_reload_handler(_reload_skills_from_webui)
+
             self.main_agent.set_tool_event_callback(self._emit_tool_event)
             self._compact_coordinator = CompactCoordinator(runner=self.main_agent.run_compaction_subagent)
             self.mcp_stack = AsyncExitStack()
