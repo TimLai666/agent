@@ -2345,6 +2345,15 @@ class MainWindow(QMainWindow):
         self.speech_bubble.setFixedSize(140, 160)
         self.speech_bubble.show()  # 初始顯示
 
+        # Debounce speech bubble refresh to avoid flicker when streaming many chunks.
+        self._pending_bubble_text = ""
+        self._bubble_update_timer = QTimer(self)
+        self._bubble_update_timer.setSingleShot(True)
+        self._bubble_update_timer.timeout.connect(self._flush_bubble_update)
+        self._mask_update_timer = QTimer(self)
+        self._mask_update_timer.setSingleShot(True)
+        self._mask_update_timer.timeout.connect(self._update_window_mask)
+
         # 創建輸入區域
         self.input_container = QWidget(self)
         self.input_container.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
@@ -2706,12 +2715,17 @@ class MainWindow(QMainWindow):
 
     def update_speech_bubble(self, text):
         """更新對話框內容，輸出框疊到球的上方一半"""
-        self.speech_bubble.set_content(text)
+        self._pending_bubble_text = text or ""
+        if not self._bubble_update_timer.isActive():
+            self._bubble_update_timer.start(40)
+
+    def _flush_bubble_update(self):
+        self.speech_bubble.set_content(self._pending_bubble_text)
 
         # 延遲處理事件，避免阻塞主線程
         QTimer.singleShot(0, self._update_bubble_geometry)
-        # 再次延遲更新遮罩，確保氣泡完全渲染後更新
-        QTimer.singleShot(100, self._update_window_mask)
+        # Merge mask refresh requests instead of stacking many singleShots.
+        self._mask_update_timer.start(120)
 
     def start_agent_animation(self):
         """啟動 agent 運行動畫"""
@@ -2759,7 +2773,8 @@ class MainWindow(QMainWindow):
 
             # 設置講話框位置
             self.speech_bubble.move(bubble_x, bubble_y)
-            self.speech_bubble.show()
+            if not self.speech_bubble.isVisible():
+                self.speech_bubble.show()
 
             # 更新輸入容器位置（固定在視窗底部）
             if self.input_container.isVisible():
