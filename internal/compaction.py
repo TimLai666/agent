@@ -14,6 +14,7 @@ MessageLike = ModelRequest | ModelResponse
 MAX_CONTEXT_TOKENS = 128000
 COMPACT_TRIGGER_RATIO = 0.75
 RECENT_KEEP_COUNT = 8
+TOOL_OUTPUT_RECENT_KEEP = 6
 
 NO_TOOLS_PREAMBLE = """CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.
 
@@ -384,9 +385,14 @@ class CompactCoordinator:
             get_compaction_prompt(job.mode),
             FALLBACK_COMPACT_PROMPT,
         ]
+        last_error: Exception | None = None
 
         for prompt in attempts:
-            raw_output = await self._runner(job, prompt)
+            try:
+                raw_output = await self._runner(job, prompt)
+            except Exception as exc:
+                last_error = exc
+                continue
             formatted = format_compact_summary(raw_output)
             if formatted:
                 return CompactSummary(
@@ -397,7 +403,22 @@ class CompactCoordinator:
                     createdAt=datetime.now().astimezone().isoformat(),
                 )
 
+        if last_error is not None:
+            raise RuntimeError("Compaction failed: runner error") from last_error
         raise RuntimeError("Compaction failed: empty formatted summary")
+
+    def _trim_distant_tool_outputs(self, messages: list[Message]) -> list[Message]:
+        tool_positions = [idx for idx, msg in enumerate(messages) if msg.role == "tool"]
+        if len(tool_positions) <= TOOL_OUTPUT_RECENT_KEEP:
+            return messages
+
+        keep_tool_positions = set(tool_positions[-TOOL_OUTPUT_RECENT_KEEP:])
+        trimmed: list[Message] = []
+        for idx, msg in enumerate(messages):
+            if msg.role == "tool" and idx not in keep_tool_positions:
+                continue
+            trimmed.append(msg)
+        return trimmed
 
     def formatCompactSummary(self, rawOutput: str) -> str:
         return format_compact_summary(rawOutput)
@@ -431,7 +452,22 @@ class CompactCoordinator:
             suppressFollowUpQuestions=True,
         )
 
-        summary = await self.runCompact(job)
+        try:
+            summary = await self.runCompact(job)
+        except Exception:
+            trimmed_messages = self._trim_distant_tool_outputs(messages_to_compress)
+            if len(trimmed_messages) == len(messages_to_compress):
+                raise
+
+            retry_job = CompactJob(
+                jobId=f"{job.jobId}-trimmed",
+                mode=job.mode,
+                oldSummary=job.oldSummary,
+                messagesToCompress=trimmed_messages,
+                preservedRecentMessages=job.preservedRecentMessages,
+                suppressFollowUpQuestions=job.suppressFollowUpQuestions,
+            )
+            summary = await self.runCompact(retry_job)
         continuation_message = self.buildContinuationMessage(
             {
                 "summary": summary.formattedSummary,
