@@ -64,6 +64,34 @@ uv run main.py
 uv run main.py --gui
 ```
 
+**程式化模式（import 即用）**：
+```python
+import asyncio
+
+from agent import Agent, OpenAICompatibleModel
+
+
+async def main() -> None:
+    async with Agent(
+        system_name="MyAssistant",
+        system_prompt_append="你是企業內部助理，回答要精簡。",
+        skill_root_dirs=["./skills"],
+        model=OpenAICompatibleModel(
+            model_name="gpt-4.1-mini",
+            base_url="https://api.openai.com",
+            api_key="YOUR_API_KEY",
+            temperature=0.2,
+        ),
+        # mcp_servers=[] 可完全停用 MCP
+        # use_default_tools=False 可停用預設 tools，僅用 extra_tools
+    ) as agent:
+        reply = await agent.run("請幫我整理今天的待辦")
+        print(reply)
+
+
+asyncio.run(main())
+```
+
 **配置模式**：
 ```sh
 uv run main.py --config

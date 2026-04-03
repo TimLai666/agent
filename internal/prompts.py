@@ -76,6 +76,7 @@ def build_combined_system_prompt(
     base_prompt: str | None = None,
     additional_prompts: list[str] | None = None,
     separator: str = "\n\n---\n\n",
+    variables: dict[str, str] | None = None,
 ) -> str:
     """組合多個 system prompts。
 
@@ -93,12 +94,12 @@ def build_combined_system_prompt(
     if base_prompt is None:
         base_prompt = _build_system_prompt()
     if base_prompt:
-        parts.append(_process_variables(base_prompt))
+        parts.append(_process_variables(base_prompt, variables=variables))
 
     # 添加額外的 prompts（進行變數代換）
     if additional_prompts:
         for prompt_name in additional_prompts:
-            prompt = get_system_prompt_processed(prompt_name)
+            prompt = get_system_prompt_processed(prompt_name, variables=variables)
             if prompt:
                 parts.append(prompt)
 

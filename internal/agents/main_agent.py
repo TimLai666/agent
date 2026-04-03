@@ -3,6 +3,7 @@ import inspect
 import re
 import sys
 import uuid
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 from typing import Any, cast
@@ -64,6 +65,9 @@ class MainAgent:
         additional_prompts: list[str] | None = None,
         auto_load_all: bool = True,
         model_name: str | None = None,
+        system_name: str | None = None,
+        system_prompt_override: str | None = None,
+        system_prompt_append: str | None = None,
     ) -> str:
         """建立增強的 system prompt。
 
@@ -75,6 +79,8 @@ class MainAgent:
         Returns:
             組合後的 system prompt
         """
+        variables = {"SYSTEM_NAME": system_name} if system_name else None
+
         if auto_load_all and additional_prompts is None:
             additional_prompts = list_available_system_prompts()
             logger.info("Auto-loading %d system prompts", len(additional_prompts))
@@ -94,15 +100,24 @@ class MainAgent:
 **IMPORTANT**: Each user turn includes an auto-injected local timestamp. Use that timestamp as the primary time reference for the current reply.
 """
 
-        base_with_time = SYSTEM_PROMPT + "\n\n" + runtime_info
+        base_prompt = (system_prompt_override or SYSTEM_PROMPT).strip()
+        base_with_time = base_prompt + "\n\n" + runtime_info
+        if system_prompt_append:
+            base_with_time = base_with_time + "\n\n" + system_prompt_append.strip()
 
         if not additional_prompts:
-            return base_with_time
+            return build_combined_system_prompt(
+                base_prompt=base_with_time,
+                additional_prompts=None,
+                separator="\n\n---\n\n",
+                variables=variables,
+            )
 
         return build_combined_system_prompt(
             base_prompt=base_with_time,
             additional_prompts=additional_prompts,
             separator="\n\n---\n\n",
+            variables=variables,
         )
 
     @classmethod
@@ -114,6 +129,16 @@ class MainAgent:
         skill_root_dirs: list[Path] | None = None,
         additional_system_prompts: list[str] | None = None,
         auto_load_all_prompts: bool = True,
+        system_name: str | None = None,
+        system_prompt_override: str | None = None,
+        system_prompt_append: str | None = None,
+        model_override: Any | None = None,
+        model_temperature: float | None = None,
+        mcp_servers_override: list[Any] | None = None,
+        use_default_tools: bool = True,
+        extra_tools: list[Callable[..., Any]] | None = None,
+        include_skill_tool: bool = True,
+        include_subagent_tools: bool = True,
     ) -> "MainAgent":
         # Load skills first
         if skills is None:
@@ -132,7 +157,12 @@ class MainAgent:
             temperature=0.5,
         )
         config = load_agent_config_chain([cls.ENV_PREFIX], main_defaults)
-        model = create_openai_model(config, http_client)
+        if model_override is not None:
+            model = model_override
+            if model_temperature is None:
+                model_temperature = base_config.temperature
+        else:
+            model = create_openai_model(config, http_client)
         active_model_name = (
             getattr(model, "model_name", None)
             or getattr(model, "model", None)
@@ -143,13 +173,20 @@ class MainAgent:
             include_environment_context=False,
         )
 
-        mcp_servers = get_all_mcp_servers()
+        mcp_servers = (
+            get_all_mcp_servers()
+            if mcp_servers_override is None
+            else list(mcp_servers_override)
+        )
 
         # 建立增強的 system prompt（預設自動載入所有可用的 prompts）
         enhanced_system_prompt = cls._build_enhanced_system_prompt(
             additional_prompts=additional_system_prompts,
             auto_load_all=auto_load_all_prompts,
             model_name=active_model_name,
+            system_name=system_name,
+            system_prompt_override=system_prompt_override,
+            system_prompt_append=system_prompt_append,
         )
 
         agent: Agent[None, str] = Agent(
@@ -157,7 +194,7 @@ class MainAgent:
             system_prompt=enhanced_system_prompt,
             instructions=instructions,
             tools=[],
-            model_settings={"temperature": config.temperature},
+            model_settings={"temperature": model_temperature if model_temperature is not None else config.temperature},
             toolsets=mcp_servers,
         )
 
@@ -269,11 +306,17 @@ class MainAgent:
         try:
             # Register skill tool inside wrapped phase so skill activations
             # also emit start/end/error events for GUI/CLI display.
-            from internal.tools.skill_tools import register_skill_tool
+            if include_skill_tool:
+                from internal.tools.skill_tools import register_skill_tool
 
-            register_skill_tool(agent, skills)
-            add_all_tools(agent)
-            main_agent._register_subagent_tools()
+                register_skill_tool(agent, skills)
+            if use_default_tools:
+                add_all_tools(agent, extra_tools=extra_tools)
+            elif extra_tools:
+                for tool in extra_tools:
+                    agent.tool_plain(tool)
+            if include_subagent_tools:
+                main_agent._register_subagent_tools()
             logger.info("Registered tools on MainAgent")
         except Exception:
             logger.exception(
