@@ -23,11 +23,6 @@ def add_file_tools(agent: Agent) -> None:
     file_tools_manager: FileTools = FileTools()
 
     @agent.tool_plain
-    def list_files_in_directory(dir: str) -> str:
-        """List all files in the specified directory."""
-        return file_tools_manager.list_files_in_directory(dir)
-
-    @agent.tool_plain
     def find_files_with_fragment(fragment_regx: str, files: list[str]) -> list[str]:
         """Find files containing a specific fragment in their names.
 
@@ -157,16 +152,6 @@ def add_file_tools(agent: Agent) -> None:
         )
 
     @agent.tool_plain
-    def rename_file_or_directory(path: str, new_name: str) -> str:
-        """Rename a file or directory. new_name should not include the path."""
-        return file_tools_manager.rename_file_or_directory(path, new_name)
-
-    @agent.tool_plain
-    def make_new_directory(dir: str) -> str:
-        """Create a new empty directory."""
-        return file_tools_manager.make_new_directory(dir)
-
-    @agent.tool_plain
     def create_new_file(file_path: str, content: str) -> str:
         """Create a new file with the content."""
         return file_tools_manager.create_new_file(file_path, content)
@@ -177,17 +162,6 @@ class FileTools:
 
     def __init__(self) -> None:
         self.base_path: str = os.getcwd()
-
-    def list_files_in_directory(self, dir: str) -> str:
-        logger.info(f"Listing files in directory: {dir}")
-        try:
-            files: list[str] = os.listdir(dir)
-            return ", ".join(files)
-        except FileNotFoundError:
-            return f"Directory '{dir}' not found."
-        except Exception as e:
-            logger.error(f"Error listing files in directory {dir}: {str(e)}")
-            return str(e)
 
     def find_files_with_fragment(
         self, fragment_regx: str, files: list[str]
@@ -700,43 +674,6 @@ class FileTools:
             logger.error(
                 f"Error deleting lines in file {file_path}: {str(e)}"
             )
-            return str(e)
-
-    def rename_file_or_directory(self, path: str, new_name: str) -> str:
-        try:
-            if not confirm(
-                message=f"Agent wants to rename '{path}' to '{new_name}', allow?",
-                default_choice="Y",
-            ):
-                logger.info(f"User denied file rename: {path} -> {new_name}")
-                raise PermissionError("❌ User denied permission to rename this file. The operation was cancelled.")
-            logger.info(f"Renaming '{path}' to '{new_name}'")
-            if not os.path.exists(path):
-                raise FileNotFoundError(f"File '{path}' does not exist.")
-            new_file_path = os.path.join(os.path.dirname(path), new_name)
-            os.rename(path, new_file_path)
-            return f"File renamed to '{new_file_path}' successfully."
-        except FileNotFoundError:
-            return f"File '{path}' not found."
-        except Exception as e:
-            logger.error(f"Error renaming file {path}: {str(e)}")
-            return str(e)
-
-    def make_new_directory(self, dir: str) -> str:
-        try:
-            if not confirm(
-                message=f"Agent wants to create a new directory '{dir}', allow?",
-                default_choice="Y",
-            ):
-                logger.info(f"User denied directory creation: {dir}")
-                raise PermissionError("❌ User denied permission to create this directory. The operation was cancelled.")
-            logger.info(f"Creating new directory: {dir}")
-            if os.path.exists(dir):
-                raise FileExistsError(f"Directory '{dir}' already exists.")
-            os.makedirs(dir, exist_ok=True)
-            return f"Directory '{dir}' created successfully."
-        except Exception as e:
-            logger.error(f"Error creating directory {dir}: {str(e)}")
             return str(e)
 
     def create_new_file(self, file_path: str, content: str) -> str:

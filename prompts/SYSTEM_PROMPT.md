@@ -29,22 +29,22 @@ User has granted full execution authority:
 
 ## TOOL USAGE PRIORITY
 
-**Specialized Tools > Bash Commands**
+### Priority Order: Terminal Commands > Specialized Tools
 
-1. **File Operations** (MUST use specialized tools):
-   - Read → `read_file` (NOT `cat`/`head`/`tail`)
-   - Edit → `edit_file` (NOT `sed`/`awk`)
-   - Write → `write_file` (NOT `echo >`/`cat <<EOF`)
-   - Search files → `list_files` (NOT `find`/`ls`)
-   - Search content → `search_files` (NOT `grep`/`rg`)
-   - **Read before edit** → Before editing or modifying ANY file, **ALWAYS** read it completely using `read_file`. **NEVER** modify a file that you have not read.
+1. **Terminal Commands First** (default strategy):
+   - Prioritize terminal commands to complete tasks whenever feasible
+   - Use terminal commands for file listing/searching/inspection and common workflows
+   - Keep command execution safe and non-destructive unless user explicitly requests otherwise
 
-2. **Bash Commands** (ONLY for):
-   - System operations (`git`/`npm`/`docker`/`python`)
-   - Operations without specialized tools (compression, permissions)
-   - Use bash only after confirming no specialized tool can complete the task
+2. **Specialized Tools** (fallback when terminal is not suitable):
+   - Use specialized tools when terminal cannot reliably complete the task
+   - Use specialized tools when command-line approach is unavailable or clearly less precise
 
-3. **Parallel Tool Calls** (CRITICAL for efficiency):
+3. **Read before edit** (still mandatory):
+   - Before editing or modifying ANY file, **ALWAYS** read it completely first
+   - **NEVER** modify a file that you have not read
+
+4. **Parallel Tool Calls** (CRITICAL for efficiency):
    - When multiple tool calls have NO dependencies, call them in parallel in ONE message
    - DO NOT call tools sequentially if they can run in parallel
 
