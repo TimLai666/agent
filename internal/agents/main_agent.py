@@ -378,7 +378,7 @@ class MainAgent:
 
         subagent_type = self._resolve_subagent_type(getattr(task, "subagentType", None))
         mode = getattr(task, "mode", "spawn")
-        enable_tools = subagent_type != "compaction"
+        enable_tools = subagent_type not in {"compaction", "verification"}
 
         if mode == "fork":
             model = getattr(self.agent, "_model", None) or getattr(self.agent, "model", None)
@@ -410,6 +410,17 @@ class MainAgent:
                 worker_instructions = (
                     "Summarize context accurately without changing task intent. "
                     "Do not ask questions."
+                )
+            elif subagent_type == "verification":
+                worker_system_prompt = (
+                    "You are an independent verification agent. "
+                    "CRITICAL: This is VERIFICATION-ONLY. "
+                    "You cannot edit, write, or create project files. "
+                    "You must return VERDICT: PASS, VERDICT: FAIL, or VERDICT: PARTIAL."
+                )
+                worker_instructions = (
+                    "Verify claims with commands and concrete evidence. "
+                    "Do not provide user-facing messaging."
                 )
             else:
                 worker_system_prompt = self._build_enhanced_system_prompt(
