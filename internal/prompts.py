@@ -266,7 +266,10 @@ def _find_git_root(start_dir: Path) -> Path | None:
 
 
 def load_local_instructions(start_dir: Path | None = None) -> list[str]:
-    base = start_dir or Path.cwd()
+    # 使用沙盒目錄作為 agent 的視角，不暴露真實 CWD
+    from internal.paths import TIM_AGENT_SANDBOX_DIR
+    
+    base = start_dir or TIM_AGENT_SANDBOX_DIR
     instructions: list[str] = []
     for filename in _LOCAL_INSTRUCTION_FILES:
         path = _find_upwards(base, filename)
@@ -283,13 +286,17 @@ def load_local_instructions(start_dir: Path | None = None) -> list[str]:
 
 
 def build_environment_context(start_dir: Path | None = None) -> str:
-    base = start_dir or Path.cwd()
+    # Agent 的工作目錄永遠是沙盒目錄，不暴露真實 CWD
+    from internal.paths import TIM_AGENT_SANDBOX_DIR
+    
+    agent_workspace = TIM_AGENT_SANDBOX_DIR
     home = Path.home()
     desktop = home / "Desktop"
-    git_root = _find_git_root(base)
+    # 使用沙盒目錄來檢查 git root（ agent 的視角）
+    git_root = _find_git_root(agent_workspace)
     lines = [
         "執行環境：",
-        f"- 工作目錄：{base}",
+        f"- 工作目錄：{agent_workspace}",
         f"- Home 目錄：{home}",
         f"- Desktop 目錄：{desktop}",
         f"- Git 專案：{'是' if git_root else '否'}",

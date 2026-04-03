@@ -74,10 +74,12 @@ class Agent:
 
     @staticmethod
     def _to_abs_path(raw_path: str | Path) -> Path:
+        from internal.paths import TIM_AGENT_SANDBOX_DIR
         path = Path(raw_path).expanduser()
         if path.is_absolute():
             return path.resolve()
-        return (Path.cwd() / path).resolve()
+        # 使用沙盒目錄作為 agent 的工作目錄，不暴露真實 CWD
+        return (TIM_AGENT_SANDBOX_DIR / path).resolve()
 
     @staticmethod
     def _summarize_exception(exc: Exception) -> str:

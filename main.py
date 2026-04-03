@@ -865,6 +865,9 @@ def _resolve_skill_root_dirs(raw_paths: list[str] | None) -> list[Path]:
     if not raw_paths:
         return []
 
+    # 使用沙盒目錄作為基準目錄，保持一致性
+    from internal.paths import TIM_AGENT_SANDBOX_DIR
+    
     resolved: list[Path] = []
     seen: set[str] = set()
 
@@ -875,7 +878,7 @@ def _resolve_skill_root_dirs(raw_paths: list[str] | None) -> list[Path]:
 
         path_obj = Path(text).expanduser()
         if not path_obj.is_absolute():
-            path_obj = (Path.cwd() / path_obj).resolve()
+            path_obj = (TIM_AGENT_SANDBOX_DIR / path_obj).resolve()
         else:
             path_obj = path_obj.resolve()
 

@@ -11,7 +11,9 @@ from internal.logger import logger
 from internal.paths import TIM_AGENT_SANDBOX_DIR
 
 
-WORKSPACE_ROOT = Path.cwd().resolve()
+# Agent workspace root - points to sandbox directory for isolation
+# Agent sees sandbox as its workspace root, real CWD is hidden
+AGENT_WORKSPACE_ROOT = TIM_AGENT_SANDBOX_DIR
 SANDBOX_ROOT = TIM_AGENT_SANDBOX_DIR
 
 
@@ -33,8 +35,8 @@ def _resolve_workspace_path(path_in_workspace: str) -> Path:
         raise ValueError("path_in_workspace cannot be empty.")
 
     raw = Path(path_in_workspace)
-    candidate = raw.resolve() if raw.is_absolute() else (WORKSPACE_ROOT / raw).resolve()
-    if candidate != WORKSPACE_ROOT and WORKSPACE_ROOT not in candidate.parents:
+    candidate = raw.resolve() if raw.is_absolute() else (AGENT_WORKSPACE_ROOT / raw).resolve()
+    if candidate != AGENT_WORKSPACE_ROOT and AGENT_WORKSPACE_ROOT not in candidate.parents:
         raise ValueError("Path escapes workspace root.")
     return candidate
 
@@ -62,7 +64,7 @@ def get_sandbox_info() -> str:
     sandbox = _ensure_sandbox_dir()
     return "\n".join(
         [
-            f"workspace_root: {WORKSPACE_ROOT}",
+            f"workspace_root: {AGENT_WORKSPACE_ROOT}",
             f"sandbox_root: {sandbox}",
             "note: run_terminal_command executes with sandbox as current working directory.",
         ]

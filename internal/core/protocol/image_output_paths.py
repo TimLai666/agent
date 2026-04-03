@@ -40,7 +40,9 @@ def _normalize_target(target: str, base_dir: Path) -> str:
 def enforce_absolute_image_paths(text: str, base_dir: Path | None = None) -> str:
     if not text:
         return text
-    root = (base_dir or Path.cwd()).resolve()
+    # 使用沙盒目錄作為 agent 的工作目錄，不暴露真實 CWD
+    from internal.paths import TIM_AGENT_SANDBOX_DIR
+    root = (base_dir or TIM_AGENT_SANDBOX_DIR).resolve()
 
     def _replace(match: re.Match[str]) -> str:
         alt = match.group("alt")
