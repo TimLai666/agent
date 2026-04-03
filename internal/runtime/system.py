@@ -8,6 +8,7 @@ from pydantic_ai.messages import ModelRequest, ModelResponse
 from internal.runtime.stream_printer import stream_print
 
 from internal.agents import MainAgent
+from internal.app.handle_user_turn import create_runtime
 from internal.cli import confirm
 from internal.logger import logger
 from internal.services.agent_factory import load_base_config
@@ -170,6 +171,7 @@ async def run_cli(
             http_client,
             skill_root_dirs=skill_root_dirs,
         )
+        orchestration_runtime = create_runtime(main_agent)
 
         def reload_skills_from_webui() -> dict[str, object]:
             from internal.skills_loader import load_skill_registry
@@ -245,7 +247,12 @@ async def run_cli(
                     user_input = prompt_once.strip()
                     if not user_input:
                         return
-                    await stream_print(main_agent.run_stream(user_input, message_history=chat_history))
+                    await stream_print(
+                        orchestration_runtime.handle_user_turn_stream(
+                            user_input,
+                            message_history=chat_history,
+                        )
+                    )
                     return
 
                 async def update_history() -> None:
@@ -334,7 +341,12 @@ async def run_cli(
                 if user_input.lower() in ["exit", "quit"]:
                     return
                 command_handler.update_last_prompt(user_input)
-                await stream_print(main_agent.run_stream(user_input, message_history=chat_history))
+                await stream_print(
+                    orchestration_runtime.handle_user_turn_stream(
+                        user_input,
+                        message_history=chat_history,
+                    )
+                )
                 await update_history()
                 reply = main_agent._last_assistant_reply or ""
                 command_handler.update_last_reply(reply)
@@ -368,7 +380,12 @@ async def run_cli(
                     if user_input.lower() in ["exit", "quit"]:
                         break
                     command_handler.update_last_prompt(user_input)
-                    await stream_print(main_agent.run_stream(user_input, message_history=chat_history))
+                    await stream_print(
+                        orchestration_runtime.handle_user_turn_stream(
+                            user_input,
+                            message_history=chat_history,
+                        )
+                    )
                     await update_history()
                     reply = main_agent._last_assistant_reply or ""
                     command_handler.update_last_reply(reply)

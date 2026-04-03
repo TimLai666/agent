@@ -614,6 +614,18 @@ class MainAgent:
         message_history: list[ModelRequest | ModelResponse] | None = None,
         skip_plan_execution: bool = True,
     ) -> str:
+        from internal.app.handle_user_turn import create_runtime
+
+        _ = skip_plan_execution  # backward compatibility
+        runtime = create_runtime(self)
+        return await runtime.handle_user_turn(prompt, message_history=message_history)
+
+    async def _run_direct(
+        self,
+        prompt: str,
+        message_history: list[ModelRequest | ModelResponse] | None = None,
+        skip_plan_execution: bool = True,
+    ) -> str:
         _ = skip_plan_execution  # backward compatibility
         self._reload_model_from_db()
 
@@ -669,6 +681,19 @@ class MainAgent:
                     return "抱歉，系統暫時無法處理您的請求。請稍後再試。"
 
     async def run_stream(
+        self,
+        prompt: str,
+        message_history: list[ModelRequest | ModelResponse] | None = None,
+        skip_plan_execution: bool = True,
+    ):
+        from internal.app.handle_user_turn import create_runtime
+
+        _ = skip_plan_execution  # backward compatibility
+        runtime = create_runtime(self)
+        async for chunk in runtime.handle_user_turn_stream(prompt, message_history=message_history):
+            yield chunk
+
+    async def _run_stream_direct(
         self,
         prompt: str,
         message_history: list[ModelRequest | ModelResponse] | None = None,

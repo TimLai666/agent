@@ -14,6 +14,7 @@ from PySide6.QtWidgets import QApplication
 
 
 from internal.agents import MainAgent
+from internal.app.handle_user_turn import create_runtime
 from internal.logger import logger
 from internal.runtime.stream_printer import BACKLOG_SCALE, BASE_DELAY, MIN_FACTOR
 from internal.runtime.system import run_cli
@@ -60,6 +61,7 @@ class AgentRuntime(QThread):
         self._active_request_id = 0
         self._conversation_state = ConversationState(fullMessages=[])
         self._compact_coordinator: CompactCoordinator | None = None
+        self._orchestration_runtime = None
 
     def run(self):
         loop = asyncio.new_event_loop()
@@ -116,6 +118,7 @@ class AgentRuntime(QThread):
                 self.http_client,
                 skill_root_dirs=self.skill_root_dirs,
             )
+            self._orchestration_runtime = create_runtime(self.main_agent)
 
             def _reload_skills_from_webui() -> dict[str, object]:
                 if self.main_agent is None:
@@ -150,7 +153,8 @@ class AgentRuntime(QThread):
                 # 清除已註冊的 MCP toolsets 以防止 agent 嘗試調用不可用的工具
                 self.main_agent.agent._user_toolsets = []
                 logger.info("Cleared MCP toolsets from agent to prevent tool call failures")
-            self._ready_event.set()
+            if self._ready_event:
+                self._ready_event.set()
             self.ready.emit()
         except Exception as e:
             logger.error(f"AgentRuntime init failed: {e}", exc_info=e)
@@ -263,8 +267,11 @@ class AgentRuntime(QThread):
         chunks: list[str] = []
 
         async def collect():
-            async for chunk in self.main_agent.run_stream(
-                user_input, message_history=chat_history
+            if self._orchestration_runtime is None:
+                raise RuntimeError("Orchestration runtime not initialized")
+            async for chunk in self._orchestration_runtime.handle_user_turn_stream(
+                user_input,
+                message_history=chat_history,
             ):
                 if not chunk:
                     continue
@@ -374,7 +381,7 @@ class GUIAgentApp:
         warnings.filterwarnings("ignore", category=DeprecationWarning)
         warnings.filterwarnings("ignore", category=ResourceWarning)
 
-        self.app = QApplication(sys.argv)
+        self.app = QApplication.instance() or QApplication(sys.argv)
         self.base_config = load_base_config()
         self.voice_manager = VoiceManager()
         self.chat_history: list[ModelRequest | ModelResponse] | None = None
@@ -534,6 +541,9 @@ class GUIAgentApp:
 
     def handle_runtime_ready(self):
         self.runtime_ready = True
+
+        def _close_window() -> None:
+            self.main_window.close()
         
         # 初始化指令處理器
         if self.runtime and self.runtime.main_agent:
@@ -541,7 +551,7 @@ class GUIAgentApp:
                 main_agent=self.runtime.main_agent,
                 history=self._gui_history,
                 output_callback=self._gui_output_callback,
-                exit_callback=self.main_window.close,
+                exit_callback=_close_window,
                 gui_window=self.main_window,  # 傳入 GUI 窗口以支持 webview
             )
         
