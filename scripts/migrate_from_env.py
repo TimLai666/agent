@@ -67,27 +67,15 @@ def migrate():
     # ))
     # print("✓ GitHub Copilot 提供者已新增")
     
-    # Configure main agent
-    print("\n設定 main agent...")
+    # Configure single global model (default)
+    print("\n設定單一模型配置 default...")
     set_agent_config(AgentModelConfig(
-        agent_name="main",
+        agent_name="default",
         provider_id="openai",  # ⚠️ Change if you use a different provider
         model_name="gpt-4",    # ⚠️ Change to your model (e.g., claude-3-5-sonnet-20241022)
         temperature=0.5,       # ⚠️ Adjust as needed
     ))
-    print("✓ main agent 已設定")
-    
-    # Configure additional agents as needed (example: marketing)
-    # print("設定 marketing agent...")
-    # set_agent_config(AgentModelConfig(
-    #     agent_name="marketing",
-    #     provider_id="anthropic",  # Or use same as main
-    #     model_name="claude-3-5-sonnet-20241022",
-    #     temperature=0.2,
-    # ))
-    # print("✓ marketing agent 已設定")
-    
-    # Add more agents as needed...
+    print("✓ default 配置已設定")
     
     print("\n" + "=" * 60)
     print("  遷移完成！")

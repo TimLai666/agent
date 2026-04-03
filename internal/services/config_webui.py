@@ -392,7 +392,7 @@ def api_available_agents():
 
 @app.route('/api/agents', methods=['GET'])
 def api_list_agents():
-    """列出可編輯的 agent 配置（單一模型模式僅支援 default）。"""
+    """列出可編輯的單一模型配置（僅 default）。"""
     configs = list_agent_configs()
     visible_agent_names = {"default"}
     
@@ -403,7 +403,7 @@ def api_list_agents():
             "model_name": c.model_name,
             "temperature": c.temperature,
             "inherit_from": c.inherit_from,
-            "uses_default": False  # 已配置的 agent 不使用默認
+            "uses_default": False
         }
         for c in configs
         if c.agent_name in visible_agent_names
@@ -412,7 +412,10 @@ def api_list_agents():
 
 @app.route('/api/agents/<agent_name>', methods=['GET'])
 def api_get_agent(agent_name: str):
-    """獲取單個 agent 配置"""
+    """獲取單一模型配置（僅 default）。"""
+    if agent_name != "default":
+        return jsonify({"error": "single config mode: only default is supported"}), 400
+
     config = get_agent_config(agent_name)
     if not config:
         return jsonify({"error": "Agent not found"}), 404
@@ -428,7 +431,7 @@ def api_get_agent(agent_name: str):
 
 @app.route('/api/agents', methods=['POST'])
 def api_set_agent():
-    """設定 agent 配置（單一模型模式僅允許 default）。"""
+    """設定單一模型配置（僅 default）。"""
     data = request.json
     agent_name = data.get("agent_name")
 
@@ -459,14 +462,14 @@ def api_set_agent():
     )
     
     if set_agent_config(config):
-        return jsonify({"success": True, "message": "Agent 配置成功"})
+        return jsonify({"success": True, "message": "模型配置成功"})
     else:
-        return jsonify({"success": False, "error": "Agent 配置失敗"}), 400
+        return jsonify({"success": False, "error": "模型配置失敗"}), 400
 
 
 @app.route('/api/agents/<agent_name>', methods=['DELETE'])
 def api_delete_agent(agent_name: str):
-    """刪除 agent 配置（單一模型模式僅允許 default）。"""
+    """刪除單一模型配置（僅 default）。"""
     if agent_name != "default":
         return jsonify({
             "success": False,
@@ -474,9 +477,9 @@ def api_delete_agent(agent_name: str):
         }), 400
 
     if delete_agent_config(agent_name):
-        return jsonify({"success": True, "message": "Agent 配置刪除成功"})
+        return jsonify({"success": True, "message": "模型配置刪除成功"})
     else:
-        return jsonify({"success": False, "error": "Agent 配置刪除失敗"}), 400
+        return jsonify({"success": False, "error": "模型配置刪除失敗"}), 400
 
 
 @app.route('/api/default-config', methods=['GET'])
@@ -535,7 +538,7 @@ def api_get_category_default_config(category: str):
     return jsonify({
         "success": False,
         "deprecated": True,
-        "error": "類別默認配置已停用；請改用 main 或全域默認配置。",
+        "error": "類別默認配置已停用；請改用全域默認配置 default。",
         "category": category,
     }), 410
 
@@ -546,7 +549,7 @@ def api_set_category_default_config(category: str):
     return jsonify({
         "success": False,
         "deprecated": True,
-        "error": "類別默認配置已停用；請改用 main 或全域默認配置。",
+        "error": "類別默認配置已停用；請改用全域默認配置 default。",
         "category": category,
     }), 410
 
@@ -576,7 +579,7 @@ def api_get_subagent_default_config():
     return jsonify({
         "success": False,
         "deprecated": True,
-        "error": "Subagent 默認配置已停用；請改用 main 或全域默認配置。",
+        "error": "Subagent 默認配置已停用；請改用全域默認配置 default。",
     }), 410
 
 
@@ -586,7 +589,7 @@ def api_set_subagent_default_config():
     return jsonify({
         "success": False,
         "deprecated": True,
-        "error": "Subagent 默認配置已停用；請改用 main 或全域默認配置。",
+        "error": "Subagent 默認配置已停用；請改用全域默認配置 default。",
     }), 410
 
 

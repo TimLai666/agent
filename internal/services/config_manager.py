@@ -47,8 +47,8 @@ def get_model_config(agent_name: str, category: Optional[str] = None) -> Optiona
     Returns None if no configuration exists.
 
     Args:
-        agent_name: Name of the agent
-        category: Optional category for default config fallback (e.g., "core")
+        agent_name: Requested logical agent name (for logging only)
+        category: Deprecated; kept for compatibility
     """
     # System-wide single-model policy:
     # only resolve from global default configuration.
@@ -353,12 +353,12 @@ def create_model_for_agent(
     category: Optional[str] = None,
 ) -> Optional[OpenAIChatModel]:
     """
-    Create a model for a specific agent.
+    Create the runtime model using the unified default configuration.
     
     Args:
-        agent_name: Name of the agent (e.g., "main", "marketing", "function-call")
+        agent_name: Logical caller name (for logging only)
         http_client: HTTP client for API calls
-        category: Optional category used for default fallback resolution
+        category: Deprecated; ignored by runtime model resolution
     
     Returns:
         OpenAIChatModel instance or None if configuration not available

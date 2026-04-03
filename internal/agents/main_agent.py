@@ -442,9 +442,9 @@ class MainAgent:
             )
             if model is None:
                 model = create_model_for_agent(
-                    agent_name="main",
+                    agent_name="default",
                     http_client=self._http_client,
-                    category="core",
+                    category=None,
                 )
             if model is None:
                 raise RuntimeError("Unable to resolve model for subagent")
@@ -503,9 +503,9 @@ class MainAgent:
         )
         if model is None:
             model = create_model_for_agent(
-                agent_name="main",
+                agent_name="default",
                 http_client=self._http_client,
-                category="core",
+                category=None,
             )
         if model is None:
             raise RuntimeError("Unable to resolve model for compaction subagent")

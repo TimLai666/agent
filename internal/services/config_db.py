@@ -1,6 +1,6 @@
-"""
-Database module for storing agent configuration.
-Supports multiple providers (OpenAI-compatible API, GitHub Copilot) and per-agent settings.
+"""Database module for model/provider configuration.
+
+Runtime now uses a single global model config: `default`.
 """
 import sqlite3
 from contextlib import contextmanager
@@ -28,8 +28,8 @@ class ProviderConfig:
 
 @dataclass
 class AgentModelConfig:
-    """Configuration for a specific agent"""
-    agent_name: str  # e.g., "main", "marketing", "function-call"
+    """Configuration for a named config entry (runtime uses `default`)."""
+    agent_name: str  # Runtime active key is "default"
     provider_id: str  # Reference to ProviderConfig
     model_name: str  # e.g., "gpt-4", "claude-3-5-sonnet"
     temperature: float = 0.2
@@ -262,27 +262,9 @@ def set_agent_config(config: AgentModelConfig) -> bool:
 
 
 def get_agent_config(agent_name: str, use_default: bool = True, category: Optional[str] = None) -> Optional[AgentModelConfig]:
-    """
-    Get configuration for a specific agent.
-    Follows inheritance chain if agent inherits from another.
-    Falls back to category default or global default if not found and use_default=True.
+    """Get configuration by key, with optional fallback to global `default`.
 
-    Fallback order:
-    1. Direct agent configuration
-    2. Inherited configuration
-    3. Category default (default:{category}) - for specific categories (e.g., default:marketing)
-    4. Category-level defaults:
-       - default:subagents (for sub-agent/* categories)
-       - default:core (for core category)
-    5. Global default (default) - for all agents
-
-    Args:
-        agent_name: Name of the agent
-        use_default: Whether to fall back to default config if not found
-        category: Category of the agent (e.g., "core", "sub-agent/marketing")
-
-    Returns:
-        AgentModelConfig with resolved configuration, or None if not found
+    The `category` argument is kept for backward compatibility and is ignored.
     """
     try:
         with get_connection() as conn:
@@ -291,54 +273,15 @@ def get_agent_config(agent_name: str, use_default: bool = True, category: Option
             row = cursor.fetchone()
             
             if not row:
-                # 如果沒有找到配置，且 use_default=True，嘗試使用默認配置
-                if use_default and agent_name not in ["default", "default:subagents", f"default:{category}"]:
-                    # 1. 優先嘗試類別默認配置
-                    if category:
-                        category_default = get_agent_config(f"default:{category}", use_default=False)
-                        if category_default:
-                            return AgentModelConfig(
-                                agent_name=agent_name,
-                                provider_id=category_default.provider_id,
-                                model_name=category_default.model_name,
-                                temperature=category_default.temperature,
-                                inherit_from=f"default:{category}",
-                            )
-                    
-                    # 2. 嘗試 category 整體默認配置
-                    if category:
-                        # Sub-agents: default:subagents
-                        if category.startswith("sub-agent/"):
-                            category_default = get_agent_config("default:subagents", use_default=False)
-                            if category_default:
-                                return AgentModelConfig(
-                                    agent_name=agent_name,
-                                    provider_id=category_default.provider_id,
-                                    model_name=category_default.model_name,
-                                    temperature=category_default.temperature,
-                                    inherit_from="default:subagents",
-                                )
-                        # Core agents: default:core
-                        elif category == "core":
-                            category_default = get_agent_config("default:core", use_default=False)
-                            if category_default:
-                                return AgentModelConfig(
-                                    agent_name=agent_name,
-                                    provider_id=category_default.provider_id,
-                                    model_name=category_default.model_name,
-                                    temperature=category_default.temperature,
-                                    inherit_from="default:core",
-                                )
-                    # 3. 最後嘗試全域默認配置
+                if use_default and agent_name != "default":
                     default_config = get_agent_config("default", use_default=False)
                     if default_config:
-                        # 返回默認配置但保留請求的 agent_name
                         return AgentModelConfig(
                             agent_name=agent_name,
                             provider_id=default_config.provider_id,
                             model_name=default_config.model_name,
                             temperature=default_config.temperature,
-                            inherit_from="default",  # 標記為從默認配置繼承
+                            inherit_from="default",
                         )
                 return None
             
