@@ -17,4 +17,10 @@ def synthesize_final_answer(
             lines.append("驗證結果：未通過。")
     if worker.unresolvedIssues:
         lines.append("未解決問題：" + "; ".join(worker.unresolvedIssues))
+
+    result_text = (worker.result or "").strip()
+    if result_text and result_text != (worker.summary or "").strip():
+        lines.append("\n詳細結果：")
+        lines.append(result_text)
+
     return "\n".join(lines)

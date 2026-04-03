@@ -6,6 +6,7 @@ import uuid
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 
 from httpx import AsyncClient
@@ -48,6 +49,7 @@ from internal.core.protocol.image_output_paths import (
     ImagePathStreamNormalizer,
     enforce_absolute_image_paths,
 )
+from internal.core.protocol.verdict_parser import parse_verification_verdict
 
 PROMPT_KEY = "MAIN_AGENT_PROMPT"
 ENV_PREFIX = "MAIN"
@@ -60,6 +62,25 @@ class MainAgent:
     ENV_PREFIX = ENV_PREFIX
     _IMAGE_DIRECTIVE_RE = re.compile(r"(?mi)^\s*(?:image|img)\s*:\s*(?P<target>.+?)\s*$")
     _IMAGE_MARKDOWN_RE = re.compile(r"!\[(?P<alt>[^\]]*)\]\((?P<target>[^)]+)\)")
+
+    @staticmethod
+    def _build_subagent_report_contract(subagent_type: str) -> str:
+        return (
+            f"You are subagent '{subagent_type}'. Complete the assigned work, then report in this exact section order:\n"
+            "[RESULT]\n"
+            "- Concrete final result only (not future plans).\n"
+            "[FILES_CHANGED]\n"
+            "- One file path per line. Use '(none)' if no file changed.\n"
+            "[COMMANDS]\n"
+            "- One command per line, each prefixed with '$ '. Use '(none)' if not run.\n"
+            "[EVIDENCE]\n"
+            "- Essential outputs/findings that justify the result.\n"
+            "[UNRESOLVED]\n"
+            "- Remaining gaps/risks. Use '(none)' when fully complete.\n"
+            "[NEEDED_INPUT]\n"
+            "- Missing inputs required from coordinator/user. Use '(none)' if no dependency.\n"
+            "Do not output only plan wording like 'I will/接下來'."
+        )
 
     @staticmethod
     def _compose_agent_prompt(
@@ -459,6 +480,11 @@ class MainAgent:
             worker_instructions = getattr(self.agent, "instructions", "")
             if model is None:
                 raise RuntimeError("Fork subagent requires coordinator model")
+            if subagent_type not in {"compaction", "verification"}:
+                worker_instructions = (
+                    f"{(worker_instructions or '').strip()}\n\n"
+                    f"{self._build_subagent_report_contract(subagent_type)}"
+                ).strip()
         else:
             category = f"sub-agent/{subagent_type}"
             model = create_model_for_agent(
@@ -501,9 +527,7 @@ class MainAgent:
                     auto_load_all=True,
                     model_name=getattr(model, "model_name", None),
                 )
-                worker_instructions = (
-                    f"You are subagent '{subagent_type}'. Focus only on assigned task and report concise results."
-                )
+                worker_instructions = self._build_subagent_report_contract(subagent_type)
 
         worker_system_prompt, worker_request_instructions = self._compose_agent_prompt(
             worker_system_prompt,
@@ -760,6 +784,44 @@ class MainAgent:
         )
         return trimmed
 
+    async def _follow_through_needs_retry(self, user_prompt: str, output_text: str) -> bool:
+        if not output_text.strip():
+            return True
+        if not self._http_client:
+            return False
+
+        verification_task = SimpleNamespace(subagentType="verification", mode="spawn")
+        verification_prompt = (
+            "You are validating whether the assistant actually delivered requested work in this turn.\n"
+            "Return exactly one verdict line: VERDICT: PASS / VERDICT: FAIL / VERDICT: PARTIAL.\n"
+            "PASS: concrete deliverables/results are present.\n"
+            "FAIL: mostly promises/plans without concrete results.\n"
+            "PARTIAL: some output exists but request is not adequately completed.\n\n"
+            "USER REQUEST:\n"
+            f"{user_prompt}\n\n"
+            "ASSISTANT OUTPUT:\n"
+            f"{output_text}\n"
+        )
+
+        try:
+            verification_output = await self._run_subagent_task(verification_task, verification_prompt)
+            verdict = parse_verification_verdict(
+                verification_output,
+                task_id="follow-through-check",
+            ).verdict
+            return verdict in {"FAIL", "PARTIAL"}
+        except Exception as exc:
+            logger.warning("Follow-through verification unavailable, skip retry: %s", exc)
+            return False
+
+    def _build_follow_through_retry_context(self) -> str:
+        return (
+            "\n\nValidation Guard:\n"
+            "The previous response appears not fully delivered for this turn.\n"
+            "Continue immediately and provide concrete completion output now.\n"
+            "Do not provide only future-plan wording.\n"
+        )
+
     async def run(
         self,
         prompt: str,
@@ -796,6 +858,22 @@ class MainAgent:
             except Exception:
                 self._last_messages = None
             self._last_assistant_reply = self._extract_user_reply(output_text)
+
+            if await self._follow_through_needs_retry(self._last_user_prompt or "", output_text):
+                retry_context = self._build_follow_through_retry_context()
+                user_content_with_retry = self._append_error_to_user_content(user_content, retry_context)
+                retry_result = await self.agent.run(
+                    user_content_with_retry,
+                    message_history=safe_history,
+                )
+                retry_output_text = enforce_absolute_image_paths(retry_result.output or "")
+                try:
+                    self._last_messages = retry_result.all_messages()
+                except Exception:
+                    self._last_messages = None
+                self._last_assistant_reply = self._extract_user_reply(retry_output_text)
+                return retry_output_text
+
             return output_text
         except Exception as e:
             if self._is_context_overflow_error(e):
@@ -912,6 +990,24 @@ class MainAgent:
                 except Exception:
                     self._last_messages = None
                 self._last_assistant_reply = self._extract_user_reply(collected)
+
+                if await self._follow_through_needs_retry(self._last_user_prompt or "", collected):
+                    yield "\n[系統] 驗證判定上一段回覆未完整交付，正在自動續跑...\n"
+                    retry_context = self._build_follow_through_retry_context()
+                    user_content_with_retry = self._append_error_to_user_content(user_content, retry_context)
+                    retry_result = await self.agent.run(
+                        user_content_with_retry,
+                        message_history=safe_history,
+                    )
+                    retry_output_text = enforce_absolute_image_paths(retry_result.output or "")
+                    try:
+                        self._last_messages = retry_result.all_messages()
+                    except Exception:
+                        self._last_messages = None
+                    self._last_assistant_reply = self._extract_user_reply(retry_output_text)
+                    if retry_output_text:
+                        yield retry_output_text
+                    return
         except Exception as e:
             if self._is_context_overflow_error(e):
                 retry_history = self._overflow_retry_history(safe_history)

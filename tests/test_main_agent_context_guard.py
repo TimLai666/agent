@@ -36,3 +36,44 @@ def test_context_overflow_error_detection():
 
     other = Exception("temporary network failure")
     assert agent._is_context_overflow_error(other) is False
+
+
+def test_follow_through_needs_retry_on_verdict_fail():
+    import asyncio
+
+    agent = MainAgent.__new__(MainAgent)
+    agent._http_client = object()
+
+    async def fake_run_subagent_task(_task, _prompt):
+        return "VERDICT: FAIL\nno concrete output"
+
+    agent._run_subagent_task = fake_run_subagent_task
+
+    needs_retry = asyncio.run(agent._follow_through_needs_retry("請修 bug", "我會先處理"))
+    assert needs_retry is True
+
+
+def test_follow_through_no_retry_on_verdict_pass():
+    import asyncio
+
+    agent = MainAgent.__new__(MainAgent)
+    agent._http_client = object()
+
+    async def fake_run_subagent_task(_task, _prompt):
+        return "VERDICT: PASS\ncompleted"
+
+    agent._run_subagent_task = fake_run_subagent_task
+
+    needs_retry = asyncio.run(agent._follow_through_needs_retry("請修 bug", "已修復並附結果"))
+    assert needs_retry is False
+
+
+def test_subagent_report_contract_contains_required_sections():
+    text = MainAgent._build_subagent_report_contract("research")
+
+    assert "[RESULT]" in text
+    assert "[FILES_CHANGED]" in text
+    assert "[COMMANDS]" in text
+    assert "[EVIDENCE]" in text
+    assert "[UNRESOLVED]" in text
+    assert "[NEEDED_INPUT]" in text

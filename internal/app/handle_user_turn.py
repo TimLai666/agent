@@ -83,6 +83,7 @@ class OrchestrationRuntime:
 
         result = await task
         if result:
+            yield "[進度] 任務完成，正在輸出完整結果...\n"
             yield result
 
     async def _make_or_update_plan(self, ctx: CoordinatorTurnContext) -> CoordinatorPlan:
