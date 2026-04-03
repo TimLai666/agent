@@ -78,7 +78,7 @@ combined = build_combined_system_prompt(
     base_prompt=None,  # None = 使用預設的 SYSTEM_PROMPT
     additional_prompts=[
         "tool_description_bash",
-        "tool_description_grep",
+        "system_prompt_command_usage_practice",
         "agent_prompt_explore",
     ],
     separator="\n\n---\n\n"
@@ -109,7 +109,7 @@ agent = MainAgent.create(
     http_client=client,
     additional_system_prompts=[
         "tool_description_bash",
-        "tool_description_grep",
+        "system_prompt_command_usage_practice",
     ]
 )
 ```
@@ -137,12 +137,12 @@ explore_agent = Agent(
 ```python
 # 工具名稱
 TASK_TOOL_NAME = "Task"
-BASH_TOOL_NAME = "Bash"
-READ_TOOL_NAME = "Read"
-WRITE_TOOL_NAME = "Write"
-EDIT_TOOL_NAME = "Edit"
-GLOB_TOOL_NAME = "Glob"
-GREP_TOOL_NAME = "Grep"
+BASH_TOOL_NAME = "run_terminal_command"
+READ_TOOL_NAME = "run_terminal_command"
+WRITE_TOOL_NAME = "run_terminal_command"
+EDIT_TOOL_NAME = "run_terminal_command"
+GLOB_TOOL_NAME = "run_terminal_command"
+GREP_TOOL_NAME = "run_terminal_command"
 
 # Agent 類型
 EXPLORE_AGENT = "Explore"
@@ -182,8 +182,7 @@ MAX_OUTPUT_CHARS = "30000"
 # Main agent：基礎 + 工具描述
 main_agent_prompts = [
     "tool_description_bash",
-    "tool_description_grep",
-    "tool_description_read",
+    "system_prompt_command_usage_practice",
 ]
 
 # Explore agent：基礎 + explore 特定指導

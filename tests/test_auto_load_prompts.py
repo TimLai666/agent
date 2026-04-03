@@ -57,7 +57,7 @@ def test_auto_load_all_prompts():
     key_prompts = [
         "tool-description-bash",
         "agent-prompt-explore",
-        "tool-description-grep",
+        "system-prompt-command-usage-practice",
     ]
 
     print(f"\n檢查關鍵 prompts 是否載入:")

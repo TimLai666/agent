@@ -54,9 +54,9 @@ agent-prompt-agent-hook
 ---
 agent-prompt-bash-command-description-writer
 ---
-... (總共 66+ 個 prompts)
+... (總共 40+ 個 prompts)
 ---
-tool-description-write
+tool-description-websearch
 ```
 
 ## 控制自動載入行為
@@ -96,7 +96,7 @@ agent = MainAgent.create(
 ```python
 agent = MainAgent.create(
     ...,
-    additional_system_prompts=["tool-description-bash", "agent-prompt-explore"],
+    additional_system_prompts=["tool-description-bash", "system-prompt-command-usage-practice"],
     auto_load_all_prompts=False  # 關閉自動載入，只用指定的
 )
 ```
