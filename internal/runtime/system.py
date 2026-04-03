@@ -242,51 +242,52 @@ async def run_cli(
                     "\nAgent ready. Type /help for commands."
                     "\nNote: install Playwright via `uv run playwright install` if you want browser tooling."
                 )
-                print(ready_msg)
-                if prompt_once is not None:
-                    user_input = prompt_once.strip()
-                    if not user_input:
-                        return
-                    await stream_print(
-                        orchestration_runtime.handle_user_turn_stream(
-                            user_input,
-                            message_history=chat_history,
-                        )
-                    )
+            print(ready_msg)
+
+            if prompt_once is not None:
+                user_input = prompt_once.strip()
+                if not user_input:
                     return
-
-                async def update_history() -> None:
-                    nonlocal chat_history
-                    try:
-                        if getattr(main_agent, "_last_messages", None):
-                            conversation_state.fullMessages = (
-                                main_agent._last_messages if main_agent._last_messages is not None else []
-                            )
-                            conversation_state.totalTokens = recalc_total_tokens(conversation_state.fullMessages)
-                            updated_state = await compact_coordinator.maybeCompact(conversation_state)
-                            conversation_state.fullMessages = updated_state.fullMessages
-                            conversation_state.recentMessages = updated_state.recentMessages
-                            conversation_state.compressedSummary = updated_state.compressedSummary
-                            conversation_state.totalTokens = updated_state.totalTokens
-                            conversation_state.lastCompactedMessageId = updated_state.lastCompactedMessageId
-                            chat_history = updated_state.fullMessages
-                        else:
-                            chat_history = None
-                    except Exception:
-                        chat_history = None
-
-                async def force_compact() -> tuple[bool, int, int]:
-                    nonlocal chat_history
-                    base_messages = chat_history or getattr(main_agent, "_last_messages", None) or []
-                    if not base_messages:
-                        return False, 0, 0
-
-                    conversation_state.fullMessages = list(base_messages)
-                    before_count = len(conversation_state.fullMessages)
-                    conversation_state.totalTokens = max(
-                        recalc_total_tokens(conversation_state.fullMessages),
-                        MAX_CONTEXT_TOKENS,
+                await stream_print(
+                    orchestration_runtime.handle_user_turn_stream(
+                        user_input,
+                        message_history=chat_history,
                     )
+                )
+                return
+
+            async def update_history() -> None:
+                nonlocal chat_history
+                try:
+                    if getattr(main_agent, "_last_messages", None):
+                        conversation_state.fullMessages = (
+                            main_agent._last_messages if main_agent._last_messages is not None else []
+                        )
+                        conversation_state.totalTokens = recalc_total_tokens(conversation_state.fullMessages)
+                        updated_state = await compact_coordinator.maybeCompact(conversation_state)
+                        conversation_state.fullMessages = updated_state.fullMessages
+                        conversation_state.recentMessages = updated_state.recentMessages
+                        conversation_state.compressedSummary = updated_state.compressedSummary
+                        conversation_state.totalTokens = updated_state.totalTokens
+                        conversation_state.lastCompactedMessageId = updated_state.lastCompactedMessageId
+                        chat_history = updated_state.fullMessages
+                    else:
+                        chat_history = None
+                except Exception:
+                    chat_history = None
+
+            async def force_compact() -> tuple[bool, int, int]:
+                nonlocal chat_history
+                base_messages = chat_history or getattr(main_agent, "_last_messages", None) or []
+                if not base_messages:
+                    return False, 0, 0
+
+                conversation_state.fullMessages = list(base_messages)
+                before_count = len(conversation_state.fullMessages)
+                conversation_state.totalTokens = max(
+                    recalc_total_tokens(conversation_state.fullMessages),
+                    MAX_CONTEXT_TOKENS,
+                )
                 updated_state = await compact_coordinator.maybeCompact(conversation_state)
                 conversation_state.fullMessages = updated_state.fullMessages
                 conversation_state.recentMessages = updated_state.recentMessages
