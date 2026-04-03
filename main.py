@@ -326,6 +326,21 @@ class AgentRuntime(QThread):
         future = asyncio.run_coroutine_threadsafe(self._force_compact(), self.loop)
         return future.result()
 
+    def clear_context(self):
+        if not self.loop:
+            raise RuntimeError("Initialization failed. Check logs.")
+
+        async def _clear_context():
+            if self._ready_event:
+                await self._ready_event.wait()
+            self._conversation_state = ConversationState(fullMessages=[])
+            if self.main_agent is not None:
+                self.main_agent._last_messages = None
+                self.main_agent._last_assistant_reply = None
+
+        future = asyncio.run_coroutine_threadsafe(_clear_context(), self.loop)
+        future.result()
+
 
 class GUIAgentApp:
     def __init__(self, skill_root_dirs: list[Path] | None = None):
@@ -693,6 +708,21 @@ class GUIAgentApp:
                     return
                 # 處理指令
                 result = self.command_handler.handle(user_input)
+                if result == "__clear_context__":
+                    try:
+                        self.runtime.clear_context()
+                        self.chat_history = None
+                        self._gui_history.clear()
+                        if self.command_handler:
+                            self.command_handler.clear_context_state()
+                        self._last_user_input = ""
+                        self._last_assistant_reply = ""
+                        self._display_text = ""
+                        self._reset_tool_log()
+                        self.main_window.update_speech_bubble("對話 context 已清空")
+                    except Exception as exc:
+                        self.main_window.update_speech_bubble(f"清空 context 失敗：{exc}")
+                    return
                 if result == "__compact__":
                     try:
                         changed, before, after, updated_history = self.runtime.force_compact()

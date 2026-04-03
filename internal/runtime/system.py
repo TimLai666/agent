@@ -228,6 +228,15 @@ async def run_cli(
                 after_count = len(chat_history)
                 return after_count < before_count, before_count, after_count
 
+            def clear_context() -> None:
+                nonlocal chat_history, conversation_state
+                chat_history = None
+                conversation_state = ConversationState(fullMessages=[])
+                command_handler.clear_context_state()
+                history.clear()
+                main_agent._last_messages = None
+                main_agent._last_assistant_reply = None
+
             def read_input_once() -> str | None:
                 user_input = input("輸入文字或按Enter啟動語音辨識> ").strip()
                 if not user_input:
@@ -244,6 +253,10 @@ async def run_cli(
                 if user_input.startswith(COMMAND_PREFIX):
                     action = command_handler.handle(user_input)
                     if action == "__exit__":
+                        return
+                    if action == "__clear_context__":
+                        clear_context()
+                        print("已清空對話 context。")
                         return
                     if action == "__compact__":
                         changed, before, after = await force_compact()
@@ -275,6 +288,10 @@ async def run_cli(
                         action = command_handler.handle(user_input)
                         if action == "__exit__":
                             break
+                        if action == "__clear_context__":
+                            clear_context()
+                            print("已清空對話 context。")
+                            continue
                         if action == "__compact__":
                             changed, before, after = await force_compact()
                             if changed:

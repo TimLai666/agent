@@ -70,10 +70,9 @@ class CommandHandler:
             self._show_help()
             return None
         
-        # /clear - 清空（CLI 下清屏，GUI 下清空對話框）
+        # /clear - 清空對話 context
         elif name == "/clear":
-            self._handle_clear()
-            return None
+            return "__clear_context__"
         
         # /tools - 列出工具
         elif name == "/tools":
@@ -153,7 +152,7 @@ class CommandHandler:
 基本指令：
   /help              顯示此幫助訊息
   /exit, /quit       退出程式
-  /clear             清空屏幕/對話框
+    /clear             清空對話 context（歷史與模型上下文）
     /config            開啟文字式設定選單（CLI）或在終端中顯示（GUI）
     /config-web        打開配置頁面（GUI 中使用內建 webview，CLI 中使用瀏覽器）
 
@@ -174,14 +173,11 @@ Skills 管理：
 """
         self.output_callback(help_text)
     
-    def _handle_clear(self):
-        """處理清空指令"""
-        # CLI 模式下清屏
-        if self.output_callback == print:
-            print("\n" * 80)
-        else:
-            # GUI 模式下通知清空
-            self.output_callback("__clear__")
+    def clear_context_state(self):
+        """重置 CommandHandler 內的上下文狀態。"""
+        self.history.clear()
+        self.last_user_prompt = ""
+        self.last_assistant_reply = ""
     
     def _list_tools(self):
         """列出所有工具"""
