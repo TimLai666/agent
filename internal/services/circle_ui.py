@@ -2121,7 +2121,6 @@ class EdgeHandle(QWidget):
         self._dragging = False
         self._drag_start_global = None
         self._drag_offset = None
-        self._last_y = None
         self.setFixedSize(self._collapsed_width, self._height)
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint
@@ -2168,7 +2167,6 @@ class EdgeHandle(QWidget):
         y = self.y()
         y = max(geo.top(), min(y, geo.bottom() - self._height))
         self.setGeometry(x, y, width, self._height)
-        self._last_y = y
 
     def show_at_edge(self, reference=None):
         geo = self._resolve_screen_geometry(reference)
@@ -2188,10 +2186,16 @@ class EdgeHandle(QWidget):
             except Exception:
                 pass
 
-        if self._last_y is None:
-            y = geo.bottom() - self._height
+        # Always derive vertical position from current window location;
+        # do not persist collapsed handle height across cycles.
+        if reference is not None:
+            try:
+                ref_geo = reference.frameGeometry()
+                y = ref_geo.center().y() - (self._height // 2)
+            except Exception:
+                y = geo.bottom() - self._height
         else:
-            y = self._last_y
+            y = geo.bottom() - self._height
         y = max(geo.top(), min(y, geo.bottom() - self._height))
         self.move(self.x(), y)
         self._snap_to_edge(geo)
@@ -2265,7 +2269,6 @@ class EdgeHandle(QWidget):
                 self._side = "right"
             self._hovered = False
             self._snap_to_edge(geo)
-            self._last_y = self.y()
         if moved < 4 and self._on_activate:
             self._on_activate()
         super().mouseReleaseEvent(event)

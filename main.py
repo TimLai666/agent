@@ -406,6 +406,7 @@ class GUIAgentApp:
         self._tool_log_lines: list[str] = []
         self._ui_collapsed = False
         self._waiting_response = False
+        self._waiting_status = ""
         self._auto_expand_on_result = False
         self._idle_timeout_ms = 60000
         self._idle_timer = QTimer()
@@ -501,11 +502,34 @@ class GUIAgentApp:
         line = payload.get("line")
         if request_id != self._active_request_id or not line:
             return
-        self._tool_log_lines.append(str(line).rstrip())
+        line_text = str(line).rstrip()
+        self._tool_log_lines.append(line_text)
         if len(self._tool_log_lines) > 200:
             self._tool_log_lines = self._tool_log_lines[-200:]
+        if line_text.startswith("[>] "):
+            if "runAgentTask" in line_text:
+                self._set_waiting_status("委派子代理中...")
+            elif "use_skill" in line_text:
+                self._set_waiting_status("載入技能中...")
+            else:
+                self._set_waiting_status("執行工具中...")
+        elif line_text.startswith("[OK]"):
+            self._set_waiting_status("整理結果中...")
         self._request_display_update()
         self._reset_idle_timer()
+
+    def _set_waiting_status(self, status: str) -> None:
+        self._waiting_status = status
+        if not self._waiting_response:
+            return
+        if self._display_text.strip():
+            return
+        if self._last_user_input:
+            self.main_window.update_speech_bubble(
+                f"You: {self._last_user_input}\n\n{status}"
+            )
+        else:
+            self.main_window.update_speech_bubble(status)
 
     def _reset_idle_timer(self) -> None:
         if self._ui_collapsed or self._waiting_response:
@@ -611,6 +635,7 @@ class GUIAgentApp:
                 self._gui_history.append((self._last_user_input, output or ""))
 
         self._waiting_response = False
+        self._waiting_status = ""
         if self._auto_expand_on_result:
             self._expand_ui()
         self._reset_idle_timer()
@@ -629,6 +654,7 @@ class GUIAgentApp:
         # 停止動畫，即使發生錯誤
         self.main_window.stop_agent_animation()
         self._waiting_response = False
+        self._waiting_status = ""
         if self._auto_expand_on_result:
             self._expand_ui()
         self._reset_idle_timer()
@@ -686,8 +712,15 @@ class GUIAgentApp:
             updated = True
             if tag in ("<tool-execution>", "<plan-suggestion>", "<discussion>"):
                 self._stream_mode = "fast"
+                if tag == "<plan-suggestion>":
+                    self._set_waiting_status("規劃回覆中...")
+                elif tag == "<discussion>":
+                    self._set_waiting_status("分析需求中...")
+                else:
+                    self._set_waiting_status("執行步驟中...")
             else:
                 self._stream_mode = "normal"
+                self._set_waiting_status("生成回覆中...")
             self._stream_buffer = self._stream_buffer[idx + len(tag) :]
 
         if updated:
@@ -840,14 +873,14 @@ class GUIAgentApp:
             logger.info(f"Processing input: {user_input}")
             self.main_window.update_speech_bubble(f"You: {user_input}")
 
-            # 啟動動畫並顯示 Thinking 狀態
-            def start_thinking():
-                self.main_window.update_speech_bubble(
-                    f"You: {user_input}\n\nThinking..."
-                )
+            # 啟動動畫並顯示等待狀態
+            def start_waiting():
+                if not self._waiting_response:
+                    return
+                self._set_waiting_status("分析需求中...")
                 self.main_window.start_agent_animation()
 
-            QTimer.singleShot(500, start_thinking)
+            QTimer.singleShot(500, start_waiting)
             self._display_text = ""
             self._reset_tool_log()
             self._pending.clear()
@@ -856,6 +889,7 @@ class GUIAgentApp:
             self._typewriter_active = False
             self._typewriter_timer.stop()
             self._waiting_response = True
+            self._waiting_status = "分析需求中..."
             self._idle_timer.stop()
             request_id = self.runtime.submit(user_input, self.chat_history)
             if request_id:
