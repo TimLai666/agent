@@ -59,6 +59,26 @@ class MainAgent:
     _IMAGE_DIRECTIVE_RE = re.compile(r"(?mi)^\s*(?:image|img)\s*:\s*(?P<target>.+?)\s*$")
     _IMAGE_MARKDOWN_RE = re.compile(r"!\[(?P<alt>[^\]]*)\]\((?P<target>[^)]+)\)")
 
+    @staticmethod
+    def _compose_agent_prompt(
+        system_prompt: str,
+        instructions: str | None,
+    ) -> tuple[str, None]:
+        merged_system_prompt = (system_prompt or "").strip()
+        extra_instructions = (instructions or "").strip()
+
+        if extra_instructions:
+            if merged_system_prompt:
+                merged_system_prompt = (
+                    f"{merged_system_prompt}\n\n"
+                    "## Runtime Instructions\n\n"
+                    f"{extra_instructions}"
+                )
+            else:
+                merged_system_prompt = extra_instructions
+
+        return merged_system_prompt, None
+
     @classmethod
     def _build_enhanced_system_prompt(
         cls,
@@ -188,11 +208,15 @@ class MainAgent:
             system_prompt_override=system_prompt_override,
             system_prompt_append=system_prompt_append,
         )
+        agent_system_prompt, agent_instructions = cls._compose_agent_prompt(
+            enhanced_system_prompt,
+            instructions,
+        )
 
         agent: Agent[None, str] = Agent(
             model=model,
-            system_prompt=enhanced_system_prompt,
-            instructions=instructions,
+            system_prompt=agent_system_prompt,
+            instructions=agent_instructions,
             tools=[],
             model_settings={"temperature": model_temperature if model_temperature is not None else config.temperature},
             toolsets=mcp_servers,
@@ -479,10 +503,15 @@ class MainAgent:
                     f"You are subagent '{subagent_type}'. Focus only on assigned task and report concise results."
                 )
 
+        worker_system_prompt, worker_request_instructions = self._compose_agent_prompt(
+            worker_system_prompt,
+            worker_instructions,
+        )
+
         worker: Agent[None, str] = Agent(
             model=model,
             system_prompt=worker_system_prompt,
-            instructions=worker_instructions,
+            instructions=worker_request_instructions,
             tools=[],
             model_settings={"temperature": 0.2},
         )
@@ -510,14 +539,19 @@ class MainAgent:
         if model is None:
             raise RuntimeError("Unable to resolve model for compaction subagent")
 
-        worker: Agent[None, str] = Agent(
-            model=model,
-            system_prompt=prompt,
-            instructions=(
+        worker_system_prompt, worker_request_instructions = self._compose_agent_prompt(
+            prompt,
+            (
                 "You are the dedicated context compaction subagent. "
                 "Output only plain text with <analysis> and <summary> blocks. "
                 "No tool calls are allowed."
             ),
+        )
+
+        worker: Agent[None, str] = Agent(
+            model=model,
+            system_prompt=worker_system_prompt,
+            instructions=worker_request_instructions,
             tools=[],
             model_settings={"temperature": 0.0},
         )
