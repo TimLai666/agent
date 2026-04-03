@@ -33,8 +33,8 @@
 ## 🔗 相關資源
 
 - [專案首頁](../README.md)
-- [Skills 快速參考](../SKILLS_QUICKREF.md)
-- [Skills 摘要](../SKILLS_SUMMARY.md)
+- [Skills 總覽](../skills/README.md)
+- [Skills 快速開始](../skills/QUICKSTART.md)
 
 ## 📝 文檔編寫規範
 
