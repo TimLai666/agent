@@ -141,12 +141,12 @@ def _process_variables(text: str, variables: dict[str, str] | None = None) -> st
         # 工具名稱（映射到專案實際的工具）
         "TASK_TOOL_NAME": "todo",  # 任務規劃
         "BASH_TOOL_NAME": "run_terminal_command",  # 執行終端命令
-        "READ_TOOL_NAME": "read_file",  # 讀取檔案
-        "WRITE_TOOL_NAME": "create_new_file",  # 創建新檔案
-        "EDIT_TOOL_NAME": "modify_existing_file",  # 修改現有檔案
-        "GLOB_TOOL_NAME": "list_files_in_directory",  # 列出目錄檔案
-        "GREP_TOOL_NAME": "find_all_lines_in_file_with_fragment",  # 搜尋檔案內容
-        "SEARCH_TOOL_NAME": "find_files_with_fragment",  # 搜尋檔案
+        "READ_TOOL_NAME": "run_terminal_command",  # 讀取檔案改由終端命令
+        "WRITE_TOOL_NAME": "run_terminal_command",  # 寫檔改由終端命令
+        "EDIT_TOOL_NAME": "run_terminal_command",  # 修改改由終端命令
+        "GLOB_TOOL_NAME": "run_terminal_command",  # 列檔改由終端命令
+        "GREP_TOOL_NAME": "run_terminal_command",  # 搜尋內容改由終端命令
+        "SEARCH_TOOL_NAME": "run_terminal_command",  # 搜尋檔案改由終端命令
         "WEBFETCH_TOOL_NAME": "fetch",  # 瀏覽網站內容
         "WEBSEARCH_TOOL_NAME": "web_search",  # 網路搜尋（使用 DuckDuckGo）
         "ASKUSERQUESTION_TOOL_NAME": "ask_user_question",  # 舊版變數名
