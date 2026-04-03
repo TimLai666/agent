@@ -42,6 +42,7 @@ from internal.set_tools import add_all_tools
 from internal.skills_loader import SkillRegistry, load_skill_registry
 
 from internal.mcp_server_list import get_all_mcp_servers
+from internal.compaction import serialize_compaction_input
 
 PROMPT_KEY = "MAIN_AGENT_PROMPT"
 ENV_PREFIX = "MAIN"
@@ -377,6 +378,7 @@ class MainAgent:
 
         subagent_type = self._resolve_subagent_type(getattr(task, "subagentType", None))
         mode = getattr(task, "mode", "spawn")
+        enable_tools = subagent_type != "compaction"
 
         if mode == "fork":
             model = getattr(self.agent, "_model", None) or getattr(self.agent, "model", None)
@@ -400,14 +402,24 @@ class MainAgent:
             if model is None:
                 raise RuntimeError("Unable to resolve model for subagent")
 
-            worker_system_prompt = self._build_enhanced_system_prompt(
-                additional_prompts=None,
-                auto_load_all=True,
-                model_name=getattr(model, "model_name", None),
-            )
-            worker_instructions = (
-                f"You are subagent '{subagent_type}'. Focus only on assigned task and report concise results."
-            )
+            if subagent_type == "compaction":
+                worker_system_prompt = (
+                    "You are a compaction subagent. "
+                    "Respond with text only and do not call any tools."
+                )
+                worker_instructions = (
+                    "Summarize context accurately without changing task intent. "
+                    "Do not ask questions."
+                )
+            else:
+                worker_system_prompt = self._build_enhanced_system_prompt(
+                    additional_prompts=None,
+                    auto_load_all=True,
+                    model_name=getattr(model, "model_name", None),
+                )
+                worker_instructions = (
+                    f"You are subagent '{subagent_type}'. Focus only on assigned task and report concise results."
+                )
 
         worker: Agent[None, str] = Agent(
             model=model,
@@ -416,9 +428,44 @@ class MainAgent:
             tools=[],
             model_settings={"temperature": 0.2},
         )
-        add_all_tools(worker)
+        if enable_tools:
+            add_all_tools(worker)
 
         result = await worker.run(prompt)
+        return result.output or ""
+
+    async def run_compaction_subagent(self, job: Any, prompt: str) -> str:
+        if not self._http_client:
+            raise RuntimeError("http_client unavailable for compaction")
+
+        model = create_model_for_agent(
+            agent_name="subagent:compaction",
+            http_client=self._http_client,
+            category="sub-agent/compaction",
+        )
+        if model is None:
+            model = create_model_for_agent(
+                agent_name="main",
+                http_client=self._http_client,
+                category="core",
+            )
+        if model is None:
+            raise RuntimeError("Unable to resolve model for compaction subagent")
+
+        worker: Agent[None, str] = Agent(
+            model=model,
+            system_prompt=prompt,
+            instructions=(
+                "You are the dedicated context compaction subagent. "
+                "Output only plain text with <analysis> and <summary> blocks. "
+                "No tool calls are allowed."
+            ),
+            tools=[],
+            model_settings={"temperature": 0.0},
+        )
+
+        input_text = serialize_compaction_input(job)
+        result = await worker.run(input_text)
         return result.output or ""
 
     def set_tool_event_callback(self, callback) -> None:

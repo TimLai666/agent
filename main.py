@@ -23,8 +23,8 @@ from internal.services.voice_manager import VoiceManager
 from internal.cli import set_gui_confirm_handler
 from internal.command_handler import CommandHandler
 from internal.services import config_webui, config_cli
+from internal.compaction import CompactCoordinator, ConversationState, recalc_total_tokens
 
-HISTORY_LIMIT = 30
 COMMAND_PREFIX = "/"
 
 
@@ -47,6 +47,8 @@ class AgentRuntime(QThread):
         self._current_future = None
         self._request_id = 0
         self._active_request_id = 0
+        self._conversation_state = ConversationState(fullMessages=[])
+        self._compact_coordinator: CompactCoordinator | None = None
 
     def run(self):
         loop = asyncio.new_event_loop()
@@ -100,6 +102,7 @@ class AgentRuntime(QThread):
                 skill_root_dirs=self.skill_root_dirs,
             )
             self.main_agent.set_tool_event_callback(self._emit_tool_event)
+            self._compact_coordinator = CompactCoordinator(runner=self.main_agent.run_compaction_subagent)
             self.mcp_stack = AsyncExitStack()
             try:
                 await self.mcp_stack.enter_async_context(
@@ -246,11 +249,12 @@ class AgentRuntime(QThread):
         result_text = "".join(chunks).strip()
         updated_history = None
         if hasattr(self.main_agent, "_last_messages"):
-            updated_history = (
-                self.main_agent._last_messages[-HISTORY_LIMIT:]
-                if self.main_agent._last_messages is not None
-                else None
-            )
+            messages = self.main_agent._last_messages if self.main_agent._last_messages is not None else []
+            self._conversation_state.fullMessages = messages
+            self._conversation_state.totalTokens = recalc_total_tokens(messages)
+            if self._compact_coordinator is not None:
+                self._conversation_state = await self._compact_coordinator.maybeCompact(self._conversation_state)
+            updated_history = self._conversation_state.fullMessages
         return result_text, updated_history
 
     def submit(
@@ -467,8 +471,6 @@ class GUIAgentApp:
             # 更新 GUI 歷史
             if self._last_user_input:
                 self._gui_history.append((self._last_user_input, output or ""))
-                if len(self._gui_history) > HISTORY_LIMIT:
-                    self._gui_history = self._gui_history[-HISTORY_LIMIT:]
 
         self._waiting_response = False
         if self._auto_expand_on_result:

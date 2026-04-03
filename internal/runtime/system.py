@@ -12,8 +12,8 @@ from internal.logger import logger
 from internal.services.agent_factory import load_base_config
 from internal.services.voice_manager import VoiceManager
 from internal.command_handler import CommandHandler
+from internal.compaction import CompactCoordinator, ConversationState, recalc_total_tokens
 
-HISTORY_LIMIT = 30
 COMMAND_PREFIX = "/"
 
 
@@ -135,6 +135,8 @@ async def run_cli(
         main_agent.set_tool_event_callback(emit_tool_event)
 
         chat_history: list[ModelRequest | ModelResponse] | None = None
+        conversation_state = ConversationState(fullMessages=[])
+        compact_coordinator = CompactCoordinator(runner=main_agent.run_compaction_subagent)
         history: list[tuple[str, str]] = []
         
         # 創建共用的指令處理器
@@ -179,15 +181,23 @@ async def run_cli(
                 await stream_print(main_agent.run_stream(user_input, message_history=chat_history))
                 return
 
-            def update_history() -> None:
+            async def update_history() -> None:
                 nonlocal chat_history
                 try:
                     if getattr(main_agent, "_last_messages", None):
-                        chat_history = (
-                            main_agent._last_messages[-HISTORY_LIMIT:]
-                            if main_agent._last_messages is not None
-                            else None
+                        conversation_state.fullMessages = (
+                            main_agent._last_messages if main_agent._last_messages is not None else []
                         )
+                        conversation_state.totalTokens = recalc_total_tokens(conversation_state.fullMessages)
+                        updated_state = await compact_coordinator.maybeCompact(conversation_state)
+                        conversation_state.fullMessages = updated_state.fullMessages
+                        conversation_state.recentMessages = updated_state.recentMessages
+                        conversation_state.compressedSummary = updated_state.compressedSummary
+                        conversation_state.totalTokens = updated_state.totalTokens
+                        conversation_state.lastCompactedMessageId = updated_state.lastCompactedMessageId
+                        chat_history = updated_state.fullMessages
+                    else:
+                        chat_history = None
                 except Exception:
                     chat_history = None
 
@@ -216,7 +226,7 @@ async def run_cli(
                     return
                 command_handler.update_last_prompt(user_input)
                 await stream_print(main_agent.run_stream(user_input, message_history=chat_history))
-                update_history()
+                await update_history()
                 reply = main_agent._last_assistant_reply or ""
                 command_handler.update_last_reply(reply)
                 history.append((user_input, reply))
@@ -239,7 +249,7 @@ async def run_cli(
                         break
                     command_handler.update_last_prompt(user_input)
                     await stream_print(main_agent.run_stream(user_input, message_history=chat_history))
-                    update_history()
+                    await update_history()
                     reply = main_agent._last_assistant_reply or ""
                     command_handler.update_last_reply(reply)
                     history.append((user_input, reply))
