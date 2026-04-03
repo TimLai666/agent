@@ -392,12 +392,9 @@ def api_available_agents():
 
 @app.route('/api/agents', methods=['GET'])
 def api_list_agents():
-    """列出所有 agent 配置
-    
-    只返回已明確配置的 agents（直接配置或繼承配置）
-    未配置的 agents 會在運行時自動使用默認配置
-    """
+    """列出可編輯的 agent 配置（單一模型模式僅支援 default）。"""
     configs = list_agent_configs()
+    visible_agent_names = {"default"}
     
     return jsonify([
         {
@@ -409,6 +406,7 @@ def api_list_agents():
             "uses_default": False  # 已配置的 agent 不使用默認
         }
         for c in configs
+        if c.agent_name in visible_agent_names
     ])
 
 
@@ -430,11 +428,30 @@ def api_get_agent(agent_name: str):
 
 @app.route('/api/agents', methods=['POST'])
 def api_set_agent():
-    """設定 agent 配置"""
+    """設定 agent 配置（單一模型模式僅允許 default）。"""
     data = request.json
+    agent_name = data.get("agent_name")
+
+    if agent_name != "default":
+        return jsonify({
+            "success": False,
+            "error": "系統已改為單一模型配置；僅支援設定 default。"
+        }), 400
+
+    if data.get("inherit_from"):
+        return jsonify({
+            "success": False,
+            "error": "單一模型模式不支援繼承配置。"
+        }), 400
+
+    if not data.get("provider_id") or not data.get("model_name"):
+        return jsonify({
+            "success": False,
+            "error": "請提供 provider_id 與 model_name。"
+        }), 400
     
     config = AgentModelConfig(
-        agent_name=data["agent_name"],
+        agent_name=agent_name,
         provider_id=data.get("provider_id"),
         model_name=data.get("model_name"),
         temperature=float(data.get("temperature", 0.2)),
@@ -449,7 +466,13 @@ def api_set_agent():
 
 @app.route('/api/agents/<agent_name>', methods=['DELETE'])
 def api_delete_agent(agent_name: str):
-    """刪除 agent 配置"""
+    """刪除 agent 配置（單一模型模式僅允許 default）。"""
+    if agent_name != "default":
+        return jsonify({
+            "success": False,
+            "error": "系統已改為單一模型配置；僅可刪除 default 配置。"
+        }), 400
+
     if delete_agent_config(agent_name):
         return jsonify({"success": True, "message": "Agent 配置刪除成功"})
     else:
@@ -508,52 +531,35 @@ def api_delete_default_config():
 
 @app.route('/api/category-default-config/<path:category>', methods=['GET'])
 def api_get_category_default_config(category: str):
-    """獲取類別默認配置"""
-    config = get_agent_config(f"default:{category}", use_default=False)
-    if not config:
-        return jsonify({"success": True, "config": None})
-    
-    # 獲取提供者信息
-    provider = get_provider(config.provider_id)
-    provider_name = provider.name if provider else config.provider_id
-    
+    """Deprecated: 類別默認配置已停用。"""
     return jsonify({
-        "success": True,
-        "config": {
-            "provider_id": config.provider_id,
-            "provider_name": provider_name,
-            "model_name": config.model_name,
-            "temperature": config.temperature,
-        }
-    })
+        "success": False,
+        "deprecated": True,
+        "error": "類別默認配置已停用；請改用 main 或全域默認配置。",
+        "category": category,
+    }), 410
 
 
 @app.route('/api/category-default-config/<path:category>', methods=['POST'])
 def api_set_category_default_config(category: str):
-    """設置類別默認配置"""
-    data = request.json
-    
-    config = AgentModelConfig(
-        agent_name=f"default:{category}",
-        provider_id=data["provider_id"],
-        model_name=data["model_name"],
-        temperature=float(data.get("temperature", 0.2)),
-        inherit_from=None,
-    )
-    
-    if set_agent_config(config):
-        return jsonify({"success": True, "message": f"{category} 類別默認配置設置成功"})
-    else:
-        return jsonify({"success": False, "error": "類別默認配置設置失敗"}), 400
+    """Deprecated: 類別默認配置已停用。"""
+    return jsonify({
+        "success": False,
+        "deprecated": True,
+        "error": "類別默認配置已停用；請改用 main 或全域默認配置。",
+        "category": category,
+    }), 410
 
 
 @app.route('/api/category-default-config/<path:category>', methods=['DELETE'])
 def api_delete_category_default_config(category: str):
-    """刪除類別默認配置"""
-    if delete_agent_config(f"default:{category}"):
-        return jsonify({"success": True, "message": f"{category} 類別默認配置刪除成功"})
-    else:
-        return jsonify({"success": False, "error": "類別默認配置刪除失敗"}), 400
+    """Deprecated: 類別默認配置已停用。"""
+    return jsonify({
+        "success": False,
+        "deprecated": True,
+        "error": "類別默認配置已停用；無需刪除此配置。",
+        "category": category,
+    }), 410
 
 
 @app.route('/api/agent-categories', methods=['GET'])
@@ -566,52 +572,32 @@ def api_get_agent_categories():
 
 @app.route('/api/subagent-default-config', methods=['GET'])
 def api_get_subagent_default_config():
-    """獲取 Subagent 整體默認配置"""
-    config = get_agent_config("default:subagents", use_default=False)
-    if not config:
-        return jsonify({"success": True, "config": None})
-    
-    # 獲取提供者信息
-    provider = get_provider(config.provider_id)
-    provider_name = provider.name if provider else config.provider_id
-    
+    """Deprecated: Subagent 默認配置已停用。"""
     return jsonify({
-        "success": True,
-        "config": {
-            "provider_id": config.provider_id,
-            "provider_name": provider_name,
-            "model_name": config.model_name,
-            "temperature": config.temperature,
-        }
-    })
+        "success": False,
+        "deprecated": True,
+        "error": "Subagent 默認配置已停用；請改用 main 或全域默認配置。",
+    }), 410
 
 
 @app.route('/api/subagent-default-config', methods=['POST'])
 def api_set_subagent_default_config():
-    """設置 Subagent 整體默認配置"""
-    data = request.json
-    
-    config = AgentModelConfig(
-        agent_name="default:subagents",
-        provider_id=data["provider_id"],
-        model_name=data["model_name"],
-        temperature=float(data.get("temperature", 0.2)),
-        inherit_from=None,
-    )
-    
-    if set_agent_config(config):
-        return jsonify({"success": True, "message": "Subagent 整體默認配置設置成功"})
-    else:
-        return jsonify({"success": False, "error": "Subagent 整體默認配置設置失敗"}), 400
+    """Deprecated: Subagent 默認配置已停用。"""
+    return jsonify({
+        "success": False,
+        "deprecated": True,
+        "error": "Subagent 默認配置已停用；請改用 main 或全域默認配置。",
+    }), 410
 
 
 @app.route('/api/subagent-default-config', methods=['DELETE'])
 def api_delete_subagent_default_config():
-    """刪除 Subagent 整體默認配置"""
-    if delete_agent_config("default:subagents"):
-        return jsonify({"success": True, "message": "Subagent 整體默認配置刪除成功"})
-    else:
-        return jsonify({"success": False, "error": "Subagent 整體默認配置刪除失敗"}), 400
+    """Deprecated: Subagent 默認配置已停用。"""
+    return jsonify({
+        "success": False,
+        "deprecated": True,
+        "error": "Subagent 默認配置已停用；無需刪除此配置。",
+    }), 410
 
 
 

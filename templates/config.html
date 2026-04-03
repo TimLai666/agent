@@ -452,7 +452,7 @@
     <div class="container">
         <header>
             <h1>🤖 Agent 配置管理</h1>
-            <p class="subtitle">輕鬆管理你的 AI 提供者和 Agent 配置</p>
+            <p class="subtitle">管理提供者與單一生效模型（default）配置</p>
         </header>
 
         <div class="tabs">
@@ -460,10 +460,7 @@
                 🔌 提供者管理
             </button>
             <button class="tab-button" onclick="switchTab(event, 'agents')">
-                🤖 Agent 配置
-            </button>
-            <button class="tab-button" onclick="switchTab(event, 'defaults')">
-                ⚙️ 默認配置
+                🤖 主模型配置
             </button>
             <button class="tab-button" onclick="switchTab(event, 'mcp-tools')">
                 🔨 MCP 工具
@@ -487,11 +484,14 @@
         <!-- Agents Tab -->
         <div id="agents-tab" class="tab-content">
             <div class="section-header">
-                <h2>Agent 配置列表</h2>
+                <h2>單一模型配置（default）</h2>
                 <button class="btn btn-primary" onclick="showAddAgentModal()">
-                    ➕ 設定 Agent
+                    ⚙️ 設定模型
                 </button>
             </div>
+            <p style="color: #666; margin-bottom: 20px;">
+                系統已改為單一模型配置：所有 subagent 與任務都會使用同一個模型。
+            </p>
             <div id="agents-list" class="loading">載入中...</div>
         </div>
 
@@ -657,30 +657,11 @@
                 <div class="form-group">
                     <label for="agent_name">Agent 名稱 *</label>
                     <select id="agent_name" required>
-                        <option value="">請選擇 Agent</option>
+                        <option value="default">default</option>
                     </select>
                     <small style="color: #666; display: block; margin-top: 5px;">
-                        從專案中發現的 Agent
+                        單一模型模式僅允許設定 default
                     </small>
-                </div>
-
-                <div class="form-group">
-                    <label>
-                        <input type="checkbox" id="use_inheritance" onchange="toggleInheritance()">
-                        使用繼承配置（從其他 Agent 繼承）
-                    </label>
-                </div>
-
-                <div id="inheritance-section" style="display: none;">
-                    <div class="form-group">
-                        <label for="inherit_from">繼承自 *</label>
-                        <select id="inherit_from">
-                            <option value="">請選擇父 Agent</option>
-                        </select>
-                        <small style="color: #666; display: block; margin-top: 5px;">
-                            此 Agent 將使用父 Agent 的 Provider 和 Model 配置
-                        </small>
-                    </div>
                 </div>
 
                 <div id="direct-config-section">
@@ -706,7 +687,7 @@
                     <label for="agent_temperature">Temperature (可選)</label>
                     <input type="number" id="agent_temperature" min="0" max="2" step="0.1" value="0.2">
                     <small style="color: #666; display: block; margin-top: 5px;">
-                        0.0 = 更確定，2.0 = 更隨機（繼承時可留空使用父配置）
+                        0.0 = 更確定，2.0 = 更隨機
                     </small>
                 </div>
 
@@ -1071,8 +1052,6 @@
                 loadProviders();
             } else if (tab === 'agents') {
                 loadAgents();
-            } else if (tab === 'defaults') {
-                loadDefaultsTab();
             } else if (tab === 'mcp-tools') {
                 loadMcpTools();
             } else if (tab === 'skills') {
@@ -1088,8 +1067,12 @@
 
         function showAddAgentModal() {
             loadProvidersForAgent();
-            loadAvailableAgents();  // 載入可用的 agents
-            loadConfiguredAgentsForInheritance();  // 載入已配置的 agents 供繼承使用
+            const agentSelect = document.getElementById('agent_name');
+            if (agentSelect) {
+                agentSelect.innerHTML = '<option value="default">default</option>';
+                agentSelect.value = 'default';
+                syncCustomSelectById('agent_name');
+            }
             document.getElementById('add-agent-modal').classList.add('active');
         }
 
@@ -1103,7 +1086,11 @@
 
         // 切換繼承模式
         function toggleInheritance() {
-            const useInheritance = document.getElementById('use_inheritance').checked;
+            const useInheritanceEl = document.getElementById('use_inheritance');
+            if (!useInheritanceEl) {
+                return;
+            }
+            const useInheritance = useInheritanceEl.checked;
             const inheritanceSection = document.getElementById('inheritance-section');
             const directConfigSection = document.getElementById('direct-config-section');
 
@@ -1127,41 +1114,18 @@
         // 載入可用的 agents
         async function loadAvailableAgents() {
             const select = document.getElementById('agent_name');
-            select.innerHTML = '<option value="">正在載入...</option>';
-
-            try {
-                const response = await fetch('/api/available-agents');
-                const agents = await response.json();
-
-                // 按類別分組
-                const categories = {};
-                agents.forEach(agent => {
-                    if (!categories[agent.category]) {
-                        categories[agent.category] = [];
-                    }
-                    categories[agent.category].push(agent);
-                });
-
-                // 生成選項
-                let html = '<option value="">請選擇 Agent</option>';
-                Object.keys(categories).sort().forEach(category => {
-                    html += `<optgroup label="${category.toUpperCase()}">`;
-                    categories[category].forEach(agent => {
-                        html += `<option value="${agent.name}">${agent.name}</option>`;
-                    });
-                    html += '</optgroup>';
-                });
-
-                select.innerHTML = html;
-            } catch (error) {
-                select.innerHTML = '<option value="">載入失敗</option>';
-                console.error('載入 agents 失敗:', error);
-            }
+            if (!select) return;
+            select.innerHTML = '<option value="default">default</option>';
+            select.value = 'default';
+            syncCustomSelectById('agent_name');
         }
 
         // 載入已配置的 agents 供繼承使用
         async function loadConfiguredAgentsForInheritance() {
             const select = document.getElementById('inherit_from');
+            if (!select) {
+                return;
+            }
             select.innerHTML = '<option value="">正在載入...</option>';
 
             try {
@@ -1263,11 +1227,35 @@
                 const agents = await response.json();
 
                 if (agents.length === 0) {
+                    try {
+                        const defaultResp = await fetch('/api/default-config');
+                        const defaultResult = await defaultResp.json();
+                        if (defaultResult.success && defaultResult.config) {
+                            container.innerHTML = `
+                                <div class="card">
+                                    <div class="card-header">
+                                        <div>
+                                            <div class="card-title">🤖 目前生效配置（來自全域默認）</div>
+                                            <div class="card-subtitle">使用單一全域配置 default</div>
+                                        </div>
+                                    </div>
+                                    <div class="card-body">
+                                        <p><strong>提供者:</strong> ${defaultResult.config.provider_id}</p>
+                                        <p><strong>模型:</strong> ${defaultResult.config.model_name}</p>
+                                        <p><strong>Temperature:</strong> ${defaultResult.config.temperature}</p>
+                                    </div>
+                                </div>
+                            `;
+                            return;
+                        }
+                    } catch (fallbackErr) {
+                        console.warn('載入全域默認配置失敗:', fallbackErr);
+                    }
                     container.innerHTML = `
                         <div class="empty-state">
                             <svg fill="currentColor" viewBox="0 0 20 20"><path d="M10 18a8 8 0 100-16 8 8 0 000 16zM9.555 7.168A1 1 0 008 8v4a1 1 0 001.555.832l3-2a1 1 0 000-1.664l-3-2z"></path></svg>
-                            <p>尚未設定任何 Agent</p>
-                            <p>點擊上方「設定 Agent」按鈕開始設定</p>
+                            <p>尚未設定主模型</p>
+                            <p>請設定全域默認（default）</p>
                         </div>
                     `;
                     return;
@@ -1356,27 +1344,16 @@
         document.getElementById('add-agent-form').addEventListener('submit', async (e) => {
             e.preventDefault();
 
-            const useInheritance = document.getElementById('use_inheritance').checked;
             const data = {
-                agent_name: document.getElementById('agent_name').value,
+                agent_name: 'default',
+                provider_id: document.getElementById('agent_provider').value,
+                model_name: document.getElementById('agent_model').value,
                 temperature: parseFloat(document.getElementById('agent_temperature').value)
             };
 
-            if (useInheritance) {
-                // 使用繼承
-                data.inherit_from = document.getElementById('inherit_from').value;
-                if (!data.inherit_from) {
-                    alert('請選擇要繼承的父 Agent');
-                    return;
-                }
-            } else {
-                // 直接配置
-                data.provider_id = document.getElementById('agent_provider').value;
-                data.model_name = document.getElementById('agent_model').value;
-                if (!data.provider_id || !data.model_name) {
-                    alert('請選擇提供者和模型');
-                    return;
-                }
+            if (!data.provider_id || !data.model_name) {
+                alert('請選擇提供者和模型');
+                return;
             }
 
             try {
@@ -1391,10 +1368,8 @@
                 if (result.success) {
                     closeModal('add-agent-modal');
                     document.getElementById('add-agent-form').reset();
-                    document.getElementById('use_inheritance').checked = false;
-                    toggleInheritance();
                     loadAgents();
-                    alert('✅ Agent 配置成功！');
+                    alert('✅ 主模型配置成功！');
                 } else {
                     alert('❌ ' + result.error);
                 }

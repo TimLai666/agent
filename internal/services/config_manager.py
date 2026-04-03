@@ -50,22 +50,26 @@ def get_model_config(agent_name: str, category: Optional[str] = None) -> Optiona
         agent_name: Name of the agent
         category: Optional category for default config fallback (e.g., "core")
     """
-    # Determine category if not provided
-    if category is None:
-        # Auto-detect category based on agent name
-        if agent_name in ["main"]:
-            category = "core"
+    # System-wide single-model policy:
+    # only resolve from global default configuration.
+    agent_config = get_agent_config("default", use_default=False)
 
-    # Get agent configuration with category support
-    agent_config = get_agent_config(agent_name, category=category)
     if not agent_config:
-        logger.warning(f"No configuration found for agent '{agent_name}'")
+        logger.warning(
+            "No unified model configuration found (expected explicit 'default'). "
+            f"Requested agent was '{agent_name}'"
+        )
         return None
     
     # Get provider configuration
     provider_config = get_provider(agent_config.provider_id)
     if not provider_config:
-        logger.error(f"Provider '{agent_config.provider_id}' not found for agent '{agent_name}'")
+        logger.error(
+            "Provider '%s' not found for unified configuration. "
+            "Requested agent was '%s'",
+            agent_config.provider_id,
+            agent_name,
+        )
         return None
     
     return ModelConfig(
