@@ -160,7 +160,19 @@ def _run_windows_command(command: str) -> subprocess.CompletedProcess[str]:
         "-Command",
         command,
     ]
-    return subprocess.run(powershell, text=True, capture_output=True, timeout=120)
+
+    startupinfo = subprocess.STARTUPINFO()
+    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    startupinfo.wShowWindow = subprocess.SW_HIDE
+
+    return subprocess.run(
+        powershell,
+        text=True,
+        capture_output=True,
+        timeout=120,
+        creationflags=subprocess.CREATE_NO_WINDOW,
+        startupinfo=startupinfo,
+    )
 
 
 def _run_posix_command(command: str) -> subprocess.CompletedProcess[str]:
