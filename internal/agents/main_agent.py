@@ -620,7 +620,7 @@ class MainAgent:
         runtime = create_runtime(self)
         return await runtime.handle_user_turn(prompt, message_history=message_history)
 
-    async def _run_direct(
+    async def _execute_turn_core(
         self,
         prompt: str,
         message_history: list[ModelRequest | ModelResponse] | None = None,
@@ -693,7 +693,7 @@ class MainAgent:
         async for chunk in runtime.handle_user_turn_stream(prompt, message_history=message_history):
             yield chunk
 
-    async def _run_stream_direct(
+    async def _execute_turn_stream_core(
         self,
         prompt: str,
         message_history: list[ModelRequest | ModelResponse] | None = None,

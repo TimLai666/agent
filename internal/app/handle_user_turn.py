@@ -32,7 +32,7 @@ class OrchestrationRuntime:
     ) -> str:
         mode = resolve_session_mode(user_prompt)
         if mode == "normal":
-            return await self.main_agent._run_direct(user_prompt, message_history=message_history)
+            return await self.main_agent._execute_turn_core(user_prompt, message_history=message_history)
 
         ctx = CoordinatorTurnContext(
             userRequest=user_prompt,
@@ -57,7 +57,7 @@ class OrchestrationRuntime:
     ) -> AsyncIterator[str]:
         mode = resolve_session_mode(user_prompt)
         if mode == "normal":
-            async for chunk in self.main_agent._run_stream_direct(
+            async for chunk in self.main_agent._execute_turn_stream_core(
                 user_prompt,
                 message_history=message_history,
             ):
@@ -70,7 +70,7 @@ class OrchestrationRuntime:
 
     async def _make_or_update_plan(self, ctx: CoordinatorTurnContext) -> CoordinatorPlan:
         if ctx.taskKind in {"question", "research"} and self._looks_like_direct_question(ctx.userRequest):
-            answer = await self.main_agent._run_direct(ctx.userRequest)
+            answer = await self.main_agent._execute_turn_core(ctx.userRequest)
             return CoordinatorPlan(type="answer-directly", finalAnswer=answer)
 
         worker_type = "implementation" if ctx.taskKind in {"implementation", "bugfix", "infra"} else "research"
@@ -173,7 +173,4 @@ async def handle_user_turn(
     message_history: list[ModelRequest | ModelResponse] | None = None,
 ) -> str:
     runtime = create_runtime(main_agent)
-    mode = resolve_session_mode(user_prompt)
-    if mode == "normal":
-        return await main_agent._run_direct(user_prompt, message_history=message_history)
     return await runtime.handle_user_turn(user_prompt, message_history=message_history)
