@@ -81,11 +81,7 @@ When a task is long-running, parallelizable, or needs independent context, use s
 #### Workspace-first execution (required)
 - `run_terminal_command` executes in workspace by default (`~/.tim-agent/sandbox`)
 - Use `get_workspace_info` when you need to confirm workspace path/state
-- For workspace edits, use this flow:
-  1. `stage_to_workspace` to copy source into workspace
-  2. run commands and modify files inside sandbox
-  3. `export_from_workspace` to move only required outputs back to workspace
-- Do not write directly to project files when the workspace flow is feasible
+- For workspace edits, run commands directly inside workspace and keep changes scoped to requested files
 
 #### Terminal-first file operations
 - **Read text/code files** → use `run_terminal_command` with encoding-aware commands

@@ -1,6 +1,5 @@
 import platform
 import re
-import shutil
 import subprocess
 import os
 from pathlib import Path
@@ -20,14 +19,6 @@ def _ensure_workspace_dir() -> Path:
     workspace_dir = _workspace_root()
     workspace_dir.mkdir(parents=True, exist_ok=True)
     return workspace_dir
-
-
-def _resolve_workspace_subpath(path_in_workspace: str) -> Path:
-    workspace_dir = _ensure_workspace_dir()
-    candidate = (workspace_dir / path_in_workspace).resolve() if path_in_workspace else workspace_dir
-    if candidate != workspace_dir and workspace_dir not in candidate.parents:
-        raise ValueError("Path escapes workspace directory.")
-    return candidate
 
 
 def _resolve_workspace_path(path_in_workspace: str) -> Path:
@@ -85,62 +76,6 @@ def _workspace_process_env() -> dict[str, str]:
     env["TIM_AGENT_WORKSPACE_MODE"] = runtime_paths.get_workspace_mode()
     env["TIM_AGENT_WORKSPACE_ROOT"] = str(_workspace_root())
     return env
-
-
-def stage_to_workspace(path_in_workspace: str, target_path_in_workspace: str = "") -> str:
-    """Copy a file or directory from workspace into workspace for isolated changes."""
-    source = _resolve_workspace_path(path_in_workspace)
-    if not source.exists():
-        return f"Error: source path not found: {source}"
-
-    workspace_target_base = _resolve_workspace_subpath(target_path_in_workspace)
-    if source.is_file():
-        destination = workspace_target_base
-        if destination.exists() and destination.is_dir():
-            destination = destination / source.name
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, destination)
-        return f"Staged file to workspace: {source} -> {destination}"
-
-    destination = workspace_target_base
-    if destination.exists() and destination.is_file():
-        return f"Error: destination is a file: {destination}"
-
-    if destination.exists():
-        destination = destination / source.name
-
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(source, destination, dirs_exist_ok=True)
-    return f"Staged directory to workspace: {source} -> {destination}"
-
-
-def export_from_workspace(path_in_workspace: str, destination_in_workspace: str, overwrite: bool = False) -> str:
-    """Export a file or directory from workspace back into workspace."""
-    source = _resolve_workspace_subpath(path_in_workspace)
-    destination = _resolve_workspace_path(destination_in_workspace)
-
-    if not source.exists():
-        return f"Error: workspace path not found: {source}"
-
-    if destination.exists() and not overwrite:
-        return (
-            f"Error: destination exists: {destination}. "
-            "Set overwrite=true to replace it."
-        )
-
-    if source.is_file():
-        if destination.exists() and destination.is_dir():
-            destination = destination / source.name
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, destination)
-        return f"Exported file from workspace: {source} -> {destination}"
-
-    if destination.exists() and destination.is_file():
-        return f"Error: destination is a file: {destination}"
-
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(source, destination, dirs_exist_ok=overwrite)
-    return f"Exported directory from workspace: {source} -> {destination}"
 
 
 def run_terminal_command(command: str) -> str:
@@ -227,8 +162,6 @@ def add_terminal_tools(agent: Agent) -> None:
     """Add terminal execution tools to the agent."""
     agent.tool_plain(get_platform_info)
     agent.tool_plain(get_workspace_info)
-    agent.tool_plain(stage_to_workspace)
-    agent.tool_plain(export_from_workspace)
     agent.tool_plain(run_terminal_command)
 
 

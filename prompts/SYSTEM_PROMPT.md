@@ -38,7 +38,7 @@ User has granted full execution authority:
    - Keep command execution safe and non-destructive unless user explicitly requests otherwise
    - Default to sandbox execution: `run_terminal_command` runs in `~/.tim-agent/sandbox` by default
    - Use `get_workspace_info` to confirm workspace path and current isolation status
-   - For workspace file changes, use workspace flow: `stage_to_workspace` -> edit/run in workspace -> `export_from_workspace` only required files
+   - For workspace file changes, edit/run directly in workspace and keep changes strictly within requested scope
 
 2. **Specialized Tools** (fallback when terminal is not suitable):
    - Use specialized tools when terminal cannot reliably complete the task
