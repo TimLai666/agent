@@ -83,6 +83,80 @@ class MainAgent:
         )
 
     @staticmethod
+    def _default_subagent_prompt() -> str:
+        return (
+            "You are a worker agent for the coding assistant system.\n\n"
+            "Given the assigned task, use the tools available to complete the work fully.\n"
+            "Do not over-engineer, but do not leave the task half-done.\n\n"
+            "When you finish, respond with a concise report that includes:\n"
+            "- what you did\n"
+            "- key findings\n"
+            "- any important limitations or follow-up notes\n\n"
+            "The coordinator will relay the final answer to the user, so your response should focus on essentials."
+        )
+
+    @staticmethod
+    def _subagent_env_notes() -> str:
+        return (
+            "Notes:\n"
+            "- Agent execution environments may reset cwd between shell calls, so prefer absolute file paths.\n"
+            "- In your final response, include only file paths that are directly relevant to the task.\n"
+            "- Include code snippets only when the exact text is essential.\n"
+            "- Do not recap large amounts of code you merely read.\n"
+            "- Do not use emojis.\n"
+            "- Do not write a colon immediately before a tool call."
+        )
+
+    @staticmethod
+    def _built_in_subagent_prompt(agent_type: str) -> str:
+        normalized = (agent_type or "").strip().lower()
+        if normalized == "verification":
+            return (
+                "You are a verification-only worker.\n\n"
+                "This task is for verification, not implementation.\n"
+                "You must not edit, write, or create files in the project directory.\n"
+                "Temporary files outside the project may be used only when strictly necessary for testing.\n\n"
+                "For each important check, report:\n"
+                "- what you verified\n"
+                "- the exact command run\n"
+                "- the observed output\n"
+                "- whether it passed or failed\n\n"
+                "You must end with exactly one of:\n"
+                "VERDICT: PASS\n"
+                "VERDICT: FAIL\n"
+                "VERDICT: PARTIAL"
+            )
+        if normalized == "explore":
+            return (
+                "You are a file and code exploration specialist.\n"
+                "This is a READ-ONLY task. Do not create, modify, or delete files.\n"
+                "Use efficient searches first, then targeted reads, and return findings plus uncertainties."
+            )
+        if normalized == "plan":
+            return (
+                "You are a software architecture and implementation planning specialist.\n"
+                "This is a READ-ONLY task. You must not create, edit, or delete files.\n"
+                "Return a practical step-by-step plan with risks, trade-offs, and critical files."
+            )
+        return (
+            "You are a general-purpose worker agent for the coding assistant system.\n"
+            "Complete the assigned task using available tools. Be thorough, avoid over-engineering, and do not leave work half-done."
+        )
+
+    @classmethod
+    def _build_subagent_system_prompt(
+        cls,
+        *,
+        agent_type: str,
+        append_prompt: str | None = None,
+        include_env_notes: bool = True,
+    ) -> str:
+        base = cls._built_in_subagent_prompt(agent_type) or cls._default_subagent_prompt()
+        env_notes = cls._subagent_env_notes() if include_env_notes else ""
+        pieces = [base, env_notes, (append_prompt or "").strip()]
+        return "\n\n".join(piece for piece in pieces if piece)
+
+    @staticmethod
     def _compose_agent_prompt(
         system_prompt: str,
         instructions: str | None,
@@ -483,6 +557,7 @@ class MainAgent:
             if subagent_type not in {"compaction", "verification"}:
                 worker_instructions = (
                     f"{(worker_instructions or '').strip()}\n\n"
+                    f"{self._subagent_env_notes()}\n\n"
                     f"{self._build_subagent_report_contract(subagent_type)}"
                 ).strip()
         else:
@@ -522,10 +597,9 @@ class MainAgent:
                     "Do not provide user-facing messaging."
                 )
             else:
-                worker_system_prompt = self._build_enhanced_system_prompt(
-                    additional_prompts=None,
-                    auto_load_all=True,
-                    model_name=getattr(model, "model_name", None),
+                worker_system_prompt = self._build_subagent_system_prompt(
+                    agent_type=subagent_type,
+                    include_env_notes=True,
                 )
                 worker_instructions = self._build_subagent_report_contract(subagent_type)
 
@@ -992,7 +1066,6 @@ class MainAgent:
                 self._last_assistant_reply = self._extract_user_reply(collected)
 
                 if await self._follow_through_needs_retry(self._last_user_prompt or "", collected):
-                    yield "\n[系統] 驗證判定上一段回覆未完整交付，正在自動續跑...\n"
                     retry_context = self._build_follow_through_retry_context()
                     user_content_with_retry = self._append_error_to_user_content(user_content, retry_context)
                     retry_result = await self.agent.run(

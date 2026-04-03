@@ -19,6 +19,7 @@ TaskMode = Literal["spawn", "fork"]
 
 _FILES_PATTERN = re.compile(r"\b[\w./-]+\.(?:py|ts|tsx|js|json|md|yml|yaml|toml|ini|cfg)\b")
 _COMMAND_PATTERN = re.compile(r"^\s*(?:\$\s*)?(uv|python|pytest|npm|pnpm|yarn|make|git)\b.*$", re.IGNORECASE)
+_SECTION_PATTERN = re.compile(r"^\[(RESULT|FILES_CHANGED|COMMANDS|EVIDENCE|UNRESOLVED|NEEDED_INPUT)\]\s*$")
 IDLE_WAIT_TIMEOUT_SECONDS = 90
 MAX_REPAIR_ATTEMPTS = 3
 
@@ -48,6 +49,8 @@ class BaseTask:
     type: str = "local_agent"
     subagentType: str | None = None
     model: str | None = None
+    worktreePath: str | None = None
+    worktreeBranch: str | None = None
     filesChanged: list[str] = field(default_factory=list)
     commandsExecuted: list[str] = field(default_factory=list)
     verificationNeeded: bool = False
@@ -387,29 +390,74 @@ class SubagentTaskManager:
                 unresolvedIssues=t.unresolvedIssues,
                 usage=TaskUsage(durationMs=t.durationMs),
             )
-            self._enqueue_notification(to_task_notification_xml(worker_result))
+            self._enqueue_notification(
+                to_task_notification_xml(
+                    worker_result,
+                    total_tokens=t.totalTokens,
+                    tool_uses=t.toolUseCount,
+                    output_file=t.outputFile,
+                    worktree=t.worktreePath,
+                    worktree_branch=t.worktreeBranch,
+                )
+            )
             return replace(t, notified=True)
 
         self.registry.updateTask(task_id, updater)
 
     def _build_worker_result(self, task_id: str, text: str, started_at: float) -> WorkerResult:
         summary = text.strip().splitlines()[0] if text.strip() else ""
-        files_changed = list(dict.fromkeys(match.group(0) for match in _FILES_PATTERN.finditer(text)))
-        commands = [line.strip().removeprefix("$ ") for line in text.splitlines() if _COMMAND_PATTERN.match(line)]
-        unresolved = [line.strip() for line in text.splitlines() if "unresolved" in line.lower()]
-        evidence = [line.strip() for line in text.splitlines() if line.strip().startswith("$ ")]
+
+        parsed = self._parse_structured_report(text)
+        if parsed:
+            result_body = "\n".join(parsed.get("RESULT", [])).strip() or text
+            files_changed = [line for line in parsed.get("FILES_CHANGED", []) if line and line != "(none)"]
+            commands = [line.removeprefix("$ ").strip() for line in parsed.get("COMMANDS", []) if line and line != "(none)"]
+            evidence = [line for line in parsed.get("EVIDENCE", []) if line and line != "(none)"]
+            unresolved = [line for line in parsed.get("UNRESOLVED", []) if line and line != "(none)"]
+            if parsed.get("NEEDED_INPUT"):
+                needed = [line for line in parsed["NEEDED_INPUT"] if line and line != "(none)"]
+                if needed:
+                    unresolved = [*unresolved, *needed]
+        else:
+            result_body = text
+            files_changed = list(dict.fromkeys(match.group(0) for match in _FILES_PATTERN.finditer(text)))
+            commands = [line.strip().removeprefix("$ ") for line in text.splitlines() if _COMMAND_PATTERN.match(line)]
+            unresolved = [line.strip() for line in text.splitlines() if "unresolved" in line.lower()]
+            evidence = [line.strip() for line in text.splitlines() if line.strip().startswith("$ ")]
 
         return WorkerResult(
             taskId=task_id,
             status="completed",
             summary=summary,
-            result=text,
+            result=result_body,
             filesChanged=files_changed,
             commandsExecuted=commands,
             evidence=evidence,
             unresolvedIssues=unresolved,
             usage=TaskUsage(durationMs=int((time.time() - started_at) * 1000)),
         )
+
+    def _parse_structured_report(self, text: str) -> dict[str, list[str]] | None:
+        lines = text.splitlines()
+        current: str | None = None
+        sections: dict[str, list[str]] = {}
+
+        for raw in lines:
+            line = raw.rstrip()
+            match = _SECTION_PATTERN.match(line.strip())
+            if match:
+                current = match.group(1)
+                sections.setdefault(current, [])
+                continue
+            if current is not None:
+                stripped = line.strip()
+                if stripped:
+                    sections[current].append(stripped)
+
+        required = {"RESULT", "FILES_CHANGED", "COMMANDS", "EVIDENCE", "UNRESOLVED", "NEEDED_INPUT"}
+        if not required.issubset(set(sections.keys())):
+            return None
+        return sections
 
     def _build_verification_prompt(self, task: BaseTask, worker_result: WorkerResult) -> str:
         return (

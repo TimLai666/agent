@@ -65,25 +65,14 @@ class OrchestrationRuntime:
                 yield chunk
             return
 
-        yield "\n[進度] coordinator mode 啟動，正在規劃任務...\n"
         task = asyncio.create_task(
             self.handle_user_turn(user_prompt, message_history=message_history)
         )
-        heartbeat_index = 0
-        heartbeat_messages = (
-            "[進度] 正在執行 worker 任務...",
-            "[進度] 正在驗證結果與彙整回覆...",
-        )
         while not task.done():
             await asyncio.sleep(2)
-            if task.done():
-                break
-            yield heartbeat_messages[heartbeat_index % len(heartbeat_messages)] + "\n"
-            heartbeat_index += 1
 
         result = await task
         if result:
-            yield "[進度] 任務完成，正在輸出完整結果...\n"
             yield result
 
     async def _make_or_update_plan(self, ctx: CoordinatorTurnContext) -> CoordinatorPlan:

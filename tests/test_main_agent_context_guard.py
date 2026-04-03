@@ -77,3 +77,15 @@ def test_subagent_report_contract_contains_required_sections():
     assert "[EVIDENCE]" in text
     assert "[UNRESOLVED]" in text
     assert "[NEEDED_INPUT]" in text
+
+
+def test_build_subagent_system_prompt_includes_env_notes_and_append():
+    text = MainAgent._build_subagent_system_prompt(
+        agent_type="general-purpose",
+        append_prompt="APPEND-PROMPT",
+        include_env_notes=True,
+    )
+
+    assert "general-purpose worker agent" in text.lower() or "general-purpose" in text.lower()
+    assert "prefer absolute file paths" in text
+    assert "APPEND-PROMPT" in text

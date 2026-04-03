@@ -208,3 +208,23 @@ def test_coordinator_can_respond_immediately_with_background_worker():
         assert tasks_after[0]["status"] == "completed"
 
     asyncio.run(scenario())
+
+
+def test_coordinator_stream_has_no_progress_labels():
+    async def scenario() -> None:
+        runtime = OrchestrationRuntime(main_agent=SimpleNamespace(_execute_turn_stream_core=None))
+
+        async def fake_handle_user_turn(_prompt, message_history=None):
+            return "final output"
+
+        runtime.handle_user_turn = fake_handle_user_turn  # type: ignore[method-assign]
+
+        chunks: list[str] = []
+        async for chunk in runtime.handle_user_turn_stream("請協調處理", message_history=None):
+            chunks.append(chunk)
+
+        text = "".join(chunks)
+        assert "[進度]" not in text
+        assert "final output" in text
+
+    asyncio.run(scenario())
