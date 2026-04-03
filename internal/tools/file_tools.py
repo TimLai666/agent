@@ -146,6 +146,45 @@ def add_file_tools(agent: Agent) -> None:
         )
 
     @agent.tool_plain
+    def insert_line_in_file(
+        file_path: str,
+        line_number: int,
+        content: str,
+    ) -> str:
+        """Insert content before the given 1-based line number in a text file."""
+        return file_tools_manager.insert_line_in_file(
+            file_path,
+            line_number,
+            content,
+        )
+
+    @agent.tool_plain
+    def delete_lines_in_file(
+        file_path: str,
+        start_line: int,
+        end_line: int,
+    ) -> str:
+        """Delete a line range from a text file using 1-based line numbers."""
+        return file_tools_manager.delete_lines_in_file(
+            file_path,
+            start_line,
+            end_line,
+        )
+
+    @agent.tool_plain
+    def delete_lines_in_file(
+        file_path: str,
+        start_line: int,
+        end_line: int,
+    ) -> str:
+        """Delete a line range in a text file using 1-based line numbers."""
+        return file_tools_manager.delete_lines_in_file(
+            file_path,
+            start_line,
+            end_line,
+        )
+
+    @agent.tool_plain
     def rename_file_or_directory(path: str, new_name: str) -> str:
         """Rename a file or directory. new_name should not include the path."""
         return file_tools_manager.rename_file_or_directory(path, new_name)
@@ -523,6 +562,187 @@ class FileTools:
             end_line=line_number,
             new_content=new_content,
         )
+
+    def insert_line_in_file(
+        self,
+        file_path: str,
+        line_number: int,
+        content: str,
+    ) -> str:
+        try:
+            if line_number < 1:
+                return "Error: line_number must be >= 1."
+
+            if not confirm(
+                message=(
+                    "Agent wants to insert content before line "
+                    f"{line_number} in '{file_path}', allow?"
+                ),
+                default_choice="Y",
+            ):
+                logger.info(
+                    f"User denied line insertion: {file_path} (before line {line_number})"
+                )
+                raise PermissionError(
+                    "❌ User denied permission to modify this file. The operation was cancelled."
+                )
+
+            logger.info(
+                f"Inserting content into file: {file_path} (before line {line_number})"
+            )
+            if not os.path.exists(file_path):
+                raise FileNotFoundError(f"File '{file_path}' does not exist.")
+
+            with open(file_path, "r", encoding="utf-8") as file:
+                lines = file.readlines()
+
+            total_lines = len(lines)
+            if line_number > total_lines + 1:
+                return (
+                    f"Error: line_number {line_number} exceeds allowed max {total_lines + 1}."
+                )
+
+            newline = "\r\n" if any(line.endswith("\r\n") for line in lines) else "\n"
+            insert_lines = content.splitlines(keepends=True)
+            if insert_lines and not insert_lines[-1].endswith(("\n", "\r")):
+                insert_lines[-1] = insert_lines[-1] + newline
+
+            updated_lines = (
+                lines[: line_number - 1] + insert_lines + lines[line_number - 1 :]
+            )
+
+            with open(file_path, "w", encoding="utf-8") as file:
+                file.writelines(updated_lines)
+
+            return (
+                f"Inserted content before line {line_number} in '{file_path}' successfully. "
+                f"Total lines: {total_lines} -> {len(updated_lines)}."
+            )
+        except FileNotFoundError:
+            return f"File '{file_path}' not found."
+        except Exception as e:
+            logger.error(
+                f"Error inserting content into file {file_path}: {str(e)}"
+            )
+            return str(e)
+
+    def delete_lines_in_file(
+        self,
+        file_path: str,
+        start_line: int,
+        end_line: int,
+    ) -> str:
+        try:
+            if start_line < 1:
+                return "Error: start_line must be >= 1."
+            if end_line < start_line:
+                return "Error: end_line must be >= start_line."
+
+            if not confirm(
+                message=(
+                    "Agent wants to delete lines "
+                    f"{start_line}-{end_line} in '{file_path}', allow?"
+                ),
+                default_choice="Y",
+            ):
+                logger.info(
+                    f"User denied line deletion: {file_path} ({start_line}-{end_line})"
+                )
+                raise PermissionError(
+                    "❌ User denied permission to modify this file. The operation was cancelled."
+                )
+
+            logger.info(
+                f"Deleting lines in file: {file_path} ({start_line}-{end_line})"
+            )
+            if not os.path.exists(file_path):
+                raise FileNotFoundError(f"File '{file_path}' does not exist.")
+
+            with open(file_path, "r", encoding="utf-8") as file:
+                lines = file.readlines()
+
+            total_lines = len(lines)
+            if total_lines == 0:
+                return f"Error: File '{file_path}' is empty."
+            if end_line > total_lines:
+                return f"Error: end_line {end_line} exceeds total lines {total_lines}."
+            if start_line == 1 and end_line == total_lines:
+                return "Error: refusing to delete all lines. Use modify_existing_file for full replacement."
+
+            updated_lines = lines[: start_line - 1] + lines[end_line:]
+
+            with open(file_path, "w", encoding="utf-8") as file:
+                file.writelines(updated_lines)
+
+            return (
+                f"Deleted lines {start_line}-{end_line} in '{file_path}' successfully. "
+                f"Total lines: {total_lines} -> {len(updated_lines)}."
+            )
+        except FileNotFoundError:
+            return f"File '{file_path}' not found."
+        except Exception as e:
+            logger.error(
+                f"Error deleting lines in file {file_path}: {str(e)}"
+            )
+            return str(e)
+
+    def delete_lines_in_file(
+        self,
+        file_path: str,
+        start_line: int,
+        end_line: int,
+    ) -> str:
+        try:
+            if start_line < 1:
+                return "Error: start_line must be >= 1."
+            if end_line < start_line:
+                return "Error: end_line must be >= start_line."
+
+            if not confirm(
+                message=(
+                    "Agent wants to delete lines "
+                    f"{start_line}-{end_line} in '{file_path}', allow?"
+                ),
+                default_choice="Y",
+            ):
+                logger.info(
+                    f"User denied line deletion: {file_path} ({start_line}-{end_line})"
+                )
+                raise PermissionError(
+                    "❌ User denied permission to modify this file. The operation was cancelled."
+                )
+
+            logger.info(
+                f"Deleting lines in file: {file_path} ({start_line}-{end_line})"
+            )
+            if not os.path.exists(file_path):
+                raise FileNotFoundError(f"File '{file_path}' does not exist.")
+
+            with open(file_path, "r", encoding="utf-8") as file:
+                lines = file.readlines()
+
+            total_lines = len(lines)
+            if total_lines == 0:
+                return f"Error: File '{file_path}' is empty."
+            if end_line > total_lines:
+                return f"Error: end_line {end_line} exceeds total lines {total_lines}."
+
+            updated_lines = lines[: start_line - 1] + lines[end_line:]
+
+            with open(file_path, "w", encoding="utf-8") as file:
+                file.writelines(updated_lines)
+
+            return (
+                f"Deleted lines {start_line}-{end_line} in '{file_path}' successfully. "
+                f"Total lines: {total_lines} -> {len(updated_lines)}."
+            )
+        except FileNotFoundError:
+            return f"File '{file_path}' not found."
+        except Exception as e:
+            logger.error(
+                f"Error deleting lines in file {file_path}: {str(e)}"
+            )
+            return str(e)
 
     def rename_file_or_directory(self, path: str, new_name: str) -> str:
         try:
