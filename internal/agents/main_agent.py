@@ -43,7 +43,7 @@ from internal.set_tools import add_all_tools
 from internal.skills_loader import SkillRegistry, load_skill_registry
 
 from internal.mcp_server_list import get_all_mcp_servers
-from internal.compaction import serialize_compaction_input
+from internal.compaction import estimate_tokens, get_message_text, serialize_compaction_input
 from internal.core.protocol.image_output_paths import (
     ImagePathStreamNormalizer,
     enforce_absolute_image_paths,
@@ -51,6 +51,8 @@ from internal.core.protocol.image_output_paths import (
 
 PROMPT_KEY = "MAIN_AGENT_PROMPT"
 ENV_PREFIX = "MAIN"
+REQUEST_CONTEXT_TOKEN_BUDGET = 900000
+OVERFLOW_RETRY_KEEP_MESSAGES = 24
 
 
 class MainAgent:
@@ -689,6 +691,75 @@ class MainAgent:
             f"{prompt}"
         )
 
+    def _estimate_user_content_tokens(self, user_content: list[UserContent]) -> int:
+        total = 0
+        for part in user_content:
+            if isinstance(part, str):
+                total += estimate_tokens(part)
+            else:
+                # Non-text content (image/url/binary) still consumes request budget.
+                total += 512
+        return total
+
+    def _trim_message_history_for_budget(
+        self,
+        message_history: list[ModelRequest | ModelResponse] | None,
+        user_content: list[UserContent],
+    ) -> list[ModelRequest | ModelResponse] | None:
+        if not message_history:
+            return message_history
+
+        prompt_tokens = self._estimate_user_content_tokens(user_content)
+        budget_for_history = max(0, REQUEST_CONTEXT_TOKEN_BUDGET - prompt_tokens)
+
+        kept: list[ModelRequest | ModelResponse] = []
+        used = 0
+        for msg in reversed(message_history):
+            msg_tokens = estimate_tokens(get_message_text(msg))
+            if kept and (used + msg_tokens) > budget_for_history:
+                break
+            kept.append(msg)
+            used += msg_tokens
+
+        trimmed = list(reversed(kept))
+        dropped = len(message_history) - len(trimmed)
+        if dropped > 0:
+            logger.warning(
+                "Trimmed message_history for context budget: dropped=%s kept=%s prompt_tokens=%s budget_for_history=%s",
+                dropped,
+                len(trimmed),
+                prompt_tokens,
+                budget_for_history,
+            )
+        return trimmed
+
+    def _is_context_overflow_error(self, exc: Exception) -> bool:
+        text = str(exc).lower()
+        markers = [
+            "maximum context length",
+            "context length",
+            "too many tokens",
+            "requested about",
+            "token limit",
+        ]
+        return any(marker in text for marker in markers)
+
+    def _overflow_retry_history(
+        self,
+        message_history: list[ModelRequest | ModelResponse] | None,
+    ) -> list[ModelRequest | ModelResponse] | None:
+        if not message_history:
+            return message_history
+        if len(message_history) <= OVERFLOW_RETRY_KEEP_MESSAGES:
+            return message_history
+        trimmed = message_history[-OVERFLOW_RETRY_KEEP_MESSAGES:]
+        logger.warning(
+            "Context overflow retry using reduced history: original=%s kept=%s",
+            len(message_history),
+            len(trimmed),
+        )
+        return trimmed
+
     async def run(
         self,
         prompt: str,
@@ -715,9 +786,10 @@ class MainAgent:
         prompt = self._inject_task_notifications(prompt)
         prompt = self._inject_local_timestamp(prompt)
         user_content, _ = self._build_user_prompt_content(prompt)
+        safe_history = self._trim_message_history_for_budget(message_history, user_content)
 
         try:
-            result = await self.agent.run(user_content, message_history=message_history)
+            result = await self.agent.run(user_content, message_history=safe_history)
             output_text = enforce_absolute_image_paths(result.output or "")
             try:
                 self._last_messages = result.all_messages()
@@ -726,6 +798,21 @@ class MainAgent:
             self._last_assistant_reply = self._extract_user_reply(output_text)
             return output_text
         except Exception as e:
+            if self._is_context_overflow_error(e):
+                retry_history = self._overflow_retry_history(safe_history)
+                if retry_history is not safe_history:
+                    try:
+                        result = await self.agent.run(user_content, message_history=retry_history)
+                        output_text = enforce_absolute_image_paths(result.output or "")
+                        try:
+                            self._last_messages = result.all_messages()
+                        except Exception:
+                            self._last_messages = None
+                        self._last_assistant_reply = self._extract_user_reply(output_text)
+                        return output_text
+                    except Exception as retry_exc:
+                        e = retry_exc
+
             error_msg = str(e)
             logger.warning("Tool execution error in agent.run(): %s", error_msg)
 
@@ -740,7 +827,7 @@ class MainAgent:
                     user_content, error_context
                 )
                 result = await self.agent.run(
-                    user_content_with_error, message_history=message_history
+                    user_content_with_error, message_history=safe_history
                 )
                 output_text = enforce_absolute_image_paths(result.output or "")
                 try:
@@ -792,10 +879,11 @@ class MainAgent:
         prompt = self._inject_task_notifications(prompt)
         prompt = self._inject_local_timestamp(prompt)
         user_content, _ = self._build_user_prompt_content(prompt)
+        safe_history = self._trim_message_history_for_budget(message_history, user_content)
 
         try:
             async with self.agent.run_stream(
-                user_prompt=user_content, message_history=message_history
+                user_prompt=user_content, message_history=safe_history
             ) as result:
                 collected = ""
                 normalizer = ImagePathStreamNormalizer()
@@ -825,6 +913,35 @@ class MainAgent:
                     self._last_messages = None
                 self._last_assistant_reply = self._extract_user_reply(collected)
         except Exception as e:
+            if self._is_context_overflow_error(e):
+                retry_history = self._overflow_retry_history(safe_history)
+                if retry_history is not safe_history:
+                    try:
+                        async with self.agent.run_stream(
+                            user_prompt=user_content, message_history=retry_history
+                        ) as result:
+                            collected = ""
+                            normalizer = ImagePathStreamNormalizer()
+                            async for chunk in result.stream_text(delta=True):
+                                if not chunk:
+                                    continue
+                                normalized_chunk = normalizer.feed(chunk)
+                                if normalized_chunk:
+                                    collected += normalized_chunk
+                                    yield normalized_chunk
+                            tail = normalizer.flush()
+                            if tail:
+                                collected += tail
+                                yield tail
+                            try:
+                                self._last_messages = result.all_messages()
+                            except Exception:
+                                self._last_messages = None
+                            self._last_assistant_reply = self._extract_user_reply(collected)
+                            return
+                    except Exception as retry_exc:
+                        e = retry_exc
+
             error_msg = str(e)
             logger.warning("Error in agent.run_stream(): %s", error_msg)
 
@@ -838,7 +955,7 @@ class MainAgent:
                     user_content, error_context
                 )
                 async with self.agent.run_stream(
-                    user_prompt=user_content_with_error, message_history=message_history
+                    user_prompt=user_content_with_error, message_history=safe_history
                 ) as result:
                     collected = ""
                     normalizer = ImagePathStreamNormalizer()
