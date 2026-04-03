@@ -5,6 +5,7 @@ from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from collections.abc import AsyncIterator, Callable
 
 from httpx import AsyncClient
 from pydantic_ai.messages import ModelRequest, ModelResponse
@@ -188,12 +189,43 @@ class Agent:
             raise RuntimeError("Agent runtime 尚未初始化")
         return await self._runtime.handle_user_turn(prompt, message_history=message_history)
 
+    async def run_stream(
+        self,
+        prompt: str,
+        message_history: list[ModelRequest | ModelResponse] | None = None,
+    ) -> AsyncIterator[str]:
+        if self._main_agent is None:
+            await self.start()
+        if self._main_agent is None:
+            raise RuntimeError("Main agent 尚未初始化")
+
+        async for chunk in self._main_agent.run_stream(
+            prompt,
+            message_history=message_history,
+        ):
+            yield chunk
+
     def run_sync(
         self,
         prompt: str,
         message_history: list[ModelRequest | ModelResponse] | None = None,
     ) -> str:
         return asyncio.run(self.run(prompt, message_history=message_history))
+
+    def run_stream_sync(
+        self,
+        prompt: str,
+        on_chunk: Callable[[str], None],
+        message_history: list[ModelRequest | ModelResponse] | None = None,
+    ) -> str:
+        async def _consume() -> str:
+            chunks: list[str] = []
+            async for chunk in self.run_stream(prompt, message_history=message_history):
+                chunks.append(chunk)
+                on_chunk(chunk)
+            return "".join(chunks)
+
+        return asyncio.run(_consume())
 
     def set_tool_event_callback(self, callback: Any) -> None:
         if self._main_agent is None:

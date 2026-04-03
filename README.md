@@ -92,6 +92,26 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
+**程式化串流回應**：
+
+```python
+import asyncio
+
+from agent import Agent
+
+
+async def main() -> None:
+    async with Agent() as agent:
+        async for chunk in agent.run_stream("請用三段列出今天重點"):
+            print(chunk, end="", flush=True)
+        print()
+
+
+asyncio.run(main())
+```
+
+同步程式也可使用 `run_stream_sync(prompt, on_chunk=...)`。
+
 **配置模式**：
 ```sh
 uv run main.py --config
