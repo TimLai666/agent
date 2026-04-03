@@ -2176,6 +2176,18 @@ class EdgeHandle(QWidget):
             return
         self._screen_geo = geo
         self._hovered = False
+
+        # Auto-snap to the nearest horizontal edge based on the reference window position.
+        if reference is not None:
+            try:
+                ref_center_x = reference.geometry().center().x()
+                if abs(ref_center_x - geo.left()) <= abs(geo.right() - ref_center_x):
+                    self._side = "left"
+                else:
+                    self._side = "right"
+            except Exception:
+                pass
+
         if self._last_y is None:
             y = geo.bottom() - self._height
         else:
