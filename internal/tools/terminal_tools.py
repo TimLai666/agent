@@ -32,70 +32,40 @@ def run_terminal_command(command: str) -> str:
 
     IMPORTANT:
     1. Always call `get_platform_info` first to determine if you are on Windows, Linux, or macOS.
-    2. Prohibited keywords (e.g., rm, del, format, sudo) will cause the command to be blocked.
+    2. Catastrophic commands are hard-blocked; other non-read-only commands require manual confirmation.
     3. Safe read-only commands are auto-approved; other commands still require manual confirmation.
     4. There is a 120-second timeout.
     5. Windows commands run through PowerShell by default.
     """
     logger.info(f"Agent attempting to run terminal command: {command}")
 
-    # Define prohibited keywords to prevent dangerous operations
-    prohibited_keywords = {
-        # File/Directory deletion
-        "rm",
-        "del",
-        "rd",
-        "rmdir",
-        "erase",
-        # Disk and Filesystem operations
-        "format",
-        "mkfs",
-        "fdisk",
-        "parted",
-        "dd",
-        "mount",
-        "umount",
-        # System control
-        "shutdown",
-        "reboot",
-        "halt",
-        "poweroff",
-        # Privilege and User management
-        "sudo",
-        "su",
-        "passwd",
-        "chown",
-        "chmod",
-        "chpasswd",
-        "net",
-        "useradd",
-        "userdel",
-        "usermod",
-        # Process management
-        "kill",
-        "pkill",
-        "killall",
-        "taskkill",
-        # Shell/Escaping (prevent bypassing checks)
-        "sh",
-        "cmd",
-        "alias",
-        "unalias",
-        # Windows system sensitive
-        "reg",
-        "sc",
-        "schtasks",
+    # Hard-block only catastrophic, system-destroying command patterns.
+    hard_block_patterns = {
+        r"\brm\s+-rf\s+/(\s|$)": "rm -rf /",
+        r"\brm\s+-rf\s+--no-preserve-root\b": "rm --no-preserve-root",
+        r"\bdd\s+if=.*\s+of=/dev/(sd[a-z]|nvme\d+n\d+|disk\d+)\b": "dd to raw disk",
+        r"\bmkfs(\.[a-z0-9]+)?\b": "mkfs",
+        r"\bfdisk\b": "fdisk",
+        r"\bparted\b": "parted",
+        r"\bformat\s+[a-z]:\b": "format drive",
+        r"\bshutdown\b": "shutdown",
+        r"\breboot\b": "reboot",
+        r"\bhalt\b": "halt",
+        r"\bpoweroff\b": "poweroff",
     }
 
-    # Extract words from the command to check against prohibited keywords
-    # Using word boundaries to avoid false positives
-    words = set(re.findall(r"\b\w+\b", command.lower()))
-
-    intersected = words.intersection(prohibited_keywords)
-    if intersected:
-        forbidden = ", ".join(intersected)
-        logger.warning(f"Blocked dangerous command: {command} (found: {forbidden})")
-        return f"Error: Command execution denied. The command contains prohibited keywords: {forbidden}."
+    normalized_command = command.lower()
+    for pattern, label in hard_block_patterns.items():
+        if re.search(pattern, normalized_command):
+            logger.warning(
+                "Blocked catastrophic command: %s (pattern: %s)",
+                command,
+                label,
+            )
+            return (
+                "Error: Command execution denied. "
+                f"Detected catastrophic command pattern: {label}."
+            )
 
     try:
         if _is_read_only_safe_command(command):
