@@ -8,6 +8,7 @@ import asyncio
 import random
 from typing import Callable, Any
 from ddgs import DDGS
+from ddgs.exceptions import DDGSException
 from internal.logger import logger
 
 from pydantic_ai import Agent
@@ -35,6 +36,13 @@ AVAILABLE_BACKENDS_TEXT = [
 AVAILABLE_BACKENDS_NEWS = ["duckduckgo", "bing", "yahoo"]
 # 對圖片搜尋，使用支持圖片結果的後端
 AVAILABLE_BACKENDS_IMAGES = ["duckduckgo"]
+
+
+def _is_no_results_error(err: Exception) -> bool:
+    """判斷是否屬於 DDGS 的「無結果」情境。"""
+    if isinstance(err, DDGSException):
+        return "no results found" in str(err).lower()
+    return False
 
 
 def add_web_search_tools(agent: Agent) -> None:
@@ -75,6 +83,9 @@ async def _run_backend_callable(
             last_err = f"Timeout after {timeout}s"
             logger.warning(f"Timeout for {backend} (attempt {attempt}): {str(e)}")
         except Exception as e:
+            if _is_no_results_error(e):
+                logger.info(f"{backend} returned no results (attempt {attempt})")
+                return {"backend": backend, "results": []}
             last_err = str(e)
             logger.error(f"後端 {backend} 搜索時發生錯誤: {str(e)}", exc_info=e)
 
