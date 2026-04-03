@@ -168,6 +168,7 @@ def _process_variables(text: str, variables: dict[str, str] | None = None) -> st
         "RUN_IN_BACKGROUND_NOTE": "",  # 背景執行說明
         "BASH_TOOL_EXTRA_NOTES": "",  # Bash 工具額外說明
         "BASH_BACKGROUND_TASK_NOTES_FN": "",  # Bash 背景任務說明
+        "SCRATCHPAD_DIR_FN": "~/.tim-agent/sandbox",  # 沙盒/暫存目錄
         "AGENT_TOOL_USAGE_NOTES": "",  # Agent 工具使用說明
         "TODO_TOOL_OBJECT": "todo",  # 待辦事項工具對象
         "AVAILABLE_TOOLS_SET": "tools",  # 可用工具集合

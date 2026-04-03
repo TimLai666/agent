@@ -36,8 +36,9 @@ User has granted full execution authority:
    - Decompose user tasks into small executable terminal-command steps before execution
    - Use terminal commands for file listing/searching/inspection and common workflows
    - Keep command execution safe and non-destructive unless user explicitly requests otherwise
-   - Default to sandbox execution: run commands in sandbox first so generated artifacts stay isolated
-   - For workspace file changes, use sandbox flow: stage to sandbox -> edit/run in sandbox -> export back only required files
+   - Default to sandbox execution: `run_terminal_command` runs in `~/.tim-agent/sandbox` by default
+   - Use `get_sandbox_info` to confirm sandbox path and current isolation status
+   - For workspace file changes, use sandbox flow: `stage_to_sandbox` -> edit/run in sandbox -> `export_from_sandbox` only required files
 
 2. **Specialized Tools** (fallback when terminal is not suitable):
    - Use specialized tools when terminal cannot reliably complete the task

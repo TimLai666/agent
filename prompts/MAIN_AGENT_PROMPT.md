@@ -78,6 +78,15 @@ When a task is long-running, parallelizable, or needs independent context, use s
 
 ### Priority: Terminal Commands > Specialized Tools
 
+#### Sandbox-first execution (required)
+- `run_terminal_command` executes in sandbox by default (`~/.tim-agent/sandbox`)
+- Use `get_sandbox_info` when you need to confirm sandbox path/state
+- For workspace edits, use this flow:
+  1. `stage_to_sandbox` to copy source into sandbox
+  2. run commands and modify files inside sandbox
+  3. `export_from_sandbox` to move only required outputs back to workspace
+- Do not write directly to workspace with terminal commands when sandbox flow is feasible
+
 #### Terminal-first file operations
 - **Read text/code files** → use `run_terminal_command` with encoding-aware commands
 - **Search files/content** → use `run_terminal_command` with safe read-only commands
