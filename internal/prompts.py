@@ -296,6 +296,7 @@ def build_environment_context(start_dir: Path | None = None) -> str:
     git_root = _find_git_root(agent_workspace)
     lines = [
         "執行環境：",
+        "- 沙盒模式：啟用",
         f"- 工作目錄：{agent_workspace}",
         f"- Home 目錄：{home}",
         f"- Desktop 目錄：{desktop}",

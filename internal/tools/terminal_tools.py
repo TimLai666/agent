@@ -2,6 +2,7 @@ import platform
 import re
 import shutil
 import subprocess
+import os
 from pathlib import Path
 
 from pydantic_ai import Agent
@@ -64,11 +65,21 @@ def get_sandbox_info() -> str:
     sandbox = _ensure_sandbox_dir()
     return "\n".join(
         [
+            "sandbox_mode: enabled",
             f"workspace_root: {AGENT_WORKSPACE_ROOT}",
             f"sandbox_root: {sandbox}",
+            f"sandbox_root_exists: {sandbox.exists()}",
             "note: run_terminal_command executes with sandbox as current working directory.",
         ]
     )
+
+
+def _sandbox_process_env() -> dict[str, str]:
+    env = os.environ.copy()
+    env["TIM_AGENT_IS_SANDBOX"] = "1"
+    env["TIM_AGENT_SANDBOX_ROOT"] = str(_ensure_sandbox_dir())
+    env["TIM_AGENT_WORKSPACE_ROOT"] = str(AGENT_WORKSPACE_ROOT)
+    return env
 
 
 def stage_to_sandbox(path_in_workspace: str, target_path_in_sandbox: str = "") -> str:
@@ -342,6 +353,7 @@ def _run_windows_command(command: str) -> subprocess.CompletedProcess[str]:
         capture_output=True,
         timeout=120,
         cwd=str(_ensure_sandbox_dir()),
+        env=_sandbox_process_env(),
         creationflags=subprocess.CREATE_NO_WINDOW,
     )
 
@@ -356,4 +368,5 @@ def _run_posix_command(command: str) -> subprocess.CompletedProcess[str]:
         capture_output=True,
         timeout=120,
         cwd=str(_ensure_sandbox_dir()),
+        env=_sandbox_process_env(),
     )
