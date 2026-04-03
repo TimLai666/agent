@@ -16,7 +16,7 @@ from internal.core.coordinator.coordinator_loop import (
 from internal.core.coordinator.result_synthesizer import synthesize_final_answer
 from internal.core.protocol.task_notification import parse_task_notification_xml
 from internal.core.protocol.verdict_parser import parse_verification_verdict
-from internal.core.tasks.task_types import VerificationResult, WorkerResult
+from internal.core.tasks.task_types import TaskUsage, VerificationResult, WorkerResult
 from internal.services.subagent_tasks import AgentToolInput
 
 from internal.core.session.session_mode import resolve_session_mode
@@ -91,6 +91,29 @@ class OrchestrationRuntime:
             return CoordinatorPlan(type="answer-directly", finalAnswer=answer)
 
         worker_type = "implementation" if ctx.taskKind in {"implementation", "bugfix", "infra"} else "research"
+
+        if self._should_run_background(ctx.userRequest):
+            payload = AgentToolInput(
+                prompt=ctx.userRequest,
+                name=f"{worker_type}-task",
+                subagent_type=worker_type,
+                run_in_background=True,
+            )
+            created = await self.main_agent._task_manager.spawnAgentTask(
+                payload,
+                self.main_agent._session_id,
+            )
+            task_id = created.get("task_id", "")
+            return CoordinatorPlan(
+                type="answer-directly",
+                finalAnswer=(
+                    "已建立背景 subagent 任務，主流程先回覆你目前進度。\n"
+                    f"- task_id: {task_id}\n"
+                    f"- worker: {worker_type}\n"
+                    "可用 ListSubagentTasks 查狀態；完成後結果會在下一輪自動帶入。"
+                ),
+            )
+
         return CoordinatorPlan(
             type="spawn-worker",
             workerSpec=SpawnWorkerInput(
@@ -116,14 +139,37 @@ class OrchestrationRuntime:
         if task is None:
             raise RuntimeError("Task not found after worker completion")
 
-        # Use task-notification as the canonical transport format inside coordinator flow.
-        if not self.main_agent._task_notifications:
-            raise RuntimeError("Missing task notification from worker run")
-        notification = self.main_agent._task_notifications[-1]
-        parsed = parse_task_notification_xml(notification)
-        parsed.evidence = list(task.evidence)
-        parsed.unresolvedIssues = list(task.unresolvedIssues)
-        return parsed
+        # Prefer task-notification transport, but allow task-state fallback to avoid hard failure.
+        notification = self._find_task_notification(task.id)
+        if notification:
+            parsed = parse_task_notification_xml(notification)
+            parsed.evidence = list(task.evidence)
+            parsed.unresolvedIssues = list(task.unresolvedIssues)
+            return parsed
+
+        status = task.status if task.status in {"completed", "failed", "killed"} else "failed"
+        return WorkerResult(
+            taskId=task.id,
+            status=status,
+            summary=task.summary or "",
+            result=task.result or "",
+            filesChanged=list(task.filesChanged),
+            commandsExecuted=list(task.commandsExecuted),
+            evidence=list(task.evidence),
+            unresolvedIssues=list(task.unresolvedIssues),
+            usage=TaskUsage(durationMs=task.durationMs),
+        )
+
+    def _find_task_notification(self, task_id: str) -> str | None:
+        notifications = getattr(self.main_agent, "_task_notifications", []) or []
+        for notification in reversed(notifications):
+            try:
+                parsed = parse_task_notification_xml(notification)
+            except Exception:
+                continue
+            if parsed.taskId == task_id:
+                return notification
+        return None
 
     async def _spawn_verification(self, input_data: SpawnVerificationInput) -> VerificationResult:
         verification_task = SimpleNamespace(subagentType="verification", mode="spawn")
@@ -178,6 +224,21 @@ class OrchestrationRuntime:
             return True
         direct_tokens = ["是什麼", "what is", "how does", "怎麼"]
         return any(token in lowered for token in direct_tokens)
+
+    def _should_run_background(self, prompt: str) -> bool:
+        lowered = prompt.lower()
+        hints = [
+            "背景",
+            "background",
+            "先回覆",
+            "先回答",
+            "稍後給我",
+            "不要等",
+            "不用等",
+            "asynchronous",
+            "async",
+        ]
+        return any(hint in lowered for hint in hints)
 
 
 def create_runtime(main_agent: object) -> OrchestrationRuntime:
