@@ -15,6 +15,7 @@ from pydantic_ai.providers.openai import OpenAIProvider
 from internal.agents import MainAgent
 from internal.app.handle_user_turn import create_runtime
 from internal.logger import logger
+from internal.paths import set_runtime_paths
 from internal.services.agent_factory import AgentConfig, load_base_config
 from internal.services.config_manager import normalize_base_url
 
@@ -52,11 +53,16 @@ class Agent:
         additional_system_prompts: list[str] | None = None,
         auto_load_all_prompts: bool = True,
         start_mcp_servers: bool = True,
+        workspace: str | Path | None = None,
     ) -> None:
+        self.workspace_root = self._resolve_workspace_root(workspace)
+        if self.workspace_root is not None:
+            set_runtime_paths(sandbox_dir=self.workspace_root)
+
         self.system_name = system_name
         self.system_prompt_append = system_prompt_append
         self.system_prompt_override = system_prompt_override
-        self.skill_root_dirs = [self._to_abs_path(p) for p in (skill_root_dirs or [])]
+        self.skill_root_dirs = [self._to_abs_path(p, self.workspace_root) for p in (skill_root_dirs or [])]
         self.use_default_tools = use_default_tools
         self.extra_tools = list(extra_tools or [])
         self.mcp_servers = mcp_servers
@@ -73,13 +79,20 @@ class Agent:
         self._mcp_stack: AsyncExitStack | None = None
 
     @staticmethod
-    def _to_abs_path(raw_path: str | Path) -> Path:
+    def _resolve_workspace_root(raw_path: str | Path | None) -> Path | None:
+        if raw_path is None:
+            return None
+        return Path(raw_path).expanduser().resolve()
+
+    @staticmethod
+    def _to_abs_path(raw_path: str | Path, workspace_root: Path | None = None) -> Path:
         from internal.paths import TIM_AGENT_SANDBOX_DIR
         path = Path(raw_path).expanduser()
         if path.is_absolute():
             return path.resolve()
         # 使用沙盒目錄作為 agent 的工作目錄，不暴露真實 CWD
-        return (TIM_AGENT_SANDBOX_DIR / path).resolve()
+        base = workspace_root or TIM_AGENT_SANDBOX_DIR
+        return (base / path).resolve()
 
     @staticmethod
     def _summarize_exception(exc: Exception) -> str:

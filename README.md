@@ -73,6 +73,7 @@ from agent import Agent, OpenAICompatibleModel
 
 async def main() -> None:
     async with Agent(
+        workspace="./.agent-workspace",
         system_name="MyAssistant",
         system_prompt_append="你是企業內部助理，回答要精簡。",
         skill_root_dirs=["./skills"],
@@ -91,6 +92,8 @@ async def main() -> None:
 
 asyncio.run(main())
 ```
+
+`workspace` 可在程式化使用時覆寫 agent 工作目錄；未覆寫時會使用預設沙盒模式。
 
 **程式化串流回應**：
 
