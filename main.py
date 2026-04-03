@@ -771,40 +771,53 @@ class GUIAgentApp:
                 if not self.command_handler:
                     self.main_window.update_speech_bubble("指令處理器尚未就緒")
                     return
-                # 處理指令
-                result = self.command_handler.handle(user_input)
-                if result == "__clear_context__":
-                    try:
-                        self.runtime.clear_context()
-                        self.chat_history = None
-                        self._gui_history.clear()
-                        if self.command_handler:
-                            self.command_handler.clear_context_state()
-                        self._last_user_input = ""
-                        self._last_assistant_reply = ""
-                        self._display_text = ""
-                        self._reset_tool_log()
-                        self.main_window.update_speech_bubble("對話 context 已清空")
-                    except Exception as exc:
-                        self.main_window.update_speech_bubble(f"清空 context 失敗：{exc}")
-                    return
-                if result == "__compact__":
-                    try:
-                        changed, before, after, updated_history = self.runtime.force_compact()
-                        self.chat_history = updated_history or self.chat_history
-                        if changed:
-                            self.main_window.update_speech_bubble(f"已執行壓縮：訊息數 {before} -> {after}")
-                        else:
-                            self.main_window.update_speech_bubble("已嘗試壓縮，但目前可壓縮內容不足（需要超過最近保留訊息量）。")
-                    except Exception as exc:
-                        self.main_window.update_speech_bubble(f"手動壓縮失敗：{exc}")
-                    return
-                if result:
-                    # 指令返回了要執行的提示（如 /retry）
-                    user_input = result
-                else:
-                    # 指令已處理完畢
-                    return
+                # 處理指令（異步）
+                import asyncio
+                async def handle_command():
+                    result = await self.command_handler.handle(user_input)
+                    if result == "__clear_context__":
+                        try:
+                            self.runtime.clear_context()
+                            self.chat_history = None
+                            self._gui_history.clear()
+                            if self.command_handler:
+                                self.command_handler.clear_context_state()
+                            self._last_user_input = ""
+                            self._last_assistant_reply = ""
+                            self._display_text = ""
+                            self._reset_tool_log()
+                            self.main_window.update_speech_bubble("對話 context 已清空")
+                        except Exception as exc:
+                            self.main_window.update_speech_bubble(f"清空 context 失敗：{exc}")
+                        return
+                    if result == "__compact__":
+                        try:
+                            changed, before, after, updated_history = self.runtime.force_compact()
+                            self.chat_history = updated_history or self.chat_history
+                            if changed:
+                                self.main_window.update_speech_bubble(f"已執行壓縮：訊息數 {before} -> {after}")
+                            else:
+                                self.main_window.update_speech_bubble("已嘗試壓縮，但目前可壓縮內容不足（需要超過最近保留訊息量）。")
+                        except Exception as exc:
+                            self.main_window.update_speech_bubble(f"手動壓縮失敗：{exc}")
+                        return
+                    if result:
+                        # 指令返回了要執行的提示（如 /retry）
+                        self.process_input(result)
+                    else:
+                        # 指令已處理完畢
+                        pass
+                
+                try:
+                    loop = asyncio.get_event_loop()
+                    if loop.is_running():
+                        asyncio.ensure_future(handle_command())
+                    else:
+                        loop.run_until_complete(handle_command())
+                except Exception:
+                    # 如果無法獲取事件循環，使用 QTimer
+                    pass
+                return
             
             # 記錄用戶輸入
             self._last_user_input = user_input
