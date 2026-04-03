@@ -1,4 +1,3 @@
-from datetime import date
 from functools import lru_cache
 from pathlib import Path
 import re
@@ -281,16 +280,20 @@ def load_local_instructions(start_dir: Path | None = None) -> list[str]:
 
 def build_environment_context(start_dir: Path | None = None) -> str:
     base = start_dir or Path.cwd()
+    home = Path.home()
+    desktop = home / "Desktop"
     git_root = _find_git_root(base)
     lines = [
         "執行環境：",
         f"- 工作目錄：{base}",
+        f"- Home 目錄：{home}",
+        f"- Desktop 目錄：{desktop}",
         f"- Git 專案：{'是' if git_root else '否'}",
     ]
     if git_root:
         lines.append(f"- Git 根目錄：{git_root}")
     lines.append(f"- 平台：{sys.platform}")
-    lines.append(f"- 日期：{date.today().isoformat()}")
+    lines.append("- 時間：由系統在每輪使用者訊息自動注入本地時區時間戳")
     return "\n".join(lines)
 
 

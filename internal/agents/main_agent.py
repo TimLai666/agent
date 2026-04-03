@@ -1,6 +1,5 @@
 import functools
 import inspect
-import platform
 import re
 import sys
 import uuid
@@ -24,7 +23,6 @@ from internal.prompts import (
     build_runtime_instructions,
     build_environment_context,
     get_prompt,
-    get_system_prompt_processed,
     build_combined_system_prompt,
     list_available_system_prompts,
 )
@@ -54,8 +52,6 @@ class MainAgent:
     ENV_PREFIX = ENV_PREFIX
     _IMAGE_DIRECTIVE_RE = re.compile(r"(?mi)^\s*(?:image|img)\s*:\s*(?P<target>.+?)\s*$")
     _IMAGE_MARKDOWN_RE = re.compile(r"!\[(?P<alt>[^\]]*)\]\((?P<target>[^)]+)\)")
-    _WEEKDAY_EN = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
-    _WEEKDAY_ZH = ("週一", "週二", "週三", "週四", "週五", "週六", "週日")
 
     @classmethod
     def _build_enhanced_system_prompt(
@@ -78,25 +74,10 @@ class MainAgent:
             additional_prompts = list_available_system_prompts()
             logger.info("Auto-loading %d system prompts", len(additional_prompts))
 
-        now = datetime.now()
-        weekday_en = cls._WEEKDAY_EN[now.weekday()]
-        weekday_zh = cls._WEEKDAY_ZH[now.weekday()]
         active_model = model_name or "unknown"
 
         environment_context = build_environment_context()
-        time_info = f"""
-    # Current Date and Time
-
-**IMPORTANT: The current date and time information below is automatically generated at agent initialization.**
-
-- **Current Date**: {now.strftime('%Y-%m-%d')} ({weekday_en} / {weekday_zh})
-- **Current Time**: {now.strftime('%H:%M:%S')}
-- **Full DateTime**: {now.strftime('%Y-%m-%d %H:%M:%S %A')}
-- **Time of Day**: {"Morning (早上)" if 6 <= now.hour < 12 else "Afternoon (下午)" if 12 <= now.hour < 18 else "Evening (晚上)" if 18 <= now.hour < 24 else "Late Night (深夜)"}
-- **System**: {platform.system()}
-
-**Use this information** when responding to user greetings or when time-sensitive context is needed.
-
+        runtime_info = f"""
     # Model Information
 
 - **Active Model**: {active_model}
@@ -104,9 +85,11 @@ class MainAgent:
     # Runtime Environment
 
     {environment_context}
+
+**IMPORTANT**: Each user turn includes an auto-injected local timestamp. Use that timestamp as the primary time reference for the current reply.
 """
 
-        base_with_time = SYSTEM_PROMPT + "\n\n" + time_info
+        base_with_time = SYSTEM_PROMPT + "\n\n" + runtime_info
 
         if not additional_prompts:
             return base_with_time
@@ -544,6 +527,29 @@ class MainAgent:
     ) -> list[UserContent]:
         return [*content, error_context]
 
+    def _inject_local_timestamp(self, prompt: str) -> str:
+        """Inject per-turn local timestamp into user prompt context."""
+        dt = datetime.now().astimezone()
+        weekday_en = (
+            "Monday",
+            "Tuesday",
+            "Wednesday",
+            "Thursday",
+            "Friday",
+            "Saturday",
+            "Sunday",
+        )[dt.weekday()]
+        weekday_zh = ("週一", "週二", "週三", "週四", "週五", "週六", "週日")[dt.weekday()]
+        tz_name = dt.tzname() or "local"
+
+        return (
+            "[LOCAL_TIMESTAMP_FOR_THIS_USER_TURN]\n"
+            f"- datetime: {dt.isoformat(timespec='seconds')}\n"
+            f"- timezone: {tz_name}\n"
+            f"- weekday: {weekday_en} / {weekday_zh}\n\n"
+            f"{prompt}"
+        )
+
     async def run(
         self,
         prompt: str,
@@ -556,6 +562,7 @@ class MainAgent:
         self._previous_user_prompt = self._last_user_prompt
         self._last_user_prompt = prompt
         prompt = self._inject_task_notifications(prompt)
+        prompt = self._inject_local_timestamp(prompt)
         user_content, _ = self._build_user_prompt_content(prompt)
 
         try:
@@ -615,6 +622,7 @@ class MainAgent:
         self._previous_user_prompt = self._last_user_prompt
         self._last_user_prompt = prompt
         prompt = self._inject_task_notifications(prompt)
+        prompt = self._inject_local_timestamp(prompt)
         user_content, _ = self._build_user_prompt_content(prompt)
 
         try:

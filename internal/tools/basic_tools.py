@@ -31,3 +31,4 @@ def add_basic_tools(agent: Agent) -> None:
         logger.info("Wait completed.")
         # todo: 可以接個好看ui或鈴聲之類
         return f"Time's up after {seconds} seconds."
+
