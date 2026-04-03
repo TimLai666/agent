@@ -11,7 +11,7 @@ from typing import Optional
 from internal.logger import logger
 
 # Database location
-DB_PATH = Path.home() / ".agent_config" / "config.db"
+DB_PATH = Path.home() / ".tim-agent" / "config" / "config.db"
 
 
 @dataclass

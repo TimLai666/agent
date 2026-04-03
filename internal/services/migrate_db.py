@@ -6,7 +6,7 @@ Run this script to update existing database schema.
 import sqlite3
 from pathlib import Path
 
-DB_PATH = Path.home() / ".agent_config" / "config.db"
+DB_PATH = Path.home() / ".tim-agent" / "config" / "config.db"
 
 
 def migrate_database():

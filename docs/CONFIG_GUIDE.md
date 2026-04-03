@@ -135,7 +135,7 @@ API Key: sk-ant-...
 
 配置存儲在：
 ```
-~/.agent_config/config.db
+~/.tim-agent/config/config.db
 ```
 
 ## 管理命令

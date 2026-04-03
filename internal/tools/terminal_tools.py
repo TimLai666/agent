@@ -1,11 +1,42 @@
 import platform
 import re
+import shutil
 import subprocess
+from pathlib import Path
 
 from pydantic_ai import Agent
 
 from internal.cli import confirm
 from internal.logger import logger
+
+
+WORKSPACE_ROOT = Path.cwd().resolve()
+TIM_AGENT_ROOT = Path.home() / ".tim-agent"
+SANDBOX_ROOT = TIM_AGENT_ROOT / "sandbox"
+
+
+def _ensure_sandbox_dir() -> Path:
+    SANDBOX_ROOT.mkdir(parents=True, exist_ok=True)
+    return SANDBOX_ROOT
+
+
+def _resolve_sandbox_path(path_in_sandbox: str) -> Path:
+    sandbox = _ensure_sandbox_dir()
+    candidate = (sandbox / path_in_sandbox).resolve() if path_in_sandbox else sandbox
+    if candidate != sandbox and sandbox not in candidate.parents:
+        raise ValueError("Path escapes sandbox directory.")
+    return candidate
+
+
+def _resolve_workspace_path(path_in_workspace: str) -> Path:
+    if not path_in_workspace:
+        raise ValueError("path_in_workspace cannot be empty.")
+
+    raw = Path(path_in_workspace)
+    candidate = raw.resolve() if raw.is_absolute() else (WORKSPACE_ROOT / raw).resolve()
+    if candidate != WORKSPACE_ROOT and WORKSPACE_ROOT not in candidate.parents:
+        raise ValueError("Path escapes workspace root.")
+    return candidate
 
 
 def get_platform_info() -> str:
@@ -24,6 +55,74 @@ def get_platform_info() -> str:
     }
     logger.info(f"Retrieved platform info: {info['system']} {info['machine']}")
     return "\n".join([f"{k}: {v}" for k, v in info.items()])
+
+
+def get_sandbox_info() -> str:
+    """Get sandbox directory information for command execution and artifact isolation."""
+    sandbox = _ensure_sandbox_dir()
+    return "\n".join(
+        [
+            f"workspace_root: {WORKSPACE_ROOT}",
+            f"sandbox_root: {sandbox}",
+            "note: run_terminal_command executes with sandbox as current working directory.",
+        ]
+    )
+
+
+def stage_to_sandbox(path_in_workspace: str, target_path_in_sandbox: str = "") -> str:
+    """Copy a file or directory from workspace into sandbox for isolated changes."""
+    source = _resolve_workspace_path(path_in_workspace)
+    if not source.exists():
+        return f"Error: source path not found: {source}"
+
+    sandbox_target_base = _resolve_sandbox_path(target_path_in_sandbox)
+    if source.is_file():
+        destination = sandbox_target_base
+        if destination.exists() and destination.is_dir():
+            destination = destination / source.name
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, destination)
+        return f"Staged file to sandbox: {source} -> {destination}"
+
+    destination = sandbox_target_base
+    if destination.exists() and destination.is_file():
+        return f"Error: destination is a file: {destination}"
+
+    if destination.exists():
+        destination = destination / source.name
+
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(source, destination, dirs_exist_ok=True)
+    return f"Staged directory to sandbox: {source} -> {destination}"
+
+
+def export_from_sandbox(path_in_sandbox: str, destination_in_workspace: str, overwrite: bool = False) -> str:
+    """Export a file or directory from sandbox back into workspace."""
+    source = _resolve_sandbox_path(path_in_sandbox)
+    destination = _resolve_workspace_path(destination_in_workspace)
+
+    if not source.exists():
+        return f"Error: sandbox path not found: {source}"
+
+    if destination.exists() and not overwrite:
+        return (
+            f"Error: destination exists: {destination}. "
+            "Set overwrite=true to replace it."
+        )
+
+    if source.is_file():
+        if destination.exists() and destination.is_dir():
+            destination = destination / source.name
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, destination)
+        return f"Exported file from sandbox: {source} -> {destination}"
+
+    if destination.exists() and destination.is_file():
+        return f"Error: destination is a file: {destination}"
+
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(source, destination, dirs_exist_ok=overwrite)
+    return f"Exported directory from sandbox: {source} -> {destination}"
 
 
 def run_terminal_command(command: str) -> str:
@@ -109,6 +208,9 @@ def run_terminal_command(command: str) -> str:
 def add_terminal_tools(agent: Agent) -> None:
     """Add terminal execution tools to the agent."""
     agent.tool_plain(get_platform_info)
+    agent.tool_plain(get_sandbox_info)
+    agent.tool_plain(stage_to_sandbox)
+    agent.tool_plain(export_from_sandbox)
     agent.tool_plain(run_terminal_command)
 
 
@@ -237,6 +339,7 @@ def _run_windows_command(command: str) -> subprocess.CompletedProcess[str]:
         errors="replace",
         capture_output=True,
         timeout=120,
+        cwd=str(_ensure_sandbox_dir()),
         creationflags=subprocess.CREATE_NO_WINDOW,
     )
 
@@ -250,4 +353,5 @@ def _run_posix_command(command: str) -> subprocess.CompletedProcess[str]:
         errors="replace",
         capture_output=True,
         timeout=120,
+        cwd=str(_ensure_sandbox_dir()),
     )
