@@ -617,7 +617,7 @@
 
                 <div class="form-group" id="base-url-group">
                     <label for="base_url">Base URL</label>
-                    <input type="text" id="base_url" placeholder="留空使用 OpenAI 預設 (https://api.openai.com/v1)">
+                    <input type="text" id="base_url" placeholder="留空使用 OpenAI 預設 (https://api.openai.com)">
                 </div>
 
                 <div class="form-group" id="api-key-group">
@@ -883,6 +883,7 @@
         const customSelectRegistry = new Map();
         let customSelectEventsBound = false;
         let _providersCache = null;
+        let editingProviderId = null;
 
         async function fetchProviders(forceRefresh = false) {
             if (!_providersCache || forceRefresh) {
@@ -1061,8 +1062,62 @@
 
         // Modal management
         function showAddProviderModal() {
+            resetProviderModal();
             document.getElementById('add-provider-modal').classList.add('active');
             updateProviderForm();
+        }
+
+        function resetProviderModal() {
+            editingProviderId = null;
+            const form = document.getElementById('add-provider-form');
+            form.reset();
+
+            const title = document.querySelector('#add-provider-modal .modal-title');
+            if (title) title.textContent = '新增提供者';
+
+            const submitBtn = document.querySelector('#add-provider-form button[type="submit"]');
+            if (submitBtn) submitBtn.textContent = '新增';
+
+            const providerIdInput = document.getElementById('provider_id');
+            providerIdInput.disabled = false;
+
+            document.querySelector('input[name="provider_type"][value="openai-compatible"]').checked = true;
+            updateProviderForm();
+        }
+
+        async function showEditProviderModal(providerId) {
+            try {
+                const response = await fetch(`/api/providers/${providerId}`);
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}`);
+                }
+                const provider = await response.json();
+
+                editingProviderId = provider.provider_id;
+                const form = document.getElementById('add-provider-form');
+                form.reset();
+
+                const title = document.querySelector('#add-provider-modal .modal-title');
+                if (title) title.textContent = '編輯提供者';
+
+                const submitBtn = document.querySelector('#add-provider-form button[type="submit"]');
+                if (submitBtn) submitBtn.textContent = '儲存';
+
+                document.querySelector(`input[name="provider_type"][value="${provider.provider_type}"]`).checked = true;
+                updateProviderForm();
+
+                const providerIdInput = document.getElementById('provider_id');
+                providerIdInput.value = provider.provider_id;
+                providerIdInput.disabled = true;
+                document.getElementById('provider_name').value = provider.name || '';
+                document.getElementById('base_url').value = provider.base_url || '';
+                document.getElementById('api_key').value = provider.api_key || '';
+                document.getElementById('github_token').value = provider.github_token || '';
+
+                document.getElementById('add-provider-modal').classList.add('active');
+            } catch (error) {
+                alert('❌ 讀取提供者失敗: ' + error.message);
+            }
         }
 
         function showAddAgentModal() {
@@ -1078,6 +1133,9 @@
 
         function closeModal(modalId) {
             document.getElementById(modalId).classList.remove('active');
+            if (modalId === 'add-provider-modal') {
+                resetProviderModal();
+            }
         }
 
         function showAddMcpToolModal() {
@@ -1196,6 +1254,9 @@
                                 <div class="card-subtitle">${provider.provider_id}</div>
                             </div>
                             <div class="card-actions">
+                                <button class="btn btn-secondary" onclick="showEditProviderModal('${provider.provider_id}')">
+                                    ✏️ 編輯
+                                </button>
                                 <button class="btn btn-danger" onclick="deleteProvider('${provider.provider_id}')">
                                     🗑️ 刪除
                                 </button>
@@ -1319,6 +1380,7 @@
             }
 
             try {
+                const wasEditing = Boolean(editingProviderId);
                 const response = await fetch('/api/providers', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
@@ -1329,9 +1391,8 @@
 
                 if (result.success) {
                     closeModal('add-provider-modal');
-                    document.getElementById('add-provider-form').reset();
                     loadProviders();
-                    alert('✅ 提供者新增成功！');
+                    alert(wasEditing ? '✅ 提供者更新成功！' : '✅ 提供者新增成功！');
                 } else {
                     alert('❌ ' + result.error);
                 }
