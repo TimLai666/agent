@@ -1448,7 +1448,7 @@ class OutputBubble(QWidget):
 
 class SiriResponseBubble(QWidget):
     SPINNER_PATTERN = re.compile(
-        r"^\s*(?:[-*>]\s*)?(?:still\s+|currently\s+)?(?P<status>thinking|listening)(?:\s*(?:\.{3,}|\?\?)?\s*)$",
+        r"^\s*(?:[-*>]\s*)?(?:still\s+|currently\s+)?(?P<status>thinking|listening|分析需求中|規劃回覆中|執行步驟中|生成回覆中|執行工具中|載入技能中|委派子代理中|整理結果中)(?:\s*(?:\.{3,}|\?\?)?\s*)$",
         re.IGNORECASE,
     )
 
