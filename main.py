@@ -20,6 +20,12 @@ from internal.runtime.system import run_cli
 from internal.services.agent_factory import load_base_config
 from internal.services.circle_ui import MainWindow, ConfirmDialog, CommandLineEdit
 from internal.services.voice_manager import VoiceManager
+from internal.services.config_db import (
+    list_agent_configs,
+    list_mcp_tools,
+    list_providers,
+    list_remote_mcps,
+)
 from internal.cli import set_gui_confirm_handler
 from internal.command_handler import CommandHandler
 from internal.services import config_webui, config_cli
@@ -402,6 +408,7 @@ class GUIAgentApp:
         self._last_user_input = ""  # 記錄最後的用戶輸入（用於 /retry）
         self._last_assistant_reply = ""  # 記錄最後的助手回覆（用於 /last）
         self._gui_history: list[tuple[str, str]] = []  # GUI 對話歷史
+        self._auto_config_panel_opened = False
         
         # UI 更新節流機制
         self._update_throttle_timer = QTimer()
@@ -501,6 +508,30 @@ class GUIAgentApp:
             self._auto_expand_on_result = False
             self._reset_idle_timer()
 
+    def _is_config_empty(self) -> bool:
+        """Return True when all configurable sections are empty."""
+        try:
+            has_providers = bool(list_providers())
+            has_agents = bool(list_agent_configs())
+            has_mcp_tools = bool(list_mcp_tools())
+            has_remote_mcps = bool(list_remote_mcps())
+            return not (has_providers or has_agents or has_mcp_tools or has_remote_mcps)
+        except Exception:
+            logger.exception("Failed to evaluate config emptiness")
+            return False
+
+    def _auto_open_config_panel_if_needed(self) -> None:
+        if self._auto_config_panel_opened:
+            return
+        if not self._is_config_empty():
+            return
+
+        self._auto_config_panel_opened = True
+        self.main_window.update_speech_bubble(
+            "尚未設定任何 Provider/Agent，已自動打開設定面板。"
+        )
+        QTimer.singleShot(250, self.main_window.open_config_webview)
+
     def handle_runtime_ready(self):
         self.runtime_ready = True
         
@@ -516,6 +547,7 @@ class GUIAgentApp:
         
         self.main_window.update_speech_bubble("AI ready. Double-click to show input.")
         QTimer.singleShot(500, self.show_input_container)
+        self._auto_open_config_panel_if_needed()
         self._reset_idle_timer()
 
     def handle_result(self, request_id, output, updated_history):

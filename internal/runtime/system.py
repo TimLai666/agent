@@ -8,9 +8,17 @@ from pydantic_ai.messages import ModelRequest, ModelResponse
 from internal.runtime.stream_printer import stream_print
 
 from internal.agents import MainAgent
+from internal.cli import confirm
 from internal.logger import logger
 from internal.services.agent_factory import load_base_config
 from internal.services import config_webui
+from internal.services import config_cli
+from internal.services.config_db import (
+    list_agent_configs,
+    list_mcp_tools,
+    list_providers,
+    list_remote_mcps,
+)
 from internal.services.voice_manager import VoiceManager
 from internal.command_handler import CommandHandler
 from internal.compaction import (
@@ -21,6 +29,40 @@ from internal.compaction import (
 )
 
 COMMAND_PREFIX = "/"
+
+
+def _is_config_empty() -> bool:
+    """Return True when all configurable sections are empty."""
+    try:
+        has_providers = bool(list_providers())
+        has_agents = bool(list_agent_configs())
+        has_mcp_tools = bool(list_mcp_tools())
+        has_remote_mcps = bool(list_remote_mcps())
+        return not (has_providers or has_agents or has_mcp_tools or has_remote_mcps)
+    except Exception:
+        logger.exception("Failed to evaluate config emptiness in CLI")
+        return False
+
+
+def _guide_user_for_empty_config() -> None:
+    """Show onboarding guidance and optionally open interactive config setup."""
+    print("\n[設定引導] 尚未偵測到任何 Provider/Agent 設定。")
+    print("你可以使用以下方式完成初始設定：")
+    print("  1. 互動式設定選單：/config")
+    print("  2. Web 設定頁：/config-web")
+
+    if confirm("是否現在開啟互動式設定選單？", "Y"):
+        try:
+            config_cli.cmd_config_menu()
+        except Exception as exc:
+            logger.error("Failed to open config menu from CLI onboarding", exc_info=exc)
+            print(f"⚠️ 無法開啟設定選單：{exc}")
+
+    if _is_config_empty():
+        print("\n⚠️ 目前仍未完成設定，模型呼叫可能失敗。")
+        print("   你可隨時輸入 /config 或 /config-web 進行設定。")
+    else:
+        print("\n✅ 偵測到有效設定，已可開始對話。")
 
 
 def _summarize_exception(exc: Exception) -> str:
@@ -165,6 +207,10 @@ async def run_cli(
             history=history,
             output_callback=print,
         )
+
+        # CLI onboarding: guide users when configuration is completely empty.
+        if prompt_once is None and not single_turn and _is_config_empty():
+            _guide_user_for_empty_config()
 
         try:
             async with AsyncExitStack() as stack:
