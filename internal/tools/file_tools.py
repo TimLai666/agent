@@ -78,6 +78,19 @@ def add_file_tools(agent: Agent) -> None:
         return file_tools_manager.read_file(file_path)
 
     @agent.tool_plain
+    def read_file_with_line_numbers(
+        file_path: str,
+        start_line: int = 1,
+        end_line: int = 200,
+    ) -> str:
+        """Read a file with 1-based line numbers for easier code editing."""
+        return file_tools_manager.read_file_with_line_numbers(
+            file_path,
+            start_line,
+            end_line,
+        )
+
+    @agent.tool_plain
     def read_binary_file(file_path: str, max_bytes: int = 10 * 1024 * 1024) -> list[Any] | str:
         """Read a binary file and return base64 with metadata."""
         return file_tools_manager.read_binary_file(file_path, max_bytes)
@@ -103,6 +116,34 @@ def add_file_tools(agent: Agent) -> None:
     def modify_existing_file(file_path: str, content: str) -> str:
         """Modify an existing file with new content."""
         return file_tools_manager.modify_existing_file(file_path, content)
+
+    @agent.tool_plain
+    def replace_lines_in_file(
+        file_path: str,
+        start_line: int,
+        end_line: int,
+        new_content: str,
+    ) -> str:
+        """Replace a line range in a text file using 1-based line numbers."""
+        return file_tools_manager.replace_lines_in_file(
+            file_path,
+            start_line,
+            end_line,
+            new_content,
+        )
+
+    @agent.tool_plain
+    def replace_line_in_file(
+        file_path: str,
+        line_number: int,
+        new_content: str,
+    ) -> str:
+        """Replace exactly one line in a text file using 1-based line number."""
+        return file_tools_manager.replace_line_in_file(
+            file_path,
+            line_number,
+            new_content,
+        )
 
     @agent.tool_plain
     def rename_file_or_directory(path: str, new_name: str) -> str:
@@ -201,6 +242,54 @@ class FileTools:
             logger.error(f"Error reading file {file_path}: {str(e)}")
             return str(e)
 
+    def read_file_with_line_numbers(
+        self,
+        file_path: str,
+        start_line: int,
+        end_line: int,
+    ) -> str:
+        logger.info(
+            f"Reading file with line numbers: {file_path} ({start_line}-{end_line})"
+        )
+        try:
+            if start_line < 1:
+                return "Error: start_line must be >= 1."
+            if end_line < start_line:
+                return "Error: end_line must be >= start_line."
+
+            with open(file_path, "r", encoding="utf-8") as file:
+                lines = file.readlines()
+
+            if not lines:
+                return f"File '{file_path}' is empty."
+
+            total_lines = len(lines)
+            if start_line > total_lines:
+                return (
+                    f"Error: start_line {start_line} exceeds total lines {total_lines}."
+                )
+
+            actual_end_line = min(end_line, total_lines)
+            width = len(str(total_lines))
+            numbered_lines = []
+            for index in range(start_line - 1, actual_end_line):
+                line_no = str(index + 1).rjust(width, "0")
+                numbered_lines.append(f"{line_no}: {lines[index].rstrip('\\r\\n')}\n")
+
+            return (
+                f"file: {file_path}\n"
+                f"total_lines: {total_lines}\n"
+                f"showing: {start_line}-{actual_end_line}\n"
+                + "".join(numbered_lines)
+            )
+        except FileNotFoundError:
+            return f"File '{file_path}' not found."
+        except Exception as e:
+            logger.error(
+                f"Error reading file with line numbers {file_path}: {str(e)}"
+            )
+            return str(e)
+
     def read_binary_file(self, file_path: str, max_bytes: int) -> list[Any] | str:
         logger.info(f"Reading binary file: {file_path}")
         try:
@@ -286,7 +375,7 @@ class FileTools:
                     new_size = (max(1, int(w * scale)), max(1, int(h * scale)))
                     im = im.resize(new_size, Image.Resampling.LANCZOS)
 
-                def encode_image(image: Image.Image, quality_value: int) -> bytes:
+                def encode_image(image: Any, quality_value: int) -> bytes:
                     buffer = io.BytesIO()
                     save_kwargs: dict[str, Any] = {}
                     if fmt == "jpeg":
@@ -350,6 +439,90 @@ class FileTools:
         except Exception as e:
             logger.error(f"Error modifying file {file_path}: {str(e)}")
             return str(e)
+
+    def replace_lines_in_file(
+        self,
+        file_path: str,
+        start_line: int,
+        end_line: int,
+        new_content: str,
+    ) -> str:
+        try:
+            if start_line < 1:
+                return "Error: start_line must be >= 1."
+            if end_line < start_line:
+                return "Error: end_line must be >= start_line."
+
+            if not confirm(
+                message=(
+                    "Agent wants to replace lines "
+                    f"{start_line}-{end_line} in '{file_path}', allow?"
+                ),
+                default_choice="Y",
+            ):
+                logger.info(
+                    f"User denied line replacement: {file_path} ({start_line}-{end_line})"
+                )
+                raise PermissionError(
+                    "❌ User denied permission to modify this file. The operation was cancelled."
+                )
+
+            logger.info(
+                f"Replacing lines in file: {file_path} ({start_line}-{end_line})"
+            )
+            if not os.path.exists(file_path):
+                raise FileNotFoundError(f"File '{file_path}' does not exist.")
+
+            with open(file_path, "r", encoding="utf-8") as file:
+                lines = file.readlines()
+
+            total_lines = len(lines)
+            if total_lines == 0:
+                return f"Error: File '{file_path}' is empty."
+            if end_line > total_lines:
+                return f"Error: end_line {end_line} exceeds total lines {total_lines}."
+
+            newline = "\r\n" if any(line.endswith("\r\n") for line in lines) else "\n"
+
+            replacement_lines = new_content.splitlines(keepends=True)
+            if (
+                replacement_lines
+                and not replacement_lines[-1].endswith(("\n", "\r"))
+                and end_line < total_lines
+            ):
+                replacement_lines[-1] = replacement_lines[-1] + newline
+
+            updated_lines = (
+                lines[: start_line - 1] + replacement_lines + lines[end_line:]
+            )
+
+            with open(file_path, "w", encoding="utf-8") as file:
+                file.writelines(updated_lines)
+
+            return (
+                f"Replaced lines {start_line}-{end_line} in '{file_path}' successfully. "
+                f"Total lines: {total_lines} -> {len(updated_lines)}."
+            )
+        except FileNotFoundError:
+            return f"File '{file_path}' not found."
+        except Exception as e:
+            logger.error(
+                f"Error replacing lines in file {file_path}: {str(e)}"
+            )
+            return str(e)
+
+    def replace_line_in_file(
+        self,
+        file_path: str,
+        line_number: int,
+        new_content: str,
+    ) -> str:
+        return self.replace_lines_in_file(
+            file_path=file_path,
+            start_line=line_number,
+            end_line=line_number,
+            new_content=new_content,
+        )
 
     def rename_file_or_directory(self, path: str, new_name: str) -> str:
         try:
