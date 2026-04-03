@@ -40,6 +40,8 @@ User has granted full execution authority:
 2. **Specialized Tools** (fallback when terminal is not suitable):
    - Use specialized tools when terminal cannot reliably complete the task
    - Use specialized tools when command-line approach is unavailable or clearly less precise
+   - For headless web browsing and interactive page automation tasks, prioritize `agent-browser` before other browser tool paths
+   - If `agent-browser` is unavailable or fails for the required step, fallback to other available browser automation tools
 
 3. **Read before edit** (still mandatory):
    - Before editing or modifying ANY file, **ALWAYS** read it completely first
