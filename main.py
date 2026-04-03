@@ -39,6 +39,7 @@ from internal.compaction import (
 )
 
 COMMAND_PREFIX = "/"
+GUI_CHUNK_EMIT_SIZE = 2000
 
 
 class AgentRuntime(QThread):
@@ -276,9 +277,21 @@ class AgentRuntime(QThread):
             ):
                 if not chunk:
                     continue
-                chunks.append(chunk)
-                self.chunk_ready.emit(request_id, chunk)
-                logger.debug(f"Received chunk: {len(chunk)} chars")
+                if len(chunk) <= GUI_CHUNK_EMIT_SIZE:
+                    chunks.append(chunk)
+                    self.chunk_ready.emit(request_id, chunk)
+                    logger.debug(f"Received chunk: {len(chunk)} chars")
+                    continue
+
+                for i in range(0, len(chunk), GUI_CHUNK_EMIT_SIZE):
+                    part = chunk[i : i + GUI_CHUNK_EMIT_SIZE]
+                    chunks.append(part)
+                    self.chunk_ready.emit(request_id, part)
+                logger.debug(
+                    "Received oversized chunk: %s chars (split into %s parts)",
+                    len(chunk),
+                    (len(chunk) + GUI_CHUNK_EMIT_SIZE - 1) // GUI_CHUNK_EMIT_SIZE,
+                )
 
         timeout_val = None
 
@@ -424,7 +437,7 @@ class GUIAgentApp:
         self._update_throttle_timer.setSingleShot(True)
         self._update_throttle_timer.timeout.connect(self._flush_display_update)
         self._pending_display_update = False
-        self._throttle_interval = 50  # 最小更新間隔（毫秒）
+        self._throttle_interval = 80  # 最小更新間隔（毫秒）
         
         # 創建指令處理器（GUI 專用的輸出回調）
         self.command_handler: CommandHandler | None = None
@@ -648,15 +661,8 @@ class GUIAgentApp:
                     else:
                         self._display_text += emit
                         updated = True
-                # If there is no emit because the buffer is still small, show a transient preview
+                # If there is no emit because the buffer is still small, wait for more chunks.
                 if not emit:
-                    # Show partial preview (do not consume buffer) so UI doesn't appear stalled
-                    try:
-                        # Avoid committing preview if nothing to show
-                        if self._stream_buffer:
-                            self.main_window.update_speech_bubble(self._compose_display_text(self._display_text + self._stream_buffer))
-                    except Exception:
-                        pass
                     break
                 continue
 
