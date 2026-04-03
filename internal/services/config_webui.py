@@ -158,13 +158,6 @@ def _get_github_copilot_models(provider: ProviderConfig) -> list[str]:
     except Exception as e:
         print(f"無法連接到 models.dev: {type(e).__name__}: {e}")
         return []
-
-
-def _get_fallback_models(provider: ProviderConfig) -> list[str]:
-    """此函數已棄用 - 不再使用假資料"""
-    return []
-
-
 # ===== API Routes =====
 
 @app.route('/')
