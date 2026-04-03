@@ -12,7 +12,12 @@ from internal.logger import logger
 from internal.services.agent_factory import load_base_config
 from internal.services.voice_manager import VoiceManager
 from internal.command_handler import CommandHandler
-from internal.compaction import CompactCoordinator, ConversationState, recalc_total_tokens
+from internal.compaction import (
+    CompactCoordinator,
+    ConversationState,
+    MAX_CONTEXT_TOKENS,
+    recalc_total_tokens,
+)
 
 COMMAND_PREFIX = "/"
 
@@ -201,6 +206,28 @@ async def run_cli(
                 except Exception:
                     chat_history = None
 
+            async def force_compact() -> tuple[bool, int, int]:
+                nonlocal chat_history
+                base_messages = chat_history or getattr(main_agent, "_last_messages", None) or []
+                if not base_messages:
+                    return False, 0, 0
+
+                conversation_state.fullMessages = list(base_messages)
+                before_count = len(conversation_state.fullMessages)
+                conversation_state.totalTokens = max(
+                    recalc_total_tokens(conversation_state.fullMessages),
+                    MAX_CONTEXT_TOKENS,
+                )
+                updated_state = await compact_coordinator.maybeCompact(conversation_state)
+                conversation_state.fullMessages = updated_state.fullMessages
+                conversation_state.recentMessages = updated_state.recentMessages
+                conversation_state.compressedSummary = updated_state.compressedSummary
+                conversation_state.totalTokens = updated_state.totalTokens
+                conversation_state.lastCompactedMessageId = updated_state.lastCompactedMessageId
+                chat_history = updated_state.fullMessages
+                after_count = len(chat_history)
+                return after_count < before_count, before_count, after_count
+
             def read_input_once() -> str | None:
                 user_input = input("輸入文字或按Enter啟動語音辨識> ").strip()
                 if not user_input:
@@ -217,6 +244,13 @@ async def run_cli(
                 if user_input.startswith(COMMAND_PREFIX):
                     action = command_handler.handle(user_input)
                     if action == "__exit__":
+                        return
+                    if action == "__compact__":
+                        changed, before, after = await force_compact()
+                        if changed:
+                            print(f"已執行壓縮：訊息數 {before} -> {after}")
+                        else:
+                            print("已嘗試壓縮，但目前可壓縮內容不足（需要超過最近保留訊息量）。")
                         return
                     if action:
                         user_input = action
@@ -241,6 +275,13 @@ async def run_cli(
                         action = command_handler.handle(user_input)
                         if action == "__exit__":
                             break
+                        if action == "__compact__":
+                            changed, before, after = await force_compact()
+                            if changed:
+                                print(f"已執行壓縮：訊息數 {before} -> {after}")
+                            else:
+                                print("已嘗試壓縮，但目前可壓縮內容不足（需要超過最近保留訊息量）。")
+                            continue
                         if action:
                             user_input = action
                         else:

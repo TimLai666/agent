@@ -99,6 +99,10 @@ class CommandHandler:
         elif name == "/retry":
             return self._handle_retry()
 
+        # /compact - 手動觸發一次上下文壓縮
+        elif name == "/compact":
+            return "__compact__"
+
         # /config - 啟動設定 CLI 菜單（CLI 下同步，GUI 下非同步）
         elif name == "/config":
             try:
@@ -163,6 +167,7 @@ class CommandHandler:
   /history [N]       顯示最近 N 輪對話（預設 5）
   /last              顯示最後的助手回覆
   /retry             重新執行最後的輸入
+    /compact           手動觸發一次上下文壓縮
 
 Skills 管理：
   /skills reload     重新載入 skills

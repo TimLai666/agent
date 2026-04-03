@@ -23,7 +23,12 @@ from internal.services.voice_manager import VoiceManager
 from internal.cli import set_gui_confirm_handler
 from internal.command_handler import CommandHandler
 from internal.services import config_webui, config_cli
-from internal.compaction import CompactCoordinator, ConversationState, recalc_total_tokens
+from internal.compaction import (
+    CompactCoordinator,
+    ConversationState,
+    MAX_CONTEXT_TOKENS,
+    recalc_total_tokens,
+)
 
 COMMAND_PREFIX = "/"
 
@@ -287,6 +292,39 @@ class AgentRuntime(QThread):
 
         future.add_done_callback(done_callback)
         return request_id
+
+    async def _force_compact(self):
+        if self._ready_event:
+            await self._ready_event.wait()
+        if not self.main_agent:
+            raise RuntimeError("Main agent not initialized")
+
+        base_messages = (
+            self._conversation_state.fullMessages
+            or getattr(self.main_agent, "_last_messages", None)
+            or []
+        )
+        if not base_messages:
+            return False, 0, 0, []
+
+        self._conversation_state.fullMessages = list(base_messages)
+        before_count = len(self._conversation_state.fullMessages)
+        self._conversation_state.totalTokens = max(
+            recalc_total_tokens(self._conversation_state.fullMessages),
+            MAX_CONTEXT_TOKENS,
+        )
+        if self._compact_coordinator is not None:
+            self._conversation_state = await self._compact_coordinator.maybeCompact(self._conversation_state)
+        after_messages = self._conversation_state.fullMessages
+        after_count = len(after_messages)
+        changed = after_count < before_count
+        return changed, before_count, after_count, after_messages
+
+    def force_compact(self):
+        if not self.loop:
+            raise RuntimeError("Initialization failed. Check logs.")
+        future = asyncio.run_coroutine_threadsafe(self._force_compact(), self.loop)
+        return future.result()
 
 
 class GUIAgentApp:
@@ -655,6 +693,17 @@ class GUIAgentApp:
                     return
                 # 處理指令
                 result = self.command_handler.handle(user_input)
+                if result == "__compact__":
+                    try:
+                        changed, before, after, updated_history = self.runtime.force_compact()
+                        self.chat_history = updated_history or self.chat_history
+                        if changed:
+                            self.main_window.update_speech_bubble(f"已執行壓縮：訊息數 {before} -> {after}")
+                        else:
+                            self.main_window.update_speech_bubble("已嘗試壓縮，但目前可壓縮內容不足（需要超過最近保留訊息量）。")
+                    except Exception as exc:
+                        self.main_window.update_speech_bubble(f"手動壓縮失敗：{exc}")
+                    return
                 if result:
                     # 指令返回了要執行的提示（如 /retry）
                     user_input = result
