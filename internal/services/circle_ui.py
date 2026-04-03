@@ -787,6 +787,7 @@ class CommandLineEdit(QLineEdit):
         "/history 10",
         "/last",
         "/retry",
+        "/compact",
         "/tools",
         "/skills",
         "/skills list",
