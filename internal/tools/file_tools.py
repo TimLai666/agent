@@ -172,19 +172,6 @@ def add_file_tools(agent: Agent) -> None:
         )
 
     @agent.tool_plain
-    def delete_lines_in_file(
-        file_path: str,
-        start_line: int,
-        end_line: int,
-    ) -> str:
-        """Delete a line range in a text file using 1-based line numbers."""
-        return file_tools_manager.delete_lines_in_file(
-            file_path,
-            start_line,
-            end_line,
-        )
-
-    @agent.tool_plain
     def rename_file_or_directory(path: str, new_name: str) -> str:
         """Rename a file or directory. new_name should not include the path."""
         return file_tools_manager.rename_file_or_directory(path, new_name)
