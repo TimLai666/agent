@@ -1101,51 +1101,51 @@ class SpinnerLabel(QLabel):
 
 
 class WaveformWidget(QWidget):
-    """Animated audio waveform bars shown inside the input field during voice capture."""
+    """Animated audio waveform bars — self-animating, no external mic access needed."""
 
     BAR_COUNT = 7
     BAR_W = 4
     BAR_GAP = 4
-    MIN_H = 4
+    MIN_H = 3
     MAX_H = 22
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         total_w = self.BAR_COUNT * (self.BAR_W + self.BAR_GAP) - self.BAR_GAP
-        self.setFixedWidth(total_w + 8)
+        self.setFixedWidth(total_w + 16)
         self.setMinimumHeight(self.MAX_H + 8)
-        self._heights = [self.MIN_H] * self.BAR_COUNT
-        self._targets = [self.MIN_H] * self.BAR_COUNT
+        self._heights = [float(self.MIN_H)] * self.BAR_COUNT
         self._timer = QTimer(self)
-        self._timer.setInterval(80)
+        self._timer.setInterval(70)
         self._timer.timeout.connect(self._animate)
-        self._level = 0.0
-        import random
-        self._rng = random.Random()
+        self._tick = 0
 
     def start(self):
+        self._tick = 0
         self._timer.start()
 
     def stop(self):
         self._timer.stop()
-        self._heights = [self.MIN_H] * self.BAR_COUNT
+        self._heights = [float(self.MIN_H)] * self.BAR_COUNT
         self.update()
 
-    def set_level(self, level: float):
-        self._level = max(0.0, min(1.0, level))
+    def set_level(self, _level: float):
+        pass  # level sampling removed to avoid mic conflict; animation is autonomous
 
     def _animate(self):
-        import random, math
-        t = self._level
+        import math, random
+        self._tick += 1
+        t = self._tick * 0.18
         for i in range(self.BAR_COUNT):
-            center = self.BAR_COUNT / 2
-            dist = abs(i - center) / center
-            envelope = math.cos(dist * math.pi / 2) ** 2
-            base_h = self.MIN_H + (self.MAX_H - self.MIN_H) * t * envelope
-            noise = random.uniform(-3, 3) * (0.5 + t)
+            # Sine wave across bars with per-bar phase offset + random noise
+            phase = i * (math.pi / (self.BAR_COUNT - 1))
+            wave = (math.sin(t + phase) + 1) / 2          # 0..1
+            envelope = math.sin(i * math.pi / (self.BAR_COUNT - 1))  # bell shape
+            base_h = self.MIN_H + (self.MAX_H - self.MIN_H) * wave * envelope
+            noise = random.uniform(-1.5, 1.5)
             target = max(self.MIN_H, min(self.MAX_H, base_h + noise))
-            self._heights[i] += (target - self._heights[i]) * 0.4
+            self._heights[i] += (target - self._heights[i]) * 0.35
         self.update()
 
     def paintEvent(self, _event):

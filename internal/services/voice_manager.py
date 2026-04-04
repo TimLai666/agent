@@ -26,15 +26,18 @@ class VoiceManager:
         on_level: Callable[[float], None] | None = None,
     ) -> None:
         """Start background listening. on_result called with transcribed text (or None).
-        on_level(0.0‒1.0) called periodically with mic amplitude (for waveform UI).
-        Call cancel() to abort early."""
+        The waveform level is animated by the UI itself; on_level is no longer used
+        to avoid opening a second audio stream which would crash PortAudio.
+        Call cancel() to abort, submit_now() to stop recording and transcribe immediately."""
         self._cancel_flag.clear()
         self._audio_ready.clear()
         self._bg_audio = None
 
         def _audio_callback(recognizer, audio):
-            self._bg_audio = audio
-            self._audio_ready.set()
+            # Called by speech_recognition when a phrase is detected
+            if not self._cancel_flag.is_set():
+                self._bg_audio = audio
+                self._audio_ready.set()
 
         try:
             self._bg_stop_fn = self.recognizer.listen_in_background(
@@ -46,18 +49,12 @@ class VoiceManager:
             return
 
         def _worker():
-            # Poll level while waiting for audio
             import time
+            # Wait until audio arrives naturally OR user cancels/submits
             while not self._audio_ready.is_set() and not self._cancel_flag.is_set():
-                if on_level:
-                    try:
-                        level = self._sample_mic_level()
-                        on_level(level)
-                    except Exception:
-                        pass
-                time.sleep(0.08)
+                time.sleep(0.05)
 
-            # Stop background listener
+            # Stop the background listener before doing anything else
             if self._bg_stop_fn:
                 try:
                     self._bg_stop_fn(wait_for_stop=False)
@@ -65,10 +62,15 @@ class VoiceManager:
                     pass
                 self._bg_stop_fn = None
 
-            if self._cancel_flag.is_set() or self._bg_audio is None:
+            if self._cancel_flag.is_set():
                 on_result(None)
                 return
 
+            if self._bg_audio is None:
+                on_result(None)
+                return
+
+            # Transcribe in the same worker thread (Whisper is CPU-bound)
             on_result(self._transcribe(self._bg_audio))
 
         threading.Thread(target=_worker, daemon=True).start()
@@ -80,7 +82,7 @@ class VoiceManager:
     def cancel(self) -> None:
         """Abort in-progress recognition without transcribing."""
         self._cancel_flag.set()
-        self._audio_ready.set()
+        self._audio_ready.set()  # unblock worker
         if self._bg_stop_fn:
             try:
                 self._bg_stop_fn(wait_for_stop=False)
@@ -89,17 +91,6 @@ class VoiceManager:
             self._bg_stop_fn = None
 
     # ── Internal helpers ───────────────────────────────────────────────────
-
-    def _sample_mic_level(self) -> float:
-        """Return a rough 0..1 RMS level from a tiny mic burst (non-blocking approx)."""
-        try:
-            with sr.Microphone() as src:
-                raw = src.stream.read(1024)
-            samples = np.frombuffer(raw, dtype=np.int16).astype(np.float32)
-            rms = float(np.sqrt(np.mean(samples ** 2))) / 32768.0
-            return min(1.0, rms * 8)
-        except Exception:
-            return 0.1
 
     def _transcribe(self, audio) -> str | None:
         try:

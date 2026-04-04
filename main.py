@@ -394,8 +394,7 @@ class AgentRuntime(QThread):
 
 
 class GUIAgentApp(QObject):
-    # Signals for cross-thread voice updates (worker thread → main/Qt thread)
-    _voice_level_signal = Signal(float)
+    # Signal for cross-thread voice result (worker thread → main/Qt thread)
     _voice_result_signal = Signal(object)  # str | None
 
     def __init__(self, skill_root_dirs: list[Path] | None = None):
@@ -488,8 +487,7 @@ class GUIAgentApp(QObject):
         self.main_window.set_bypass_callback(self._on_bypass_changed)
         self.main_window.set_voice_callback(self._on_voice_event)
         self.main_window.collapse_state_changed.connect(self._on_collapse_state_changed)
-        # Wire cross-thread voice signals to main-window slots
-        self._voice_level_signal.connect(self.main_window.set_voice_level)
+        # Wire cross-thread voice result signal to main-thread slot
         self._voice_result_signal.connect(self._on_voice_result)
         # 當使用者在輸入框輸入時，重置閒置計時
         try:
@@ -523,10 +521,7 @@ class GUIAgentApp(QObject):
         def _on_result(text):
             self._voice_result_signal.emit(text)
 
-        def _on_level(lvl):
-            self._voice_level_signal.emit(lvl)
-
-        self.voice_manager.start_listening(on_result=_on_result, on_level=_on_level)
+        self.voice_manager.start_listening(on_result=_on_result)
 
     def _on_voice_result(self, text) -> None:
         """Called in main thread when recognition finishes (text or None)."""
