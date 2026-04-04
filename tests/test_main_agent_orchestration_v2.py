@@ -13,6 +13,7 @@ def _bind_methods(fake_main: object) -> None:
         "_coordinator_looks_like_direct_question",
         "_coordinator_should_decompose_todos",
         "_coordinator_extract_todo_steps",
+        "_coordinator_make_worker_title",
         "_coordinator_build_worker_specs",
         "_coordinator_make_or_update_plan",
         "_coordinator_spawn_worker",
@@ -168,7 +169,7 @@ def test_small_implementation_plan_skips_planner_calls():
 
         assert plan.type == "spawn-worker"
         assert plan.workerSpec is not None
-        assert plan.workerSpec.title == "implementation-task"
+        assert plan.workerSpec.title == "fix the failing test"
         assert len(plan.workerSpecs) == 1
 
     asyncio.run(scenario())

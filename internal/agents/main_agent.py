@@ -457,6 +457,7 @@ class MainAgent:
             elif extra_tools:
                 for tool in extra_tools:
                     agent.tool_plain(tool)
+            main_agent._register_todo_tools()
             if include_subagent_tools:
                 main_agent._register_subagent_tools()
             logger.info("Registered tools on MainAgent")
@@ -489,6 +490,9 @@ class MainAgent:
         self.skill_root_dirs = list(skill_root_dirs or [])
         self._session_id = str(uuid.uuid4())
         self._task_notifications: list[str] = []
+        self._todo_tool_snapshot: str = ""
+        self._todo_tool_items: list[dict[str, Any]] = []
+        self._active_todo_update_callback: Callable[[str], None] | None = None
         self._task_manager = SubagentTaskManager(
             worker=self._run_subagent_task,
             enqueue_notification=self._enqueue_pending_notification,
@@ -538,6 +542,58 @@ class MainAgent:
             """List current subagent tasks for this coordinator session."""
             return self._task_manager.listTasks(self._session_id)
 
+    def _render_todo_snapshot(self, phase: str, items: list[dict[str, Any]]) -> str:
+        lines = [f"[TODO] phase={phase or 'executing'}"]
+        if not items:
+            lines.append("- (empty)")
+            return "\n".join(lines)
+
+        for raw in items:
+            todo_id = str(raw.get("id", "")).strip() or "todo"
+            title = str(raw.get("title", "")).strip() or str(raw.get("description", "")).strip() or todo_id
+            status = str(raw.get("status", "")).strip() or "pending"
+            notes = str(raw.get("notes", "")).strip()
+            suffix = f" | notes={notes}" if notes else ""
+            lines.append(f"- {todo_id} [{status}] {title}{suffix}")
+        return "\n".join(lines)
+
+    def _publish_todo_snapshot(
+        self,
+        snapshot: str,
+        items: list[dict[str, Any]] | None = None,
+        *,
+        emit: bool = True,
+    ) -> str:
+        self._todo_tool_snapshot = (snapshot or "").strip()
+        self._todo_tool_items = list(items or [])
+        callback = self._active_todo_update_callback
+        if emit and callback and self._todo_tool_snapshot:
+            callback(self._todo_tool_snapshot)
+        return self._todo_tool_snapshot
+
+    def _register_todo_tools(self) -> None:
+        @self.agent.tool_plain
+        def todo(
+            phase: str,
+            items: list[dict[str, Any]],
+        ) -> str:
+            """Update the current session todo list. Use for multi-step work only; keep 2-4 items and update statuses as work progresses."""
+            normalized_items: list[dict[str, Any]] = []
+            for raw in items[:8]:
+                if not isinstance(raw, dict):
+                    continue
+                normalized_items.append(
+                    {
+                        "id": str(raw.get("id", "")).strip(),
+                        "title": str(raw.get("title", "")).strip(),
+                        "description": str(raw.get("description", "")).strip(),
+                        "status": str(raw.get("status", "")).strip() or "pending",
+                        "notes": str(raw.get("notes", "")).strip(),
+                    }
+                )
+            snapshot = self._render_todo_snapshot(phase, normalized_items)
+            return self._publish_todo_snapshot(snapshot, normalized_items)
+
     def _enqueue_pending_notification(self, xml: str) -> None:
         self._task_notifications.append(xml)
 
@@ -557,6 +613,29 @@ class MainAgent:
             "<internal-task-notifications>\n"
             f"{joined}\n"
             "</internal-task-notifications>\n\n"
+            f"{prompt}"
+        )
+
+    def _inject_todo_snapshot(self, prompt: str) -> str:
+        guidance = (
+            "<active-session-todos>\n"
+            "Use the `todo` tool only when the request needs multiple steps or when blockers/progress change.\n"
+            "Skip it for direct one-shot answers.\n"
+            "Keep the todo list short: usually 2-4 items.\n"
+        )
+        if self._todo_tool_snapshot:
+            return (
+                f"{guidance}\n"
+                "Current todo snapshot:\n"
+                f"{self._todo_tool_snapshot}\n"
+                "</active-session-todos>\n\n"
+                f"{prompt}"
+            )
+        return (
+            f"{guidance}"
+            "Current todo snapshot:\n"
+            "- (empty)\n"
+            "</active-session-todos>\n\n"
             f"{prompt}"
         )
 
@@ -1074,30 +1153,38 @@ class MainAgent:
         message_history: list[ModelRequest | ModelResponse] | None = None,
         on_todo_update: Callable[[str], None] | None = None,
     ) -> str:
-        _ = message_history
-        task_kind = self._coordinator_infer_task_kind(user_prompt)
-        execute_turn = getattr(self, "_execute_turn_core", None)
-        if task_kind == "question" and callable(execute_turn):
-            return await execute_turn(
-                user_prompt,
-                message_history=message_history,
-                skip_plan_execution=True,
+        def todo_callback(snapshot: str) -> None:
+            self._publish_todo_snapshot(snapshot, self._todo_tool_items, emit=False)
+            if on_todo_update:
+                on_todo_update(snapshot)
+
+        self._active_todo_update_callback = todo_callback
+        try:
+            task_kind = self._coordinator_infer_task_kind(user_prompt)
+            execute_turn = getattr(self, "_execute_turn_core", None)
+            if task_kind == "question" and callable(execute_turn):
+                return await execute_turn(
+                    user_prompt,
+                    message_history=message_history,
+                    skip_plan_execution=True,
+                )
+            ctx = CoordinatorTurnContext(
+                userRequest=user_prompt,
+                taskKind=task_kind,
             )
-        ctx = CoordinatorTurnContext(
-            userRequest=user_prompt,
-            taskKind=task_kind,
-        )
-        return await run_coordinator_turn(
-            ctx,
-            make_or_update_plan=self._coordinator_make_or_update_plan,
-            spawn_worker=self._coordinator_spawn_worker,
-            spawn_verification_worker=self._coordinator_spawn_verification,
-            synthesize_final_answer=lambda context, worker, verification: synthesize_final_answer(
-                worker, verification
-            ),
-            augment_context_with_failure=self._coordinator_augment_context_with_failure,
-            on_todo_update=on_todo_update,
-        )
+            return await run_coordinator_turn(
+                ctx,
+                make_or_update_plan=self._coordinator_make_or_update_plan,
+                spawn_worker=self._coordinator_spawn_worker,
+                spawn_verification_worker=self._coordinator_spawn_verification,
+                synthesize_final_answer=lambda context, worker, verification: synthesize_final_answer(
+                    worker, verification
+                ),
+                augment_context_with_failure=self._coordinator_augment_context_with_failure,
+                on_todo_update=todo_callback,
+            )
+        finally:
+            self._active_todo_update_callback = None
 
     async def coordinator_handle_user_turn_stream(
         self,
@@ -1340,6 +1427,26 @@ class MainAgent:
 
         return []
 
+    def _coordinator_make_worker_title(self, user_request: str, worker_type: str) -> str:
+        title = user_request.strip()
+        title = re.sub(r"\s+", " ", title)
+        title = re.sub(
+            r"^(please|can you|could you|help me|let'?s|pls)\s+",
+            "",
+            title,
+            flags=re.IGNORECASE,
+        )
+        title = re.sub(
+            r"^(請|幫我|幫忙|請你|麻煩你|我想要)\s*",
+            "",
+            title,
+        )
+        parts = [part.strip() for part in re.split(r"[\n，,；;。!?！？]", title) if part.strip()]
+        if parts:
+            title = parts[0]
+        title = title[:64].strip(" -:：")
+        return title or f"{worker_type}-task"
+
     def _coordinator_build_worker_specs(
         self,
         *,
@@ -1355,7 +1462,7 @@ class MainAgent:
             return [
                 SpawnWorkerInput(
                     agentType=worker_type,
-                    title=f"{worker_type}-task",
+                    title=self._coordinator_make_worker_title(user_request, worker_type),
                     originalUserRequest=user_request,
                     instruction=base_instruction,
                     runInBackground=False,
@@ -1367,7 +1474,7 @@ class MainAgent:
             return [
                 SpawnWorkerInput(
                     agentType=worker_type,
-                    title=f"{worker_type}-task",
+                    title=self._coordinator_make_worker_title(user_request, worker_type),
                     originalUserRequest=user_request,
                     instruction=base_instruction,
                     runInBackground=False,
@@ -1571,6 +1678,7 @@ class MainAgent:
         self._previous_user_prompt = self._last_user_prompt
         self._last_user_prompt = prompt
         prompt = self._inject_task_notifications(prompt)
+        prompt = self._inject_todo_snapshot(prompt)
         prompt = self._inject_local_timestamp(prompt)
         user_content, _ = self._build_user_prompt_content(prompt)
         safe_history = self._trim_message_history_for_budget(message_history, user_content)
@@ -1665,6 +1773,7 @@ class MainAgent:
         self._previous_user_prompt = self._last_user_prompt
         self._last_user_prompt = prompt
         prompt = self._inject_task_notifications(prompt)
+        prompt = self._inject_todo_snapshot(prompt)
         prompt = self._inject_local_timestamp(prompt)
         user_content, _ = self._build_user_prompt_content(prompt)
         safe_history = self._trim_message_history_for_budget(message_history, user_content)

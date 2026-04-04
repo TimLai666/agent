@@ -17,6 +17,7 @@ def _bind_main_coordinator_methods(fake_main: object) -> None:
         "_coordinator_make_or_update_plan",
         "_coordinator_should_decompose_todos",
         "_coordinator_extract_todo_steps",
+        "_coordinator_make_worker_title",
         "_coordinator_build_worker_specs",
         "_coordinator_spawn_worker",
         "_coordinator_spawn_verification",
@@ -281,7 +282,7 @@ def test_coordinator_plan_builds_single_worker_without_planner():
 
         assert plan.type == "spawn-worker"
         assert plan.workerSpec is not None
-        assert plan.workerSpec.title == "implementation-task"
+        assert plan.workerSpec.title == "fix bug"
         assert plan.workerSpec.instruction == "plan:fix bug"
         assert len(plan.workerSpecs) == 1
 
