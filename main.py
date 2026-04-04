@@ -419,6 +419,7 @@ class GUIAgentApp(QObject):
         self._todo_snapshot_text = ""
         self._discussion_text = ""  # Q&A from AskUserQuestion
         self._stop_context = ""    # context saved when user stops mid-run
+        self._pending_tmp_image: str = ""  # temp image path to delete after agent done
         self._ui_collapsed = False
         self._waiting_response = False
         self._waiting_status = ""
@@ -853,9 +854,23 @@ class GUIAgentApp(QObject):
         self._auto_open_config_panel_if_needed()
         self._reset_idle_timer()
 
+    def _cleanup_pending_tmp_image(self) -> None:
+        """Delete the temp image file created for clipboard paste, if any."""
+        if self._pending_tmp_image:
+            import os
+            try:
+                if os.path.exists(self._pending_tmp_image):
+                    os.unlink(self._pending_tmp_image)
+                    logger.debug(f"Deleted temp image: {self._pending_tmp_image}")
+            except Exception as e:
+                logger.debug(f"Could not delete temp image: {e}")
+            finally:
+                self._pending_tmp_image = ""
+
     def handle_result(self, request_id, output, updated_history):
         if request_id != self._active_request_id:
             return
+        self._cleanup_pending_tmp_image()
         logger.info(
             f"handle_result called with output: {output[:100] if output else 'None'}..."
         )
@@ -908,6 +923,7 @@ class GUIAgentApp(QObject):
     def handle_error(self, request_id, error_message):
         if request_id not in (0, self._active_request_id):
             return
+        self._cleanup_pending_tmp_image()
         self.main_window.update_speech_bubble(self._compose_display_text(f"Error: {error_message}"))
         # 停止動畫，即使發生錯誤
         self.main_window.stop_agent_animation()
@@ -1136,10 +1152,11 @@ class GUIAgentApp(QObject):
             try:
                 _tmp_image_path = self.main_window.pop_attached_image_as_tempfile()
                 if _tmp_image_path:
+                    self._pending_tmp_image = _tmp_image_path
                     user_input = (
                         f"{user_input}\n\n"
                         f"[User pasted an image. It has been saved to: {_tmp_image_path}]\n"
-                        f"Read or analyse this image file, then delete it when done."
+                        f"Read or analyse this image file."
                     )
             except Exception:
                 pass
@@ -1203,24 +1220,12 @@ class GUIAgentApp(QObject):
             request_id = self.runtime.submit(user_input, self.chat_history)
             if request_id:
                 self._active_request_id = request_id
-            # Schedule temp image cleanup after agent finishes (fallback if agent didn't delete)
-            if _tmp_image_path:
-                def _cleanup_tmp(path=_tmp_image_path):
-                    import os, time
-                    time.sleep(30)  # wait 30s for agent to read it
-                    try:
-                        if os.path.exists(path):
-                            os.unlink(path)
-                            logger.debug(f"Cleaned up temp image: {path}")
-                    except Exception:
-                        pass
-                import threading
-                threading.Thread(target=_cleanup_tmp, daemon=True).start()
 
     def stop_current_request(self) -> None:
         """Cancel the current agent request (stop button handler)."""
         if not self._waiting_response:
             return
+        self._cleanup_pending_tmp_image()
         try:
             if self.runtime._current_future and not self.runtime._current_future.done():
                 self.runtime._current_future.cancel()
