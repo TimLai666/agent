@@ -413,6 +413,7 @@ class GUIAgentApp:
         self._tool_log_lines: list[str] = []
         self._todo_snapshot_text = ""
         self._discussion_text = ""  # Q&A from AskUserQuestion
+        self._stop_context = ""    # context saved when user stops mid-run
         self._ui_collapsed = False
         self._waiting_response = False
         self._waiting_status = ""
@@ -1039,6 +1040,7 @@ class GUIAgentApp:
                             self._last_assistant_reply = ""
                             self._display_text = ""
                             self._discussion_text = ""
+                            self._stop_context = ""
                             self._reset_tool_log()
                             self._reset_todo_snapshot()
                             self.main_window.update_speech_bubble("對話 context 已清空")
@@ -1078,6 +1080,28 @@ class GUIAgentApp:
             self._last_user_input = user_input
             if self.command_handler:
                 self.command_handler.update_last_prompt(user_input)
+
+            # ── Retrieve any attachment from the input bar ─────────────────
+            try:
+                attached_file = self.main_window.get_attached_file_path()
+                if attached_file:
+                    user_input = f"{user_input}\n\n[Attached file: {attached_file}]"
+            except Exception:
+                pass
+            try:
+                attached_image = self.main_window.get_attached_image_data()
+                if attached_image:
+                    # stored for agent to use; append note to prompt
+                    user_input = f"{user_input}\n\n[User attached an image for context]"
+            except Exception:
+                pass
+            # ──────────────────────────────────────────────────────────────
+
+            # ── Inject stop-context from previous cancelled request ────────
+            if self._stop_context and not self._waiting_response:
+                user_input = f"{self._stop_context}\nNew message from user: {user_input}"
+                self._stop_context = ""
+            # ──────────────────────────────────────────────────────────────
 
             # ── Interrupt-with-progress ────────────────────────────────────
             # If agent is mid-stream, save partial result and inject context
@@ -1141,9 +1165,17 @@ class GUIAgentApp:
                 self.runtime._current_future.cancel()
         except Exception:
             pass
+        # Save interrupted context so next message can reference it
+        partial = (self._display_text or "").strip()
+        if self._last_user_input:
+            excerpt = partial[:300] + ("…" if len(partial) > 300 else "") if partial else ""
+            self._stop_context = (
+                f"[Previous session was interrupted by user]\n"
+                f"User had asked: {self._last_user_input}\n"
+                + (f"Your partial response: {excerpt}\n" if excerpt else "")
+            )
         self._waiting_response = False
         self._waiting_status = ""
-        partial = (self._display_text or "").strip()
         if partial:
             self.main_window.update_speech_bubble(self._compose_display_text())
         else:

@@ -219,7 +219,6 @@ def _prepare_markdown(text: str) -> str:
     return _autolink_markdown(text)
 
 from PySide6.QtCore import (
-    QEventLoop,
     QMetaObject,
     Property,
     QRect,
@@ -934,12 +933,15 @@ class CommandLineEdit(QLineEdit):
                             pil_img.save(buf, format="PNG")
                             img_bytes = buf.getvalue()
                         # Walk up to find MainWindow and store image
+                        w = img.width()
+                        h = img.height()
                         parent = self.parent()
                         while parent is not None:
                             if hasattr(parent, "_attached_image_data"):
                                 parent._attached_image_data = img_bytes
-                                if hasattr(parent, "_attach_label"):
-                                    parent._attach_label.setText("📷 image")
+                                parent._attached_file_path = ""
+                                if hasattr(parent, "_show_attach_chip"):
+                                    parent._show_attach_chip(f"📷 image.png  {w}×{h}")
                                 break
                             parent = parent.parent() if hasattr(parent, "parent") else None
                     except Exception as e:
@@ -2494,7 +2496,7 @@ class MainWindow(QMainWindow):
         self.BALL_CENTER_FROM_BOTTOM = 130
         # 固定輸入框的位置（距離底部40px，使輸入框上移，與球更接近）
         self.INPUT_FROM_BOTTOM = 40
-        self.INPUT_HEIGHT = 45
+        self.INPUT_HEIGHT = 88  # attachment row (22) + input card (42) + toolbar (18) + spacing
 
         # 移除右上角關閉按鈕以簡化 UI（由視窗系統或快捷鍵關閉）
 
@@ -2513,68 +2515,161 @@ class MainWindow(QMainWindow):
         self._mask_update_timer.setSingleShot(True)
         self._mask_update_timer.timeout.connect(self._update_window_mask)
 
-        # 創建輸入區域
+        # ── Input container (vertical: [attach chips] / [input row] / [toolbar row]) ──
+        self._attached_file_path: str = ""
+        self._attached_image_data: bytes = b""
+        self._is_running = False
+
         self.input_container = QWidget(self)
         self.input_container.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
 
-        self.input_layout = QHBoxLayout(self.input_container)
-        self.input_layout.setContentsMargins(0, 0, 0, 0)
-        self.input_layout.setSpacing(5)
+        # Outer vertical layout
+        outer_vbox = QVBoxLayout(self.input_container)
+        outer_vbox.setContentsMargins(0, 0, 0, 0)
+        outer_vbox.setSpacing(4)
 
-        # 使用自定義的 CommandLineEdit 替代 QLineEdit
+        # ── Attachment chip row (hidden until something is attached) ──────
+        self._attach_row = QWidget()
+        self._attach_row.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        attach_row_layout = QHBoxLayout(self._attach_row)
+        attach_row_layout.setContentsMargins(4, 0, 4, 0)
+        attach_row_layout.setSpacing(6)
+
+        self._attach_chip = QLabel("")
+        self._attach_chip.setStyleSheet(
+            "QLabel { "
+            "background: rgba(50,55,70,210); "
+            "color: #cce4ff; "
+            "border: 1px solid rgba(100,150,220,120); "
+            "border-radius: 8px; "
+            "padding: 3px 10px; "
+            "font-size: 11px; "
+            "}"
+        )
+        self._attach_chip.setMaximumWidth(220)
+        self._attach_chip.hide()
+
+        self._attach_chip_close = QPushButton("✕")
+        self._attach_chip_close.setFixedSize(16, 16)
+        self._attach_chip_close.setStyleSheet(
+            "QPushButton { background: transparent; color: rgba(180,180,200,180); "
+            "border: none; font-size: 10px; } "
+            "QPushButton:hover { color: #ff6b6b; }"
+        )
+        self._attach_chip_close.hide()
+        self._attach_chip_close.clicked.connect(self._clear_attachment)
+
+        attach_row_layout.addWidget(self._attach_chip)
+        attach_row_layout.addWidget(self._attach_chip_close)
+        attach_row_layout.addStretch(1)
+        self._attach_row.hide()
+        outer_vbox.addWidget(self._attach_row)
+
+        # ── Main input row (card background) ─────────────────────────────
+        self._input_card = QWidget()
+        self._input_card.setStyleSheet(
+            "QWidget { "
+            "background: rgba(36, 37, 46, 215); "
+            "border: 1px solid rgba(255,255,255,40); "
+            "border-radius: 18px; "
+            "}"
+        )
+        input_row = QHBoxLayout(self._input_card)
+        input_row.setContentsMargins(6, 4, 6, 4)
+        input_row.setSpacing(4)
+
+        self.voice_button = QPushButton("🎤")
+        self.voice_button.setFixedSize(30, 30)
+        self.voice_button.setStyleSheet(
+            "QPushButton { "
+            "background: transparent; color: rgba(200,200,220,200); "
+            "border: none; font-size: 15px; border-radius: 15px; "
+            "}"
+            "QPushButton:hover { background: rgba(255,255,255,15); }"
+        )
+        self.voice_button.clicked.connect(self.on_voice_requested)
+
         self.input_field = CommandLineEdit()
         self.input_field.setPlaceholderText("輸入文字、指令或按🎤啟動語音...")
         self.input_field.setStyleSheet(
             "QLineEdit { "
-            "background-color: rgba(50, 50, 50, 220); "
+            "background: transparent; "
             "color: white; "
-            "border: 1px solid rgba(255, 255, 255, 60); "
-            "border-radius: 15px; "
-            "padding: 8px 12px; "
+            "border: none; "
+            "padding: 2px 4px; "
+            "font-size: 12px; "
             "}"
         )
         self.input_field.returnPressed.connect(self.on_input_submitted)
-        # 當使用者正在輸入時，發出 typing 信號（用於重置閒置計時）
         try:
             self.input_field.textEdited.connect(self._handle_user_typing)
         except Exception:
-            # fallback to textChanged if textEdited not available
             self.input_field.textChanged.connect(self._handle_user_typing)
-
-        self.voice_button = QPushButton("🎤")
-        self.voice_button.setFixedSize(32, 32)
-        self.voice_button.setStyleSheet(
-            "QPushButton { "
-            "background-color: rgba(70, 70, 70, 180); "
-            "color: white; "
-            "border: 1px solid rgba(255, 255, 255, 40); "
-            "border-radius: 16px; "
-            "font-size: 15px; "
-            "}"
-            "QPushButton:hover { background-color: rgba(100, 100, 100, 220); }"
-        )
-        self.voice_button.clicked.connect(self.on_voice_requested)
 
         # Send / Stop dual-mode button
         self.send_button = QPushButton("發送")
-        self.send_button.setFixedSize(56, 32)
+        self.send_button.setFixedSize(52, 28)
         self._send_btn_send_style = (
             "QPushButton { "
-            "background-color: #2FBF71; color: #FFFFFF; border: none; "
-            "border-radius: 14px; font-weight: bold; font-size: 12px; "
+            "background: #2FBF71; color: #fff; border: none; "
+            "border-radius: 12px; font-weight: bold; font-size: 12px; "
             "}"
-            "QPushButton:hover { background-color: #28A862; }"
+            "QPushButton:hover { background: #28A862; }"
         )
         self._send_btn_stop_style = (
             "QPushButton { "
-            "background-color: rgba(200, 60, 60, 210); color: #fff; border: none; "
-            "border-radius: 14px; font-weight: bold; font-size: 14px; "
+            "background: rgba(210,55,55,220); color: #fff; border: none; "
+            "border-radius: 12px; font-weight: bold; font-size: 14px; "
             "}"
-            "QPushButton:hover { background-color: rgba(220, 80, 80, 230); }"
+            "QPushButton:hover { background: rgba(230,70,70,240); }"
         )
         self.send_button.setStyleSheet(self._send_btn_send_style)
         self.send_button.clicked.connect(self.on_input_submitted)
-        self._is_running = False
+
+        input_row.addWidget(self.voice_button)
+        input_row.addWidget(self.input_field, 1)
+        input_row.addWidget(self.send_button)
+        outer_vbox.addWidget(self._input_card)
+
+        # ── Toolbar row (below card) ──────────────────────────────────────
+        _tbtn = (
+            "QPushButton { background: transparent; color: rgba(160,170,190,170); "
+            "border: none; font-size: 12px; padding: 0 3px; border-radius: 4px; } "
+            "QPushButton:hover { color: rgba(220,230,255,230); background: rgba(255,255,255,10); }"
+        )
+        _tlbl = "QLabel { color: rgba(150,165,185,160); font-size: 10px; }"
+
+        toolbar_row = QWidget()
+        toolbar_row.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        toolbar_layout = QHBoxLayout(toolbar_row)
+        toolbar_layout.setContentsMargins(8, 0, 8, 0)
+        toolbar_layout.setSpacing(2)
+
+        self._attach_btn = QPushButton("＋")
+        self._attach_btn.setToolTip("附加檔案")
+        self._attach_btn.setFixedSize(22, 18)
+        self._attach_btn.setStyleSheet(_tbtn)
+        self._attach_btn.clicked.connect(self._on_attach_file)
+        toolbar_layout.addWidget(self._attach_btn)
+
+        self._slash_btn = QPushButton("／")
+        self._slash_btn.setToolTip("插入 /指令")
+        self._slash_btn.setFixedSize(22, 18)
+        self._slash_btn.setStyleSheet(_tbtn)
+        self._slash_btn.clicked.connect(self._on_slash_shortcut)
+        toolbar_layout.addWidget(self._slash_btn)
+
+        self._ctx_label = QLabel("CTX —")
+        self._ctx_label.setStyleSheet(_tlbl)
+        self._ctx_label.setToolTip("Context 使用量")
+        toolbar_layout.addWidget(self._ctx_label)
+
+        toolbar_layout.addStretch(1)
+        outer_vbox.addWidget(toolbar_row)
+        # keep reference so show/hide still works
+        self.toolbar_widget = toolbar_row
+
+        # ── Collapse / Todo buttons (floating on parent) ──────────────────
         self.collapse_button = QPushButton("收合", self)
         self.collapse_button.setFixedSize(60, 22)
         self.collapse_button.setStyleSheet(
@@ -2608,60 +2703,6 @@ class MainWindow(QMainWindow):
         self.todo_panel_window = TodoPanelWindow(self)
         self._todo_window_position_initialized = False
         self._todo_snapshot_text = ""
-
-
-        self.input_layout.addWidget(self.voice_button)
-        self.input_layout.addWidget(self.input_field)
-        self.input_layout.addWidget(self.send_button)
-
-        # ── Bottom action toolbar ──────────────────────────────────────────
-        self._attached_file_path: str = ""
-        self._attached_image_data: bytes = b""
-
-        _btn_style = (
-            "QPushButton { background: transparent; color: rgba(200,200,220,180); "
-            "border: none; font-size: 13px; padding: 0 4px; } "
-            "QPushButton:hover { color: rgba(255,255,255,230); }"
-        )
-        _label_style = "QLabel { color: rgba(160,180,200,160); font-size: 10px; }"
-
-        self.toolbar_widget = QWidget(self)
-        self.toolbar_widget.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        toolbar_layout = QHBoxLayout(self.toolbar_widget)
-        toolbar_layout.setContentsMargins(6, 0, 6, 0)
-        toolbar_layout.setSpacing(4)
-
-        # + attach file
-        self._attach_btn = QPushButton("＋")
-        self._attach_btn.setToolTip("附加檔案")
-        self._attach_btn.setFixedSize(22, 20)
-        self._attach_btn.setStyleSheet(_btn_style)
-        self._attach_btn.clicked.connect(self._on_attach_file)
-        toolbar_layout.addWidget(self._attach_btn)
-
-        # / slash command hint
-        self._slash_btn = QPushButton("／")
-        self._slash_btn.setToolTip("輸入 / 使用指令")
-        self._slash_btn.setFixedSize(22, 20)
-        self._slash_btn.setStyleSheet(_btn_style)
-        self._slash_btn.clicked.connect(self._on_slash_shortcut)
-        toolbar_layout.addWidget(self._slash_btn)
-
-        # Context usage meter
-        self._ctx_label = QLabel("CTX —")
-        self._ctx_label.setStyleSheet(_label_style)
-        self._ctx_label.setToolTip("Context 使用量")
-        toolbar_layout.addWidget(self._ctx_label)
-
-        toolbar_layout.addStretch(1)
-
-        # Attached file name label
-        self._attach_label = QLabel("")
-        self._attach_label.setStyleSheet(_label_style)
-        self._attach_label.setMaximumWidth(90)
-        toolbar_layout.addWidget(self._attach_label)
-
-        self._is_running = False  # ensure initialized before set_running
 
         self.input_container.hide()  # 初始隱藏
 
@@ -2739,9 +2780,7 @@ class MainWindow(QMainWindow):
 
     @Slot(str, str, object)
     def _handle_confirm_request(self, message: str, default_choice: str, result_container: object):
-        """
-        槽函数：在主线程中处理确认请求
-        """
+        """槽函数：在主线程中处理确认请求"""
         try:
             logger.info(f"[主线程] Creating ConfirmDialog for: {message[:50]}...")
             dialog = ConfirmDialog(message, default_choice, parent=self)
@@ -2750,36 +2789,21 @@ class MainWindow(QMainWindow):
         except Exception as e:
             logger.error(f"[主线程] Error in _handle_confirm_request: {e}", exc_info=True)
         finally:
-            # 退出事件循环
-            if hasattr(result_container, 'loop'):
-                result_container.loop.quit()
-    
+            result_container.done.set()
+
     def show_confirm_dialog(self, message: str, default_choice: str = '') -> bool:
-        """
-        顯示確認對話框（線程安全）
-        使用信号-槽机制和 QEventLoop 确保对话框在主线程中创建和显示
-        """
+        """顯示確認對話框（線程安全）— 使用 threading.Event 等待，相容 asyncio 線程"""
+        import threading
         logger.info(f"[工作线程] show_confirm_dialog called: {message[:50]}...")
-        
-        # 使用简单的对象来存储结果和事件循环
+
         class ResultContainer:
             def __init__(self):
                 self.result = False
-                self.loop = None
-        
+                self.done = threading.Event()
+
         result_container = ResultContainer()
-        
-        # 创建事件循环用于等待
-        result_container.loop = QEventLoop()
-        
-        # 发送信号（Qt 会自动调度到主线程）
-        logger.info("[工作线程] Emitting confirm_requested signal...")
         self.confirm_requested.emit(message, default_choice, result_container)
-        
-        # 运行事件循环，直到槽函数调用 loop.quit()
-        logger.info("[工作线程] Starting event loop...")
-        result_container.loop.exec()
-        
+        result_container.done.wait(timeout=300)  # 5-minute timeout
         logger.info(f"[工作线程] Dialog closed, returning: {result_container.result}")
         return result_container.result
 
@@ -2794,28 +2818,21 @@ class MainWindow(QMainWindow):
         except Exception as e:
             logger.error(f"[主线程] Error in _handle_question_request: {e}", exc_info=True)
         finally:
-            if hasattr(result_container, "loop"):
-                result_container.loop.quit()
+            result_container.done.set()
 
     def show_question_dialog(self, question: str, options: list[str]) -> str:
-        """
-        顯示問題選單對話框（線程安全）
-        從 AgentRuntime 線程呼叫，對話框在主 GUI 線程建立。
-        返回使用者選擇的選項文字（取消時返回空字串）。
-        """
+        """顯示問題選單對話框（線程安全）— 使用 threading.Event 等待，相容 asyncio 線程"""
+        import threading
         logger.info(f"[工作线程] show_question_dialog called: {question[:50]}...")
 
         class ResultContainer:
             def __init__(self):
                 self.result: str = ""
-                self.loop = None
+                self.done = threading.Event()
 
         result_container = ResultContainer()
-        result_container.loop = QEventLoop()
-
         self.question_requested.emit(question, options, result_container)
-        result_container.loop.exec()
-
+        result_container.done.wait(timeout=300)
         logger.info(f"[工作线程] ChoiceDialog closed, returning: {result_container.result!r}")
         return result_container.result
 
@@ -2832,15 +2849,6 @@ class MainWindow(QMainWindow):
             input_width,
             self.INPUT_HEIGHT,
         )
-        # Position toolbar below input container
-        toolbar_h = 22
-        self.toolbar_widget.setGeometry(
-            x,
-            self.FIXED_HEIGHT - self.INPUT_FROM_BOTTOM - toolbar_h + 2,
-            input_width,
-            toolbar_h,
-        )
-        self.toolbar_widget.raise_()
         self._position_collapse_button()
         self._position_todo_toggle_button()
 
@@ -2909,7 +2917,6 @@ class MainWindow(QMainWindow):
     def show_input_container(self) -> None:
         self._position_input_container()
         self.input_container.show()
-        self.toolbar_widget.show()
         self.collapse_button.show()
         self.todo_toggle_button.show()
         self._update_window_mask()
@@ -2942,6 +2949,19 @@ class MainWindow(QMainWindow):
             color = "#f06b6b" if pct >= 80 else "#f0c060" if pct >= 50 else "rgba(160,180,200,160)"
             self._ctx_label.setStyleSheet(f"QLabel {{ color: {color}; font-size: 10px; }}")
 
+    def _show_attach_chip(self, label: str) -> None:
+        self._attach_chip.setText(label)
+        self._attach_chip.show()
+        self._attach_chip_close.show()
+        self._attach_row.show()
+
+    def _clear_attachment(self) -> None:
+        self._attached_file_path = ""
+        self._attached_image_data = b""
+        self._attach_chip.hide()
+        self._attach_chip_close.hide()
+        self._attach_row.hide()
+
     def _on_attach_file(self) -> None:
         """Open file dialog and attach a file to the next message."""
         path, _ = QFileDialog.getOpenFileName(
@@ -2949,9 +2969,10 @@ class MainWindow(QMainWindow):
         )
         if path:
             self._attached_file_path = path
+            self._attached_image_data = b""
             name = path.split("/")[-1].split("\\")[-1]
-            short = name if len(name) <= 18 else name[:15] + "…"
-            self._attach_label.setText(f"📎 {short}")
+            short = name if len(name) <= 20 else name[:17] + "…"
+            self._show_attach_chip(f"📎 {short}")
 
     def _on_slash_shortcut(self) -> None:
         """Insert '/' into the input field to trigger command completion."""
@@ -2963,14 +2984,17 @@ class MainWindow(QMainWindow):
     def get_attached_file_path(self) -> str:
         """Return path of attached file (cleared after retrieval)."""
         path = self._attached_file_path
-        self._attached_file_path = ""
-        self._attach_label.setText("")
+        if path:
+            self._attached_file_path = ""
+            self._clear_attachment()
         return path
 
     def get_attached_image_data(self) -> bytes:
         """Return pasted image bytes (cleared after retrieval)."""
         data = self._attached_image_data
-        self._attached_image_data = b""
+        if data:
+            self._attached_image_data = b""
+            self._clear_attachment()
         return data
 
     # ── Input callback ────────────────────────────────────────────────────
@@ -2985,7 +3009,6 @@ class MainWindow(QMainWindow):
 
     def hide_input_container(self) -> None:
         self.input_container.hide()
-        self.toolbar_widget.hide()
         self.collapse_button.hide()
         self.todo_toggle_button.hide()
         self._update_window_mask()

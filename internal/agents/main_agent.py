@@ -666,22 +666,23 @@ class MainAgent:
         @self.agent.tool_plain
         def AskUserQuestion(
             question: str,
-            options: list | None = None,
+            options: str = "",
         ) -> str:
             """Ask the user a clarifying question before proceeding.
 
             Use this tool when you need the user's input to resolve ambiguity, choose a direction,
             or confirm an approach — especially when the right answer cannot be inferred from context.
 
-            Provide `options` (a list of concise choice labels) whenever there are distinct, enumerable
-            paths. The GUI will render them as clickable buttons. Omit `options` for open-ended questions.
+            `options`: comma-separated list of concise choice labels (e.g. "Option A, Option B, Cancel").
+            The GUI renders each option as a clickable button. Leave empty for open-ended text input.
 
             Do NOT use this tool for routine confirmations already handled by the permission system.
             Do NOT use it to ask questions you could answer yourself by reading the codebase.
             """
             try:
+                opts = [o.strip() for o in options.split(",") if o.strip()] if options else []
                 from internal.cli import ask_user_question
-                result = ask_user_question(question, list(options or []))
+                result = ask_user_question(question, opts)
                 return result if result else "(no answer — user dismissed the dialog)"
             except Exception as exc:
                 logger.warning("AskUserQuestion encountered an error: %s", exc)
@@ -730,7 +731,7 @@ class MainAgent:
             "Only mark an item completed when you have FULLY accomplished it. Never mark completed if tests are failing, implementation is partial, or errors remain unresolved.\n"
             "When delegating a step via `AgentTool`: write a specific, self-contained prompt — include exact file paths, line numbers, and what to change. Never write vague prompts like 'based on your findings, fix it'.\n"
             "Use `SendMessageTool` to continue an existing worker (when it already has relevant context). Use `AgentTool` to spawn fresh (when you need a clean, unbiased perspective or a completely different task).\n"
-            "Use `AskUserQuestion` when the task has unclear requirements, multiple valid approaches, or you need user input before committing to a direction. Provide `options` whenever there are distinct, enumerable paths — these show as clickable buttons in the GUI. Do not guess when the user's intent is genuinely ambiguous.\n"
+            "Use `AskUserQuestion` when the task has unclear requirements, multiple valid approaches, or you need user input before committing to a direction. Set `options` to a comma-separated string of choices (e.g. \"A, B, C\") whenever there are distinct paths — these show as clickable buttons in the GUI. Do not guess when the user's intent is genuinely ambiguous.\n"
         )
         if self._todo_tool_snapshot:
             return (
