@@ -290,7 +290,8 @@ def load_skill_registry(
     root_dir: Optional[Path] = None,
     root_dirs: Optional[list[Path]] = None,
     enable_llm_scoring: bool = False,
-    agent: Optional[Any] = None
+    agent: Optional[Any] = None,
+    disabled_skills: Optional[list[str]] = None,
 ) -> SkillRegistry:
     """Load all skills from the skills directory with optional LLM scoring.
 
@@ -318,9 +319,14 @@ def load_skill_registry(
             continue
         specs.extend(load_skill_specs(skills_root))
 
+    disabled_set: set[str] = {_normalize_name(s) for s in (disabled_skills or [])}
+
     skill_map: dict[str, SkillSpec] = {}
     for spec in specs:
         key = _normalize_name(spec.name)
+        if key in disabled_set:
+            logger.info("Skipping disabled skill '%s'", spec.name)
+            continue
         if key in skill_map:
             logger.warning(
                 "Duplicate skill name '%s' from %s; skipping",

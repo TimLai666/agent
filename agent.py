@@ -57,6 +57,8 @@ class Agent:
         memory_enabled: bool = True,
         memory_dir: str | Path | None = None,
         memory_system: MemoryManager | None = None,
+        disabled_skills: list[str] | None = None,
+        extra_mcp_servers: list[Any] | None = None,
     ) -> None:
         self.workspace_root = self._resolve_workspace_root(workspace)
         if self.workspace_root is not None:
@@ -75,6 +77,8 @@ class Agent:
         self.additional_system_prompts = additional_system_prompts
         self.auto_load_all_prompts = auto_load_all_prompts
         self.start_mcp_servers = start_mcp_servers
+        self.disabled_skills = disabled_skills
+        self.extra_mcp_servers = extra_mcp_servers
 
         # Memory system: use provided instance, or build one from flags/dir
         if memory_system is not None:
@@ -178,6 +182,8 @@ class Agent:
             include_skill_tool=self.include_skill_tool,
             include_subagent_tools=self.include_subagent_tools,
             memory_manager=self._memory_manager,
+            disabled_skills=self.disabled_skills,
+            extra_mcp_servers=self.extra_mcp_servers,
         )
 
         if self.start_mcp_servers:

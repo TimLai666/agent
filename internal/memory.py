@@ -17,6 +17,10 @@ from pathlib import Path
 
 MEMORY_FILES = ("ME.md", "USER.md", "TOOLS.md", "MEMORY.md", "TODO.md")
 
+# These three are injected automatically into every turn without tool calls.
+# TOOLS.md and MEMORY.md are accessible only via memory_read/memory_write tools.
+AUTO_INJECT_FILES = ("ME.md", "USER.md", "TODO.md")
+
 _FILE_LABELS = {
     "ME.md": "Agent Identity & Role",
     "USER.md": "User Info & Preferences",
@@ -103,19 +107,24 @@ class MemoryManager:
         return result
 
     def build_context_block(self) -> str:
-        """Build a concise memory context block for injection into each turn's prompt."""
+        """Build context block for ME.md, USER.md, TODO.md — always injected per turn.
+
+        TOOLS.md and MEMORY.md are not auto-injected; use memory_read to access them.
+        """
         if not self.enabled or self._dir is None:
             return ""
-        all_mem = self.read_all()
-        if not all_mem:
+        parts: list[str] = []
+        for fname in AUTO_INJECT_FILES:
+            content = self.read_file(fname)
+            if content:
+                label = _FILE_LABELS[fname]
+                parts.append(f"### {label} ({fname})\n{content}")
+        if not parts:
             return ""
-        parts: list[str] = ["<persistent-memory>"]
-        for fname, content in all_mem.items():
-            label = _FILE_LABELS.get(fname, fname)
-            parts.append(f"### {label} ({fname})\n{content}")
-        parts.append(
-            "\n[Memory is auto-injected. Use memory_write to update any file. "
-            "Keep entries concise and point-form. Merge/remove stale entries when writing.]"
-        )
-        parts.append("</persistent-memory>")
-        return "\n\n".join(parts)
+        header = ["<persistent-memory>"]
+        footer = [
+            "\n[Auto-injected memory. Use memory_write to update. "
+            "TOOLS.md / MEMORY.md are available via memory_read.]",
+            "</persistent-memory>",
+        ]
+        return "\n\n".join(header + parts + footer)

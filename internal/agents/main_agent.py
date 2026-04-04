@@ -273,11 +273,13 @@ class MainAgent:
         include_skill_tool: bool = True,
         include_subagent_tools: bool = True,
         memory_manager: MemoryManager | None = None,
+        disabled_skills: list[str] | None = None,
+        extra_mcp_servers: list[Any] | None = None,
     ) -> "MainAgent":
         # Load skills first
         if skills is None:
             try:
-                skills = load_skill_registry(root_dirs=skill_root_dirs)
+                skills = load_skill_registry(root_dirs=skill_root_dirs, disabled_skills=disabled_skills)
             except Exception:
                 logger.exception("Failed to load skills; continuing without them")
                 skills = SkillRegistry({}, None)
@@ -312,6 +314,8 @@ class MainAgent:
             if mcp_servers_override is None
             else list(mcp_servers_override)
         )
+        if extra_mcp_servers:
+            mcp_servers = list(mcp_servers) + list(extra_mcp_servers)
 
         # 建立增強的 system prompt（預設自動載入所有可用的 prompts）
         enhanced_system_prompt = cls._build_enhanced_system_prompt(
