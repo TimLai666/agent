@@ -74,6 +74,9 @@ class MainAgent:
     ENV_PREFIX = ENV_PREFIX
     _IMAGE_DIRECTIVE_RE = re.compile(r"(?mi)^\s*(?:image|img)\s*:\s*(?P<target>.+?)\s*$")
     _IMAGE_MARKDOWN_RE = re.compile(r"!\[(?P<alt>[^\]]*)\]\((?P<target>[^)]+)\)")
+    _TODO_ALLOWED_PHASES = frozenset({"planning", "executing", "blocked", "completed"})
+    _TODO_ALLOWED_STATUSES = frozenset({"pending", "in_progress", "completed", "blocked"})
+    _TODO_FORBIDDEN_TITLES = frozenset({"todo", "task", "step", "item"})
 
     @staticmethod
     def _build_subagent_report_contract(subagent_type: str) -> str:
@@ -567,6 +570,59 @@ class MainAgent:
             lines.append(f"- {todo_id} [{status}] {title}{suffix}")
         return "\n".join(lines)
 
+    def _normalize_todo_payload(
+        self,
+        phase: str,
+        items: list[dict[str, Any]],
+    ) -> tuple[str, list[dict[str, Any]]]:
+        normalized_phase = str(phase or "").strip().lower()
+        if normalized_phase not in self._TODO_ALLOWED_PHASES:
+            allowed = ", ".join(sorted(self._TODO_ALLOWED_PHASES))
+            raise ValueError(f"todo.phase must be one of: {allowed}")
+
+        normalized_items: list[dict[str, Any]] = []
+        for index, raw in enumerate(items[:8], start=1):
+            if not isinstance(raw, dict):
+                raise ValueError(f"todo.items[{index}] must be an object")
+
+            todo_id = str(raw.get("id", "")).strip()
+            title = str(raw.get("title", "")).strip()
+            description = str(raw.get("description", "")).strip()
+            status = str(raw.get("status", "")).strip().lower() or "pending"
+            notes = str(raw.get("notes", "")).strip()
+
+            if not todo_id:
+                raise ValueError(f"todo.items[{index}].id is required")
+            if not title:
+                raise ValueError(f"todo.items[{index}].title is required")
+            if title.strip().lower() in self._TODO_FORBIDDEN_TITLES:
+                raise ValueError(
+                    f"todo.items[{index}].title must be a concrete step, not '{title}'"
+                )
+            if status not in self._TODO_ALLOWED_STATUSES:
+                allowed = ", ".join(sorted(self._TODO_ALLOWED_STATUSES))
+                raise ValueError(
+                    f"todo.items[{index}].status must be one of: {allowed}"
+                )
+
+            normalized_items.append(
+                {
+                    "id": todo_id,
+                    "title": title,
+                    "description": description,
+                    "status": status,
+                    "notes": notes,
+                }
+            )
+
+        in_progress_count = sum(
+            1 for item in normalized_items if item.get("status") == "in_progress"
+        )
+        if in_progress_count > 1:
+            raise ValueError("todo list can have at most one in_progress item")
+
+        return normalized_phase, normalized_items
+
     def _publish_todo_snapshot(
         self,
         snapshot: str,
@@ -587,21 +643,12 @@ class MainAgent:
             phase: str,
             items: list[dict[str, Any]],
         ) -> str:
-            """Update the current session todo list. Use for multi-step work only; keep 2-4 items and update statuses as work progresses."""
-            normalized_items: list[dict[str, Any]] = []
-            for raw in items[:8]:
-                if not isinstance(raw, dict):
-                    continue
-                normalized_items.append(
-                    {
-                        "id": str(raw.get("id", "")).strip(),
-                        "title": str(raw.get("title", "")).strip(),
-                        "description": str(raw.get("description", "")).strip(),
-                        "status": str(raw.get("status", "")).strip() or "pending",
-                        "notes": str(raw.get("notes", "")).strip(),
-                    }
-                )
-            snapshot = self._render_todo_snapshot(phase, normalized_items)
+            """Update the current session todo list with strict validation for phase, id, title, and status."""
+            normalized_phase, normalized_items = self._normalize_todo_payload(
+                phase,
+                items,
+            )
+            snapshot = self._render_todo_snapshot(normalized_phase, normalized_items)
             return self._publish_todo_snapshot(snapshot, normalized_items)
 
     def _enqueue_pending_notification(self, xml: str) -> None:
@@ -634,6 +681,10 @@ class MainAgent:
             "Do not copy the whole user request into a single todo item.\n"
             "Each todo must be a concrete step you can actually execute.\n"
             "Keep the todo list short: usually 2-4 items.\n"
+            "Allowed phases: planning, executing, blocked, completed.\n"
+            "Allowed statuses: pending, in_progress, blocked, completed.\n"
+            "Each item must include a non-empty id and a concrete title.\n"
+            "Never use placeholder titles like 'todo' or 'task'.\n"
             "Use `AgentTool` to delegate a specific todo step when subagent execution helps.\n"
         )
         if self._todo_tool_snapshot:
