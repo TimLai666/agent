@@ -20,7 +20,7 @@ from internal.logger import logger
 from internal.runtime.stream_printer import BACKLOG_SCALE, BASE_DELAY, MIN_FACTOR
 from internal.runtime.system import run_cli
 from internal.services.agent_factory import load_base_config
-from internal.services.circle_ui import MainWindow, ConfirmDialog, CommandLineEdit
+from internal.services.circle_ui import MainWindow, ChoiceDialog, ConfirmDialog, CommandLineEdit
 from internal.services.voice_manager import VoiceManager
 from internal.services.config_db import (
     list_agent_configs,
@@ -28,7 +28,7 @@ from internal.services.config_db import (
     list_providers,
     list_remote_mcps,
 )
-from internal.cli import set_gui_confirm_handler
+from internal.cli import set_gui_confirm_handler, set_gui_question_handler
 from internal.command_handler import CommandHandler
 from internal.services import config_webui, config_cli
 from internal.compaction import (
@@ -452,6 +452,8 @@ class GUIAgentApp:
         
         # 設置 GUI 確認處理器
         set_gui_confirm_handler(self._gui_confirm_handler)
+        # 設置 GUI 問題選單處理器
+        set_gui_question_handler(self._gui_question_handler)
         
         self.runtime = AgentRuntime(self.base_config, skill_root_dirs=skill_root_dirs)
         self.runtime.ready.connect(self.handle_runtime_ready)
@@ -475,14 +477,17 @@ class GUIAgentApp:
         self.main_window.speech_bubble.show()
 
     def _gui_confirm_handler(self, message: str, default_choice: str) -> bool:
-        """
-        GUI 模式下的確認處理器（線程安全）
-        這個方法會在 AgentRuntime 線程中被調用，
-        但對話框會在主 GUI 線程中顯示
-        """
+        """GUI 模式下的確認處理器（線程安全）"""
         logger.info(f"_gui_confirm_handler called: {message[:50]}...")
         result = self.main_window.show_confirm_dialog(message, default_choice)
         logger.info(f"_gui_confirm_handler returning: {result}")
+        return result
+
+    def _gui_question_handler(self, question: str, options: list[str]) -> str:
+        """GUI 模式下的問題選單處理器（線程安全）"""
+        logger.info(f"_gui_question_handler called: {question[:50]}...")
+        result = self.main_window.show_question_dialog(question, options)
+        logger.info(f"_gui_question_handler returning: {result!r}")
         return result
 
     def _reset_tool_log(self) -> None:
@@ -943,8 +948,9 @@ class GUIAgentApp:
         try:
             result = self.app.exec()
         finally:
-            # 清理 GUI 確認處理器
+            # 清理 GUI 處理器
             set_gui_confirm_handler(None)
+            set_gui_question_handler(None)
             self.runtime.stop()
             self.runtime.wait(3000)
         return result

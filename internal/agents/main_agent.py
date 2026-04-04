@@ -651,6 +651,25 @@ class MainAgent:
             snapshot = self._render_todo_snapshot(normalized_phase, normalized_items)
             return self._publish_todo_snapshot(snapshot, normalized_items)
 
+        @self.agent.tool_plain
+        def AskUserQuestion(
+            question: str,
+            options: list[str] | None = None,
+        ) -> str:
+            """Ask the user a clarifying question before proceeding.
+
+            Use this tool when you need the user's input to resolve ambiguity, choose a direction,
+            or confirm an approach — especially when the right answer cannot be inferred from context.
+
+            Provide `options` (a list of concise choice labels) whenever there are distinct, enumerable
+            paths. The GUI will render them as clickable buttons. Omit `options` for open-ended questions.
+
+            Do NOT use this tool for routine confirmations already handled by the permission system.
+            Do NOT use it to ask questions you could answer yourself by reading the codebase.
+            """
+            from internal.cli import ask_user_question
+            return ask_user_question(question, list(options or []))
+
     def _enqueue_pending_notification(self, xml: str) -> None:
         self._task_notifications.append(xml)
 

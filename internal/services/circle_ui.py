@@ -2428,6 +2428,8 @@ class TodoPanelWindow(QWidget):
 class MainWindow(QMainWindow):
     # 信号：请求显示确认对话框
     confirm_requested = Signal(str, str, object)  # message, default_choice, result_container
+    # 信号：请求显示问题选单对话框
+    question_requested = Signal(str, list, object)  # question, options, result_container
     collapse_state_changed = Signal(bool)
     # 當使用者正在編輯輸入框（鍵入文字）時發出
     typing = Signal()
@@ -2579,6 +2581,7 @@ class MainWindow(QMainWindow):
 
         # 连接确认信号到槽
         self.confirm_requested.connect(self._handle_confirm_request)
+        self.question_requested.connect(self._handle_question_request)
 
         # 初始化窗口遮罩（點擊穿透）- 多次延遲更新確保完全渲染
         QTimer.singleShot(0, self._update_window_mask)
@@ -2679,6 +2682,42 @@ class MainWindow(QMainWindow):
         result_container.loop.exec()
         
         logger.info(f"[工作线程] Dialog closed, returning: {result_container.result}")
+        return result_container.result
+
+    @Slot(str, list, object)
+    def _handle_question_request(self, question: str, options: list, result_container: object):
+        """槽函數：在主線程中處理問題選單請求"""
+        try:
+            logger.info(f"[主线程] Creating ChoiceDialog for: {question[:50]}...")
+            dialog = ChoiceDialog(question, options, parent=self)
+            result_container.result = dialog.get_result()
+            logger.info(f"[主线程] ChoiceDialog result: {result_container.result!r}")
+        except Exception as e:
+            logger.error(f"[主线程] Error in _handle_question_request: {e}", exc_info=True)
+        finally:
+            if hasattr(result_container, "loop"):
+                result_container.loop.quit()
+
+    def show_question_dialog(self, question: str, options: list[str]) -> str:
+        """
+        顯示問題選單對話框（線程安全）
+        從 AgentRuntime 線程呼叫，對話框在主 GUI 線程建立。
+        返回使用者選擇的選項文字（取消時返回空字串）。
+        """
+        logger.info(f"[工作线程] show_question_dialog called: {question[:50]}...")
+
+        class ResultContainer:
+            def __init__(self):
+                self.result: str = ""
+                self.loop = None
+
+        result_container = ResultContainer()
+        result_container.loop = QEventLoop()
+
+        self.question_requested.emit(question, options, result_container)
+        result_container.loop.exec()
+
+        logger.info(f"[工作线程] ChoiceDialog closed, returning: {result_container.result!r}")
         return result_container.result
 
     def _position_input_container(self) -> None:
@@ -3020,87 +3059,223 @@ class ConfigWebViewWindow(QMainWindow):
         self.setCentralWidget(self.webview)
 
 
+class ChoiceDialog(QDialog):
+    """問題選單對話框 — 顯示 agent 的問題及可點擊的選項按鈕"""
+
+    _STYLE = """
+        QDialog {
+            background-color: #1c1c1e;
+            border-radius: 14px;
+        }
+        QLabel#icon {
+            font-size: 22px;
+        }
+        QLabel#question {
+            color: #f0f0f0;
+            font-size: 14px;
+            line-height: 1.5;
+        }
+        QFrame#sep {
+            color: rgba(255, 255, 255, 25);
+        }
+        QPushButton#option {
+            background-color: rgba(58, 58, 68, 220);
+            color: #dde8f8;
+            border: 1px solid rgba(255, 255, 255, 40);
+            border-radius: 9px;
+            padding: 10px 16px;
+            font-size: 13px;
+            text-align: left;
+        }
+        QPushButton#option:hover {
+            background-color: rgba(0, 112, 240, 200);
+            border-color: rgba(80, 160, 255, 180);
+        }
+        QPushButton#option:pressed {
+            background-color: rgba(0, 80, 180, 230);
+        }
+    """
+
+    def __init__(self, question: str, options: list[str], parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Agent 問題")
+        self.setModal(True)
+        self.setMinimumWidth(440)
+        self.setStyleSheet(self._STYLE)
+        self._selected: str = ""
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(10)
+        layout.setContentsMargins(22, 22, 22, 22)
+
+        # Header: icon + question text
+        header = QHBoxLayout()
+        header.setSpacing(10)
+        icon = QLabel("❓")
+        icon.setObjectName("icon")
+        icon.setFixedWidth(30)
+        icon.setAlignment(Qt.AlignmentFlag.AlignTop)
+        header.addWidget(icon)
+
+        q_label = QLabel(question)
+        q_label.setObjectName("question")
+        q_label.setWordWrap(True)
+        header.addWidget(q_label, 1)
+        layout.addLayout(header)
+
+        # Separator
+        sep = QFrame()
+        sep.setObjectName("sep")
+        sep.setFrameShape(QFrame.Shape.HLine)
+        layout.addWidget(sep)
+        layout.addSpacing(2)
+
+        # Option buttons
+        for opt in options:
+            btn = QPushButton(f"  {opt}")
+            btn.setObjectName("option")
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.clicked.connect(lambda _checked, o=opt: self._select(o))
+            layout.addWidget(btn)
+
+        if not options:
+            close_btn = QPushButton("關閉")
+            close_btn.clicked.connect(self.reject)
+            layout.addWidget(close_btn)
+
+    def _select(self, option: str) -> None:
+        self._selected = option
+        self.accept()
+
+    def get_result(self) -> str:
+        """顯示對話框並返回使用者選擇的選項（取消時返回空字串）"""
+        self.exec()
+        return self._selected
+
+
 class ConfirmDialog(QDialog):
     """確認對話框，用於工具執行確認"""
-    
+
+    _STYLE = """
+        QDialog {
+            background-color: #1c1c1e;
+            border-radius: 14px;
+        }
+        QLabel#icon {
+            font-size: 22px;
+        }
+        QLabel#title {
+            color: #f0f0f0;
+            font-size: 15px;
+            font-weight: bold;
+        }
+        QLabel#body {
+            color: #c8c8cc;
+            font-size: 13px;
+            line-height: 1.5;
+        }
+        QFrame#sep {
+            color: rgba(255, 255, 255, 25);
+        }
+        QPushButton#allow {
+            background-color: #007AFF;
+            color: white;
+            border: none;
+            border-radius: 9px;
+            padding: 9px 20px;
+            font-size: 13px;
+            font-weight: bold;
+            min-width: 90px;
+        }
+        QPushButton#allow:hover  { background-color: #228EFF; }
+        QPushButton#allow:pressed { background-color: #005FCC; }
+        QPushButton#deny {
+            background-color: rgba(80, 80, 90, 200);
+            color: #e0e0e0;
+            border: 1px solid rgba(255, 255, 255, 35);
+            border-radius: 9px;
+            padding: 9px 20px;
+            font-size: 13px;
+            min-width: 90px;
+        }
+        QPushButton#deny:hover  { background-color: rgba(100, 100, 110, 220); }
+        QPushButton#deny:pressed { background-color: rgba(60, 60, 70, 230); }
+    """
+
+    # Keywords that suggest a higher-risk operation → show ⚠️ instead of 🔧
+    _DANGER_KEYWORDS = {"delete", "remove", "rm ", "drop", "kill", "truncate", "format", "wipe"}
+
     def __init__(self, message: str, default_choice: str = '', parent=None):
         super().__init__(parent)
         self.setWindowTitle("工具執行確認")
         self.setModal(True)
-        self.setMinimumWidth(400)
-        
-        # 設置樣式
-        self.setStyleSheet("""
-            QDialog {
-                background-color: #2b2b2b;
-                color: #ffffff;
-                border-radius: 10px;
-            }
-            QLabel {
-                color: #ffffff;
-                font-size: 14px;
-                padding: 10px;
-            }
-            QPushButton {
-                background-color: #007AFF;
-                color: white;
-                border: none;
-                border-radius: 5px;
-                padding: 8px 16px;
-                font-size: 13px;
-                min-width: 80px;
-            }
-            QPushButton:hover {
-                background-color: #329DFF;
-            }
-            QPushButton:pressed {
-                background-color: #0051D5;
-            }
-            QPushButton#cancelButton {
-                background-color: #5a5a5a;
-            }
-            QPushButton#cancelButton:hover {
-                background-color: #6a6a6a;
-            }
-        """)
-        
-        # 創建佈局
+        self.setMinimumWidth(440)
+        self.setStyleSheet(self._STYLE)
+
+        msg_lower = message.lower()
+        icon_char = "⚠️" if any(kw in msg_lower for kw in self._DANGER_KEYWORDS) else "🔧"
+
         layout = QVBoxLayout(self)
-        layout.setSpacing(20)
-        layout.setContentsMargins(20, 20, 20, 20)
-        
-        # 訊息標籤
-        message_label = QLabel(message)
-        message_label.setWordWrap(True)
-        message_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-        layout.addWidget(message_label)
-        
-        # 按鈕區域
-        button_box = QDialogButtonBox()
-        
-        yes_button = button_box.addButton("允許", QDialogButtonBox.ButtonRole.AcceptRole)
-        no_button = button_box.addButton("拒絕", QDialogButtonBox.ButtonRole.RejectRole)
-        no_button.setObjectName("cancelButton")
-        
-        # 根據默認選擇設置默認按鈕
+        layout.setSpacing(10)
+        layout.setContentsMargins(22, 22, 22, 22)
+
+        # Header: icon + title
+        header = QHBoxLayout()
+        header.setSpacing(10)
+        icon = QLabel(icon_char)
+        icon.setObjectName("icon")
+        icon.setFixedWidth(32)
+        icon.setAlignment(Qt.AlignmentFlag.AlignVCenter)
+        header.addWidget(icon)
+
+        title = QLabel("工具執行請求")
+        title.setObjectName("title")
+        header.addWidget(title, 1)
+        layout.addLayout(header)
+
+        # Separator
+        sep = QFrame()
+        sep.setObjectName("sep")
+        sep.setFrameShape(QFrame.Shape.HLine)
+        layout.addWidget(sep)
+
+        # Message body
+        body = QLabel(message)
+        body.setObjectName("body")
+        body.setWordWrap(True)
+        body.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        layout.addWidget(body)
+
+        layout.addSpacing(6)
+
+        # Button row
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+
+        deny_btn = QPushButton("拒絕 (N)")
+        deny_btn.setObjectName("deny")
+        deny_btn.clicked.connect(self.reject)
+
+        allow_btn = QPushButton("允許 (Y)")
+        allow_btn.setObjectName("allow")
+        allow_btn.clicked.connect(self.accept)
+
+        btn_row.addWidget(deny_btn)
+        btn_row.addSpacing(8)
+        btn_row.addWidget(allow_btn)
+        layout.addLayout(btn_row)
+
+        # Default focus
         if default_choice.upper() == 'Y':
-            yes_button.setDefault(True)
-            yes_button.setFocus()
-        elif default_choice.upper() == 'N':
-            no_button.setDefault(True)
-            no_button.setFocus()
-        
-        button_box.accepted.connect(self.accept)
-        button_box.rejected.connect(self.reject)
-        
-        layout.addWidget(button_box)
-        
-        self.result_value = False
-    
+            allow_btn.setDefault(True)
+            allow_btn.setFocus()
+        else:
+            deny_btn.setDefault(True)
+            deny_btn.setFocus()
+
     def get_result(self) -> bool:
         """顯示對話框並返回結果"""
-        result = self.exec()
-        return result == QDialog.DialogCode.Accepted
+        return self.exec() == QDialog.DialogCode.Accepted
 
 
 if __name__ == "__main__":
