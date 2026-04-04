@@ -676,16 +676,16 @@ class MainAgent:
     def _inject_todo_snapshot(self, prompt: str) -> str:
         guidance = (
             "<active-session-todos>\n"
-            "For multi-step work, you must manage the todo list yourself with the `todo` tool.\n"
-            "Skip it for direct one-shot answers.\n"
-            "Do not copy the whole user request into a single todo item.\n"
-            "Each todo must be a concrete step you can actually execute.\n"
-            "Keep the todo list short: usually 2-4 items.\n"
+            "Use the `todo` tool whenever the task has more than one distinct step — use your judgment on what counts as a step.\n"
+            "Skip it only for truly trivial one-shot responses (e.g. a factual question, a single-line fix).\n"
+            "Break the task into as many items as naturally fit — no minimum, no maximum. Each item should be the smallest unit of work you can confidently track and complete independently.\n"
+            "Good breakdowns: granular enough to show progress, coarse enough to avoid noise. Avoid wrapping the entire request in one item.\n"
+            "Each item must have a concrete, action-oriented title that describes what you will actually do, not what the user asked.\n"
+            "Never use vague placeholder titles like 'todo', 'task', 'step', or 'item'.\n"
             "Allowed phases: planning, executing, blocked, completed.\n"
             "Allowed statuses: pending, in_progress, blocked, completed.\n"
-            "Each item must include a non-empty id and a concrete title.\n"
-            "Never use placeholder titles like 'todo' or 'task'.\n"
-            "Use `AgentTool` to delegate a specific todo step when subagent execution helps.\n"
+            "Mark items in_progress as you work on them (at most one at a time), and completed as soon as they are done.\n"
+            "Use `AgentTool` to delegate a step when parallel or specialized subagent execution helps.\n"
         )
         if self._todo_tool_snapshot:
             return (
