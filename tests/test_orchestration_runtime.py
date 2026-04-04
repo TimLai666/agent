@@ -2,7 +2,6 @@ import asyncio
 from types import SimpleNamespace
 
 from internal.agents.main_agent import MainAgent
-from internal.app.handle_user_turn import OrchestrationRuntime
 from internal.core.agents.agent_types import SpawnWorkerInput
 from internal.core.protocol.task_notification import parse_task_notification_xml
 from internal.core.tasks.completion_gate import decide_completion, needs_verification
@@ -14,6 +13,7 @@ def _bind_main_coordinator_methods(fake_main: object) -> None:
     method_names = [
         "_build_planning_instruction",
         "coordinator_handle_user_turn",
+        "coordinator_handle_user_turn_stream",
         "_coordinator_make_or_update_plan",
         "_coordinator_spawn_worker",
         "_coordinator_spawn_verification",
@@ -180,10 +180,9 @@ def test_spawn_worker_falls_back_to_task_state_when_notification_missing():
         _task_notifications=[],
     )
     _bind_main_coordinator_methods(main_agent)
-    runtime = OrchestrationRuntime(main_agent=main_agent)
 
     worker_result = asyncio.run(
-        runtime._spawn_worker(
+        main_agent._coordinator_spawn_worker(
             SpawnWorkerInput(
                 agentType="implementation",
                 title="impl-task",
@@ -216,9 +215,8 @@ def test_coordinator_can_respond_immediately_with_background_worker():
             _execute_turn_core=None,
         )
         _bind_main_coordinator_methods(main_agent)
-        runtime = OrchestrationRuntime(main_agent=main_agent)
 
-        text = await runtime.handle_user_turn("請協調派工，背景處理這件事，先回覆我")
+        text = await main_agent.coordinator_handle_user_turn("請協調派工，背景處理這件事，先回覆我")
         assert "task_id:" in text
         tasks = manager.listTasks("s1")
         assert tasks
@@ -233,15 +231,19 @@ def test_coordinator_can_respond_immediately_with_background_worker():
 
 def test_coordinator_stream_has_no_progress_labels():
     async def scenario() -> None:
-        runtime = OrchestrationRuntime(main_agent=SimpleNamespace(_execute_turn_stream_core=None))
+        main_agent = SimpleNamespace()
+        _bind_main_coordinator_methods(main_agent)
 
-        async def fake_handle_user_turn(_prompt, message_history=None):
+        async def fake_handle_user_turn(_prompt, message_history=None, on_todo_update=None):
             return "final output"
 
-        runtime.handle_user_turn = fake_handle_user_turn  # type: ignore[method-assign]
+        main_agent.coordinator_handle_user_turn = fake_handle_user_turn  # type: ignore[method-assign]
 
         chunks: list[str] = []
-        async for chunk in runtime.handle_user_turn_stream("請協調處理", message_history=None):
+        async for chunk in main_agent.coordinator_handle_user_turn_stream(
+            "請協調處理",
+            message_history=None,
+        ):
             chunks.append(chunk)
 
         text = "".join(chunks)
@@ -254,26 +256,7 @@ def test_coordinator_stream_has_no_progress_labels():
 def test_planning_instruction_prioritizes_skills_and_tools():
     main_agent = SimpleNamespace()
     _bind_main_coordinator_methods(main_agent)
-    runtime = OrchestrationRuntime(main_agent=main_agent)
-    instruction = runtime._build_planning_instruction("請幫我完成任務")
+    instruction = main_agent._build_planning_instruction("請幫我完成任務")
 
     assert "優先使用現有 skills 與已可用 tools" in instruction
     assert "User request" in instruction
-
-
-def test_create_runtime_prefers_main_agent_fork():
-    from internal.app.handle_user_turn import create_runtime
-
-    captured: dict[str, str] = {}
-
-    class FakeMainAgent:
-        def fork_coordinator_runtime(self, on_todo_update=None):
-            captured["called"] = "yes"
-            captured["callback"] = "yes" if on_todo_update else "no"
-            return OrchestrationRuntime(main_agent=self, on_todo_update=on_todo_update)
-
-    runtime = create_runtime(FakeMainAgent(), on_todo_update=lambda _x: None)
-
-    assert isinstance(runtime, OrchestrationRuntime)
-    assert captured.get("called") == "yes"
-    assert captured.get("callback") == "yes"

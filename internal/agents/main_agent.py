@@ -1225,11 +1225,6 @@ class MainAgent:
         ):
             yield chunk
 
-    def fork_coordinator_runtime(self, on_todo_update: Callable[[str], None] | None = None) -> Any:
-        from internal.app.handle_user_turn import OrchestrationRuntime
-
-        return OrchestrationRuntime(main_agent=self, on_todo_update=on_todo_update)
-
     async def _execute_turn_stream_core(
         self,
         prompt: str,
