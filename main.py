@@ -412,6 +412,7 @@ class GUIAgentApp:
         self._display_text = ""
         self._tool_log_lines: list[str] = []
         self._todo_snapshot_text = ""
+        self._discussion_text = ""  # Q&A from AskUserQuestion
         self._ui_collapsed = False
         self._waiting_response = False
         self._waiting_status = ""
@@ -500,6 +501,9 @@ class GUIAgentApp:
         logger.info(f"_gui_question_handler called: {question[:50]}...")
         result = self.main_window.show_question_dialog(question, options)
         logger.info(f"_gui_question_handler returning: {result!r}")
+        if result and result != "(no answer — user dismissed the dialog)":
+            self._discussion_text = f"**Q:** {question}\n\n**A:** {result}"
+            self._request_display_update()
         return result
 
     def _reset_tool_log(self) -> None:
@@ -664,13 +668,9 @@ class GUIAgentApp:
         if tool_html:
             blocks.append(tool_html)
 
-        if self._todo_snapshot_text:
+        if self._discussion_text:
             blocks.append(
-                "<discussion>\n"
-                "```text\n"
-                f"{self._todo_snapshot_text}\n"
-                "```\n"
-                "</discussion>"
+                f"<discussion>\n{self._discussion_text}\n</discussion>"
             )
 
         if text:
@@ -1038,6 +1038,7 @@ class GUIAgentApp:
                             self._last_user_input = ""
                             self._last_assistant_reply = ""
                             self._display_text = ""
+                            self._discussion_text = ""
                             self._reset_tool_log()
                             self._reset_todo_snapshot()
                             self.main_window.update_speech_bubble("對話 context 已清空")
@@ -1112,6 +1113,7 @@ class GUIAgentApp:
 
             QTimer.singleShot(500, start_waiting)
             self._display_text = ""
+            self._discussion_text = ""
             self._reset_tool_log()
             self._pending.clear()
             self._stream_buffer = ""

@@ -1471,7 +1471,7 @@ class OutputBubble(QWidget):
                 QTimer.singleShot(0, update_browser_height)
                 self.layout.addWidget(browser)
             else:
-                title = "Tool execution" if kind == "tool" else "Discussion"
+                title = "Tool execution" if kind == "tool" else "選項結果"
                 section = CollapsibleSection(title, content)
                 self.layout.addWidget(section)
 
@@ -1920,7 +1920,7 @@ class SiriResponseBubble(QWidget):
                                 QTimer.singleShot(0, update_browser_height)
                                 self.layout.addWidget(browser)
             elif kind in ("tool", "discussion"):
-                title = "Tool execution" if kind == "tool" else "Discussion"
+                title = "Tool execution" if kind == "tool" else "選項結果"
                 seen_sections.add(title)
 
                 if title in existing_sections:
