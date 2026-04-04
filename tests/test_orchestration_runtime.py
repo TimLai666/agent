@@ -1,12 +1,31 @@
 import asyncio
 from types import SimpleNamespace
 
+from internal.agents.main_agent import MainAgent
 from internal.app.handle_user_turn import OrchestrationRuntime
 from internal.core.agents.agent_types import SpawnWorkerInput
 from internal.core.protocol.task_notification import parse_task_notification_xml
 from internal.core.tasks.completion_gate import decide_completion, needs_verification
 from internal.core.tasks.task_types import VerificationResult, WorkerResult
 from internal.services.subagent_tasks import AgentToolInput, BaseTask, SubagentTaskManager
+
+
+def _bind_main_coordinator_methods(fake_main: object) -> None:
+    method_names = [
+        "_build_planning_instruction",
+        "coordinator_handle_user_turn",
+        "_coordinator_make_or_update_plan",
+        "_coordinator_spawn_worker",
+        "_coordinator_spawn_verification",
+        "_coordinator_find_task_notification",
+        "_coordinator_augment_context_with_failure",
+        "_coordinator_infer_task_kind",
+        "_coordinator_looks_like_direct_question",
+        "_coordinator_should_run_background",
+    ]
+    for method_name in method_names:
+        method = getattr(MainAgent, method_name)
+        setattr(fake_main, method_name, method.__get__(fake_main, type(fake_main)))
 
 
 def test_completion_gate_requires_verification_for_implementation():
@@ -160,6 +179,7 @@ def test_spawn_worker_falls_back_to_task_state_when_notification_missing():
         _session_id="s1",
         _task_notifications=[],
     )
+    _bind_main_coordinator_methods(main_agent)
     runtime = OrchestrationRuntime(main_agent=main_agent)
 
     worker_result = asyncio.run(
@@ -195,6 +215,7 @@ def test_coordinator_can_respond_immediately_with_background_worker():
             _task_notifications=[],
             _execute_turn_core=None,
         )
+        _bind_main_coordinator_methods(main_agent)
         runtime = OrchestrationRuntime(main_agent=main_agent)
 
         text = await runtime.handle_user_turn("請協調派工，背景處理這件事，先回覆我")
@@ -231,7 +252,9 @@ def test_coordinator_stream_has_no_progress_labels():
 
 
 def test_planning_instruction_prioritizes_skills_and_tools():
-    runtime = OrchestrationRuntime(main_agent=SimpleNamespace())
+    main_agent = SimpleNamespace()
+    _bind_main_coordinator_methods(main_agent)
+    runtime = OrchestrationRuntime(main_agent=main_agent)
     instruction = runtime._build_planning_instruction("請幫我完成任務")
 
     assert "優先使用現有 skills 與已可用 tools" in instruction

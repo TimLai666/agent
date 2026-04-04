@@ -16,7 +16,6 @@ from PySide6.QtWidgets import QApplication
 
 
 from internal.agents import MainAgent
-from internal.app.handle_user_turn import create_runtime
 from internal.logger import logger
 from internal.runtime.stream_printer import BACKLOG_SCALE, BASE_DELAY, MIN_FACTOR
 from internal.runtime.system import run_cli
@@ -64,7 +63,6 @@ class AgentRuntime(QThread):
         self._active_request_id = 0
         self._conversation_state = ConversationState(fullMessages=[])
         self._compact_coordinator: CompactCoordinator | None = None
-        self._orchestration_runtime = None
 
     def run(self):
         loop = asyncio.new_event_loop()
@@ -120,10 +118,6 @@ class AgentRuntime(QThread):
                 self.base_config,
                 self.http_client,
                 skill_root_dirs=self.skill_root_dirs,
-            )
-            self._orchestration_runtime = create_runtime(
-                self.main_agent,
-                on_todo_update=self._emit_todo_event,
             )
 
             def _reload_skills_from_webui() -> dict[str, object]:
@@ -277,11 +271,10 @@ class AgentRuntime(QThread):
         chunks: list[str] = []
 
         async def collect():
-            if self._orchestration_runtime is None:
-                raise RuntimeError("Orchestration runtime not initialized")
-            async for chunk in self._orchestration_runtime.handle_user_turn_stream(
+            async for chunk in self.main_agent.coordinator_handle_user_turn_stream(
                 user_input,
                 message_history=chat_history,
+                on_todo_update=self._emit_todo_event,
             ):
                 if not chunk:
                     continue

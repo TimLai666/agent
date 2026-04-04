@@ -3,7 +3,7 @@ import inspect
 import re
 import sys
 import uuid
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -45,11 +45,20 @@ from internal.skills_loader import SkillRegistry, load_skill_registry
 
 from internal.mcp_server_list import get_all_mcp_servers
 from internal.compaction import estimate_tokens, get_message_text, serialize_compaction_input
+from internal.core.agents.agent_types import SpawnVerificationInput, SpawnWorkerInput
+from internal.core.coordinator.coordinator_loop import (
+    CoordinatorPlan,
+    CoordinatorTurnContext,
+    run_coordinator_turn,
+)
+from internal.core.coordinator.result_synthesizer import synthesize_final_answer
+from internal.core.protocol.task_notification import parse_task_notification_xml
 from internal.core.protocol.image_output_paths import (
     ImagePathStreamNormalizer,
     enforce_absolute_image_paths,
 )
 from internal.core.protocol.verdict_parser import parse_verification_verdict
+from internal.core.tasks.task_types import TaskUsage, VerificationResult, WorkerResult
 
 PROMPT_KEY = "MAIN_AGENT_PROMPT"
 ENV_PREFIX = "MAIN"
@@ -896,17 +905,216 @@ class MainAgent:
             "Do not provide only future-plan wording.\n"
         )
 
+    def _build_planning_instruction(self, user_request: str) -> str:
+        return (
+            "Planning policy:\n"
+            "1. 優先使用現有 skills 與已可用 tools 完成任務。\n"
+            "2. 只有在現有 skills/tools 無法滿足需求時，才改用替代方法。\n"
+            "3. 執行時請在結果中清楚說明使用了哪些 skills/tools。\n\n"
+            "User request:\n"
+            f"{user_request}"
+        )
+
+    async def coordinator_handle_user_turn(
+        self,
+        user_prompt: str,
+        message_history: list[ModelRequest | ModelResponse] | None = None,
+        on_todo_update: Callable[[str], None] | None = None,
+    ) -> str:
+        _ = message_history
+        ctx = CoordinatorTurnContext(
+            userRequest=user_prompt,
+            taskKind=self._coordinator_infer_task_kind(user_prompt),
+        )
+
+        return await run_coordinator_turn(
+            ctx,
+            make_or_update_plan=self._coordinator_make_or_update_plan,
+            spawn_worker=self._coordinator_spawn_worker,
+            spawn_verification_worker=self._coordinator_spawn_verification,
+            synthesize_final_answer=lambda context, worker, verification: synthesize_final_answer(
+                worker, verification
+            ),
+            augment_context_with_failure=self._coordinator_augment_context_with_failure,
+            on_todo_update=on_todo_update,
+        )
+
+    async def coordinator_handle_user_turn_stream(
+        self,
+        user_prompt: str,
+        message_history: list[ModelRequest | ModelResponse] | None = None,
+        on_todo_update: Callable[[str], None] | None = None,
+    ) -> AsyncIterator[str]:
+        result = await self.coordinator_handle_user_turn(
+            user_prompt,
+            message_history=message_history,
+            on_todo_update=on_todo_update,
+        )
+        if result:
+            yield result
+
+    async def _coordinator_make_or_update_plan(self, ctx: CoordinatorTurnContext) -> CoordinatorPlan:
+        if ctx.taskKind in {"question", "research"} and self._coordinator_looks_like_direct_question(ctx.userRequest):
+            answer = await self._execute_turn_core(ctx.userRequest)
+            return CoordinatorPlan(type="answer-directly", finalAnswer=answer)
+
+        worker_type = "implementation" if ctx.taskKind in {"implementation", "bugfix", "infra"} else "research"
+
+        if self._coordinator_should_run_background(ctx.userRequest):
+            payload = AgentToolInput(
+                prompt=ctx.userRequest,
+                name=f"{worker_type}-task",
+                subagent_type=worker_type,
+                run_in_background=True,
+            )
+            created = await self._task_manager.spawnAgentTask(payload, self._session_id)
+            task_id = created.get("task_id", "")
+            return CoordinatorPlan(
+                type="answer-directly",
+                finalAnswer=(
+                    "已建立背景 subagent 任務，主流程先回覆你目前進度。\n"
+                    f"- task_id: {task_id}\n"
+                    f"- worker: {worker_type}\n"
+                    "可用 ListSubagentTasks 查狀態；完成後結果會在下一輪自動帶入。"
+                ),
+            )
+
+        return CoordinatorPlan(
+            type="spawn-worker",
+            workerSpec=SpawnWorkerInput(
+                agentType=worker_type,
+                title=f"{worker_type}-task",
+                originalUserRequest=ctx.userRequest,
+                instruction=self._build_planning_instruction(ctx.userRequest),
+                runInBackground=False,
+            ),
+        )
+
+    async def _coordinator_spawn_worker(self, spec: SpawnWorkerInput) -> WorkerResult:
+        subagent_type = spec.agentType if spec.agentType != "general-purpose" else ""
+        payload = AgentToolInput(
+            prompt=spec.instruction,
+            name=spec.title,
+            subagent_type=subagent_type,
+            run_in_background=False,
+            model=spec.model,
+        )
+        created = await self._task_manager.spawnAgentTask(payload, self._session_id)
+        task = self._task_manager.registry.getTask(created["task_id"])
+        if task is None:
+            raise RuntimeError("Task not found after worker completion")
+
+        notification = self._coordinator_find_task_notification(task.id)
+        if notification:
+            parsed = parse_task_notification_xml(notification)
+            parsed.evidence = list(task.evidence)
+            parsed.unresolvedIssues = list(task.unresolvedIssues)
+            return parsed
+
+        status = task.status if task.status in {"completed", "failed", "killed"} else "failed"
+        return WorkerResult(
+            taskId=task.id,
+            status=status,
+            summary=task.summary or "",
+            result=task.result or "",
+            filesChanged=list(task.filesChanged),
+            commandsExecuted=list(task.commandsExecuted),
+            evidence=list(task.evidence),
+            unresolvedIssues=list(task.unresolvedIssues),
+            usage=TaskUsage(durationMs=task.durationMs),
+        )
+
+    def _coordinator_find_task_notification(self, task_id: str) -> str | None:
+        notifications = getattr(self, "_task_notifications", []) or []
+        for notification in reversed(notifications):
+            try:
+                parsed = parse_task_notification_xml(notification)
+            except Exception:
+                continue
+            if parsed.taskId == task_id:
+                return notification
+        return None
+
+    async def _coordinator_spawn_verification(self, input_data: SpawnVerificationInput) -> VerificationResult:
+        verification_task = SimpleNamespace(subagentType="verification", mode="spawn")
+        prompt = (
+            "ORIGINAL USER REQUEST:\n"
+            f"{input_data.originalUserRequest}\n\n"
+            "WORKER SUMMARY:\n"
+            f"{input_data.workerResult.summary}\n\n"
+            "FILES CHANGED:\n"
+            + "\n".join(input_data.filesChanged)
+            + "\n\n"
+            "COMMANDS ALREADY RUN:\n"
+            + "\n".join(input_data.workerResult.commandsExecuted)
+            + "\n\n"
+            "CLAIMS TO VERIFY:\n"
+            + input_data.workerResult.result
+        )
+        output = await self._run_subagent_task(verification_task, prompt)
+        return parse_verification_verdict(output, task_id=input_data.workerResult.taskId)
+
+    def _coordinator_augment_context_with_failure(
+        self,
+        ctx: CoordinatorTurnContext,
+        worker: WorkerResult,
+        verification: VerificationResult | None,
+    ) -> CoordinatorTurnContext:
+        details = [ctx.userRequest, worker.summary]
+        if verification:
+            details.append(f"verification={verification.verdict}")
+            if verification.suspectedProblems:
+                details.extend(verification.suspectedProblems)
+        return CoordinatorTurnContext(
+            userRequest="\n".join(details),
+            taskKind="implementation",
+        )
+
+    def _coordinator_infer_task_kind(self, prompt: str) -> str:
+        lowered = prompt.lower()
+        if any(token in lowered for token in ["fix", "bug", "修", "錯誤"]):
+            return "bugfix"
+        if any(token in lowered for token in ["implement", "build", "新增", "實作", "重構"]):
+            return "implementation"
+        if any(token in lowered for token in ["infra", "deploy", "ci", "cd", "k8s"]):
+            return "infra"
+        if any(token in lowered for token in ["research", "investigate", "分析", "找"]):
+            return "research"
+        return "question"
+
+    def _coordinator_looks_like_direct_question(self, prompt: str) -> bool:
+        lowered = prompt.lower().strip()
+        if lowered.endswith("?") or lowered.endswith("？"):
+            return True
+        direct_tokens = ["是什麼", "what is", "how does", "怎麼"]
+        return any(token in lowered for token in direct_tokens)
+
+    def _coordinator_should_run_background(self, prompt: str) -> bool:
+        lowered = prompt.lower()
+        hints = [
+            "背景",
+            "background",
+            "先回覆",
+            "先回答",
+            "稍後給我",
+            "不要等",
+            "不用等",
+            "asynchronous",
+            "async",
+        ]
+        return any(hint in lowered for hint in hints)
+
     async def run(
         self,
         prompt: str,
         message_history: list[ModelRequest | ModelResponse] | None = None,
         skip_plan_execution: bool = True,
     ) -> str:
-        from internal.app.handle_user_turn import create_runtime
-
         _ = skip_plan_execution  # backward compatibility
-        runtime = create_runtime(self)
-        return await runtime.handle_user_turn(prompt, message_history=message_history)
+        return await self.coordinator_handle_user_turn(
+            prompt,
+            message_history=message_history,
+        )
 
     async def _execute_turn_core(
         self,
@@ -1011,8 +1219,10 @@ class MainAgent:
         skip_plan_execution: bool = True,
     ):
         _ = skip_plan_execution  # backward compatibility
-        runtime = self.fork_coordinator_runtime()
-        async for chunk in runtime.handle_user_turn_stream(prompt, message_history=message_history):
+        async for chunk in self.coordinator_handle_user_turn_stream(
+            prompt,
+            message_history=message_history,
+        ):
             yield chunk
 
     def fork_coordinator_runtime(self, on_todo_update: Callable[[str], None] | None = None) -> Any:

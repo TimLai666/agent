@@ -13,7 +13,6 @@ from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.openai import OpenAIProvider
 
 from internal.agents import MainAgent
-from internal.app.handle_user_turn import create_runtime
 from internal.logger import logger
 from internal.paths import set_runtime_paths
 from internal.services.agent_factory import AgentConfig, load_base_config
@@ -75,7 +74,6 @@ class Agent:
 
         self._http_client: AsyncClient | None = None
         self._main_agent: MainAgent | None = None
-        self._runtime: Any | None = None
         self._mcp_stack: AsyncExitStack | None = None
 
     @staticmethod
@@ -165,7 +163,6 @@ class Agent:
             include_skill_tool=self.include_skill_tool,
             include_subagent_tools=self.include_subagent_tools,
         )
-        self._runtime = create_runtime(self._main_agent)
 
         if self.start_mcp_servers:
             self._mcp_stack = AsyncExitStack()
@@ -190,7 +187,6 @@ class Agent:
             await self._http_client.aclose()
             self._http_client = None
 
-        self._runtime = None
         self._main_agent = None
 
     async def run(
@@ -198,11 +194,14 @@ class Agent:
         prompt: str,
         message_history: list[ModelRequest | ModelResponse] | None = None,
     ) -> str:
-        if self._runtime is None:
+        if self._main_agent is None:
             await self.start()
-        if self._runtime is None:
-            raise RuntimeError("Agent runtime 尚未初始化")
-        return await self._runtime.handle_user_turn(prompt, message_history=message_history)
+        if self._main_agent is None:
+            raise RuntimeError("Main agent 尚未初始化")
+        return await self._main_agent.coordinator_handle_user_turn(
+            prompt,
+            message_history=message_history,
+        )
 
     async def run_stream(
         self,
