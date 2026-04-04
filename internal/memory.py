@@ -61,15 +61,16 @@ class MemoryManager:
         return self._dir
 
     def _validate_name(self, name: str) -> str:
-        """Normalize and validate a memory file name."""
+        """Normalize and validate a memory file name. Returns canonical case (e.g. 'ME.md')."""
         if not name.lower().endswith(".md"):
             name = name + ".md"
-        name_upper = name.upper()
-        if name_upper not in MEMORY_FILES:
-            raise ValueError(
-                f"Unknown memory file '{name}'. Valid files: {', '.join(MEMORY_FILES)}"
-            )
-        return name_upper
+        name_lower = name.lower()
+        for canonical in MEMORY_FILES:
+            if canonical.lower() == name_lower:
+                return canonical
+        raise ValueError(
+            f"Unknown memory file '{name}'. Valid files: {', '.join(MEMORY_FILES)}"
+        )
 
     def read_file(self, name: str) -> str:
         """Read a memory file. Returns empty string if not found or system disabled."""
