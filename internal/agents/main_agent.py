@@ -856,9 +856,13 @@ class MainAgent:
         worker_system_prompt, worker_request_instructions = self._compose_agent_prompt(
             prompt,
             (
-                "You are the dedicated context compaction subagent. "
-                "Output only plain text with <analysis> and <summary> blocks. "
-                "No tool calls are allowed."
+                "You are the dedicated context compaction subagent for an AI assistant. "
+                "Your only job is to produce a faithful, detailed summary of the conversation "
+                "provided so that the assistant can continue seamlessly without losing context. "
+                "Preserve all technical details, user intent changes, file names, code snippets, "
+                "and errors verbatim where possible. "
+                "Output ONLY plain text: an <analysis> block followed by a <summary> block. "
+                "Absolutely no tool calls."
             ),
         )
 

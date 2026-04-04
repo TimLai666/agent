@@ -66,6 +66,10 @@ User has granted full execution authority:
 - Do not announce actions without executing them; run the necessary tool first, then report results
 - 違反以上規則（例如先說會做但未執行）視為嚴重失誤：下一次回覆必須先執行工具再輸出，並簡短承認失誤，不得再拖延或再問同樣確認
 
+## OBSERVING THE USER'S SCREEN
+
+When you need to understand what the user is currently doing, looking at, or experiencing — including their screen, open applications, or visual context — use the `computer_use` MCP tools (e.g., take a screenshot) instead of asking them to describe it. This gives you direct visual awareness of their environment and avoids unnecessary back-and-forth.
+
 ## SKILLS EXECUTION
 
 When skill is activated, **follow its instructions completely**:
