@@ -15,8 +15,9 @@ def _bind_main_coordinator_methods(fake_main: object) -> None:
         "coordinator_handle_user_turn",
         "coordinator_handle_user_turn_stream",
         "_coordinator_make_or_update_plan",
-        "_coordinator_generate_main_guidance",
-        "_coordinator_generate_todo_breakdown",
+        "_coordinator_should_decompose_todos",
+        "_coordinator_extract_todo_steps",
+        "_coordinator_build_worker_specs",
         "_coordinator_spawn_worker",
         "_coordinator_spawn_verification",
         "_coordinator_find_task_notification",
@@ -92,7 +93,7 @@ def test_task_notification_roundtrip_from_manager():
     result = asyncio.run(
         manager.spawnAgentTask(
             AgentToolInput(
-                prompt="請實作新功能",
+                prompt="implement the feature",
                 subagent_type="implementation",
                 run_in_background=False,
             ),
@@ -127,7 +128,7 @@ def test_verification_fail_must_retry_worker_before_complete():
     result = asyncio.run(
         manager.spawnAgentTask(
             AgentToolInput(
-                prompt="修 API bug",
+                prompt="fix API bug",
                 subagent_type="implementation",
                 run_in_background=False,
             ),
@@ -156,7 +157,7 @@ def test_retry_loop_has_max_attempts_and_fails():
     result = asyncio.run(
         manager.spawnAgentTask(
             AgentToolInput(
-                prompt="修 API bug",
+                prompt="fix API bug",
                 subagent_type="implementation",
                 run_in_background=False,
             ),
@@ -188,9 +189,9 @@ def test_spawn_worker_falls_back_to_task_state_when_notification_missing():
             SpawnWorkerInput(
                 agentType="implementation",
                 title="impl-task",
-                instruction="請修正問題",
+                instruction="implement the change",
                 runInBackground=False,
-                originalUserRequest="請修正問題",
+                originalUserRequest="implement the change",
             )
         )
     )
@@ -218,7 +219,7 @@ def test_coordinator_can_respond_immediately_with_background_worker():
         )
         _bind_main_coordinator_methods(main_agent)
 
-        text = await main_agent.coordinator_handle_user_turn("請協調派工，背景處理這件事，先回覆我")
+        text = await main_agent.coordinator_handle_user_turn("please handle this in the background")
         assert "task_id:" in text
         tasks = manager.listTasks("s1")
         assert tasks
@@ -237,19 +238,21 @@ def test_coordinator_stream_has_no_progress_labels():
         _bind_main_coordinator_methods(main_agent)
 
         async def fake_handle_user_turn(_prompt, message_history=None, on_todo_update=None):
+            _ = message_history
+            _ = on_todo_update
             return "final output"
 
         main_agent.coordinator_handle_user_turn = fake_handle_user_turn  # type: ignore[method-assign]
 
         chunks: list[str] = []
         async for chunk in main_agent.coordinator_handle_user_turn_stream(
-            "請協調處理",
+            "please handle it",
             message_history=None,
         ):
             chunks.append(chunk)
 
         text = "".join(chunks)
-        assert "[進度]" not in text
+        assert "[TODO]" not in text
         assert "final output" in text
 
     asyncio.run(scenario())
@@ -258,34 +261,29 @@ def test_coordinator_stream_has_no_progress_labels():
 def test_planning_instruction_prioritizes_skills_and_tools():
     main_agent = SimpleNamespace()
     _bind_main_coordinator_methods(main_agent)
-    instruction = main_agent._build_planning_instruction("請幫我完成任務")
+    instruction = main_agent._build_planning_instruction("implement the feature")
 
-    assert "優先使用現有 skills 與已可用 tools" in instruction
+    assert "skills" in instruction.lower()
+    assert "tools" in instruction.lower()
     assert "User request" in instruction
 
 
-def test_coordinator_plan_uses_main_guidance_from_execute_turn():
+def test_coordinator_plan_builds_single_worker_without_planner():
     async def scenario() -> None:
         main_agent = SimpleNamespace()
         _bind_main_coordinator_methods(main_agent)
-
-        async def fake_execute_turn_core(prompt: str, message_history=None, skip_plan_execution=True):
-            _ = message_history
-            _ = skip_plan_execution
-            if "coordinator planner" in prompt:
-                return "- Use existing skills first\n- Verify changed files"
-            return "not-json"
-
-        main_agent._execute_turn_core = fake_execute_turn_core
+        main_agent._build_planning_instruction = lambda user_request: f"plan:{user_request}"
+        main_agent._coordinator_should_run_background = lambda _prompt: False
 
         plan = await main_agent._coordinator_make_or_update_plan(
-            SimpleNamespace(userRequest="請修復 bug", taskKind="bugfix")
+            SimpleNamespace(userRequest="fix bug", taskKind="bugfix")
         )
 
         assert plan.type == "spawn-worker"
         assert plan.workerSpec is not None
-        assert "[Coordinator guidance from main]" in plan.workerSpec.instruction
-        assert "Use existing skills first" in plan.workerSpec.instruction
+        assert plan.workerSpec.title == "implementation-task"
+        assert plan.workerSpec.instruction == "plan:fix bug"
+        assert len(plan.workerSpecs) == 1
 
     asyncio.run(scenario())
 
@@ -294,29 +292,21 @@ def test_coordinator_plan_can_decompose_into_multiple_todos():
     async def scenario() -> None:
         main_agent = SimpleNamespace()
         _bind_main_coordinator_methods(main_agent)
-
-        async def fake_execute_turn_core(prompt: str, message_history=None, skip_plan_execution=True):
-            _ = message_history
-            _ = skip_plan_execution
-            if "coordinator planner" in prompt:
-                return "prioritize tools"
-            if "Return JSON only as an array" in prompt:
-                return (
-                    '[{"title":"蒐集需求重點","instruction":"整理輸入與限制"},'
-                    '{"title":"產出答案","instruction":"給出精簡可執行建議"}]'
-                )
-            return ""
-
-        main_agent._execute_turn_core = fake_execute_turn_core
+        main_agent._build_planning_instruction = lambda user_request: f"plan:{user_request}"
+        main_agent._coordinator_should_run_background = lambda _prompt: False
 
         plan = await main_agent._coordinator_make_or_update_plan(
-            SimpleNamespace(userRequest="請幫我拆解並回答", taskKind="research")
+            SimpleNamespace(
+                userRequest="first inspect the logs, then fix the bug, finally add tests",
+                taskKind="research",
+            )
         )
 
         assert plan.type == "spawn-worker"
-        assert len(plan.workerSpecs) == 2
-        assert plan.workerSpecs[0].title == "蒐集需求重點"
-        assert "[Todo step]" in plan.workerSpecs[0].instruction
+        assert len(plan.workerSpecs) == 3
+        assert plan.workerSpecs[0].title == "inspect the logs"
+        assert "[Main agent todo list]" in plan.workerSpecs[0].instruction
+        assert "[Current todo]" in plan.workerSpecs[0].instruction
 
     asyncio.run(scenario())
 
@@ -334,7 +324,7 @@ def test_question_task_kind_always_answers_directly():
         main_agent._execute_turn_core = fake_execute_turn_core
 
         plan = await main_agent._coordinator_make_or_update_plan(
-            SimpleNamespace(userRequest="請介紹這個架構", taskKind="question")
+            SimpleNamespace(userRequest="what is this architecture?", taskKind="question")
         )
 
         assert plan.type == "answer-directly"

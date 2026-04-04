@@ -4,13 +4,20 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 
 from internal.core.agents.agent_types import SpawnVerificationInput, SpawnWorkerInput
-from internal.core.tasks.task_types import CoordinatorTodo, TaskKind, TodoStatus, VerificationResult, WorkerResult
+from internal.core.tasks.task_types import (
+    CoordinatorTodo,
+    TaskKind,
+    TodoStatus,
+    VerificationResult,
+    WorkerResult,
+)
 
 
 MAX_COORDINATOR_LOOP = 40
 MAX_TODO_RETRY = 3
 MAX_STUCK_TURNS = 6
-MAX_VALIDATION_FAILURE_RETRIES = 2
+MAX_VALIDATION_FAILURE_RETRIES = 1
+TASK_KINDS_REQUIRING_VERIFICATION = {"implementation", "bugfix", "infra"}
 
 
 def _requires_blocking_reason(status: TodoStatus) -> bool:
@@ -29,9 +36,7 @@ def _can_enter_validation(todos: list[CoordinatorTodo]) -> bool:
 def _is_dependency_satisfied(todo: CoordinatorTodo, index: dict[str, CoordinatorTodo]) -> bool:
     for dep_id in todo.dependencies:
         dep = index.get(dep_id)
-        if dep is None:
-            return False
-        if dep.status != "completed":
+        if dep is None or dep.status != "completed":
             return False
     return True
 
@@ -66,20 +71,20 @@ def _build_stuck_report(todos: list[CoordinatorTodo], reason: str) -> str:
     completed = [t for t in todos if t.status == "completed"]
     unresolved = [t for t in todos if t.status != "completed"]
     lines = [
-        "流程已進入 blocked 狀態。",
-        f"原因：{reason}",
+        "Coordinator got stuck before finishing the request.",
+        f"Reason: {reason}",
         "",
-        "已完成項目：",
+        "Completed todos:",
     ]
     if completed:
         lines.extend(f"- {t.id}: {t.title}" for t in completed)
     else:
         lines.append("- (none)")
     lines.append("")
-    lines.append("未完成或異常項目：")
+    lines.append("Remaining todos:")
     if unresolved:
         for todo in unresolved:
-            detail = todo.blockingReason or todo.notes or "狀態未完成"
+            detail = todo.blockingReason or todo.notes or "no additional detail"
             lines.append(f"- {todo.id}: {todo.title} [{todo.status}] {detail}")
     else:
         lines.append("- (none)")
@@ -88,7 +93,7 @@ def _build_stuck_report(todos: list[CoordinatorTodo], reason: str) -> str:
 
 def _build_aggregate_worker_result(todos: list[CoordinatorTodo]) -> WorkerResult:
     completed = [todo for todo in todos if todo.status == "completed"]
-    summary = completed[-1].title if completed else "已完成執行"
+    summary = completed[-1].title if completed else "coordinator-run"
     result_lines: list[str] = []
     files_changed: list[str] = []
     commands: list[str] = []
@@ -98,7 +103,6 @@ def _build_aggregate_worker_result(todos: list[CoordinatorTodo]) -> WorkerResult
     for todo in completed:
         if todo.result.strip():
             result_lines.append(f"[{todo.id}] {todo.result.strip()}")
-        _merge_unique(files_changed, [item for item in todo.evidence if "." in item and "/" in item])
         _merge_unique(evidence, todo.evidence)
 
     for todo in todos:
@@ -179,50 +183,40 @@ async def run_coordinator_turn(
     while True:
         loop_count += 1
         if loop_count > MAX_COORDINATOR_LOOP:
-            return _build_stuck_report(todos, "Exceeded max loop count")
+            return _build_stuck_report(todos, "exceeded max loop count")
 
         progress_made = False
 
         if not todos:
-            _emit_todo_snapshot("planning", todos, on_todo_update)
             plan = await make_or_update_plan(ctx)
             if plan.type == "answer-directly":
+                return plan.finalAnswer
+            if plan.type != "spawn-worker":
+                return "Coordinator could not produce a runnable plan."
+
+            specs = list(plan.workerSpecs)
+            if not specs and plan.workerSpec is not None:
+                specs = [plan.workerSpec]
+            if not specs:
+                return "Coordinator did not receive any worker steps."
+
+            prev_todo_id: str | None = None
+            for index, spec in enumerate(specs, start=1):
                 todo = CoordinatorTodo(
                     id=_make_todo_id(todos),
-                    title="直接回覆任務",
-                    description=ctx.userRequest,
+                    title=spec.title or f"worker-task-{index}",
+                    description=spec.instruction,
                     status="pending",
                     priority="high",
-                    assignedTo="main_agent",
-                    notes=plan.finalAnswer,
+                    assignedTo=spec.agentType,
+                    dependencies=[prev_todo_id] if prev_todo_id else [],
                 )
                 todos.append(todo)
-                todo_plans[todo.id] = plan
-            elif plan.type == "spawn-worker":
-                specs = list(plan.workerSpecs)
-                if not specs and plan.workerSpec is not None:
-                    specs = [plan.workerSpec]
-                if not specs:
-                    return "無法產生可執行計畫。"
+                todo_plans[todo.id] = CoordinatorPlan(type="spawn-worker", workerSpec=spec)
+                prev_todo_id = todo.id
 
-                prev_todo_id: str | None = None
-                for spec in specs:
-                    todo = CoordinatorTodo(
-                        id=_make_todo_id(todos),
-                        title=spec.title or "worker-task",
-                        description=spec.instruction,
-                        status="pending",
-                        priority="high",
-                        assignedTo=spec.agentType,
-                        dependencies=[prev_todo_id] if prev_todo_id else [],
-                    )
-                    todos.append(todo)
-                    todo_plans[todo.id] = CoordinatorPlan(type="spawn-worker", workerSpec=spec)
-                    prev_todo_id = todo.id
-            else:
-                return "無法產生可執行計畫。"
-
-            _emit_todo_snapshot("planning", todos, on_todo_update)
+            if len(specs) > 1:
+                _emit_todo_snapshot("planning", todos, on_todo_update)
             progress_made = True
 
         next_todo = _select_next_runnable_todo(todos)
@@ -234,7 +228,7 @@ async def run_coordinator_turn(
 
             if plan is None:
                 next_todo.status = "failed"
-                next_todo.blockingReason = "缺少對應執行計畫"
+                next_todo.blockingReason = "missing worker plan for todo"
             elif plan.type == "answer-directly":
                 next_todo.result = plan.finalAnswer
                 next_todo.status = "completed"
@@ -247,7 +241,11 @@ async def run_coordinator_turn(
                     next_todo.status = "completed"
                 else:
                     next_todo.retryCount += 1
-                    next_todo.notes = "; ".join(worker_result.unresolvedIssues) or worker_result.summary or "worker execution failed"
+                    next_todo.notes = (
+                        "; ".join(worker_result.unresolvedIssues)
+                        or worker_result.summary
+                        or "worker execution failed"
+                    )
                     if next_todo.retryCount <= MAX_TODO_RETRY:
                         next_todo.status = "retrying"
                         ctx = augment_context_with_failure(ctx, worker_result, None)
@@ -256,24 +254,18 @@ async def run_coordinator_turn(
                         next_todo.blockingReason = next_todo.notes or "exceeded max retry"
             else:
                 next_todo.status = "impossible"
-                next_todo.blockingReason = "todo 對應計畫無效"
+                next_todo.blockingReason = "todo has an invalid plan"
 
-            if next_todo.status in {"completed", "failed", "impossible"}:
-                progress_made = True
             if next_todo.status in {"blocked", "failed", "impossible"} and not next_todo.blockingReason.strip():
-                next_todo.blockingReason = next_todo.notes or "未提供阻塞原因"
+                next_todo.blockingReason = next_todo.notes or "missing failure reason"
 
             _emit_todo_snapshot("executing", todos, on_todo_update)
-
-            if progress_made:
-                stuck_turns = 0
-            else:
-                stuck_turns += 1
+            stuck_turns = 0 if progress_made else stuck_turns + 1
             continue
 
         if not _can_enter_validation(todos):
             _emit_todo_snapshot("blocked", todos, on_todo_update)
-            return _build_stuck_report(todos, "Todos unresolved but no runnable task found")
+            return _build_stuck_report(todos, "todos unresolved but no runnable task found")
 
         aggregate_worker = _build_aggregate_worker_result(todos)
         completed_todo_ids = {todo.id for todo in todos if todo.status == "completed"}
@@ -281,8 +273,9 @@ async def run_coordinator_turn(
             todo_id in completed_todo_ids and plan.type == "spawn-worker"
             for todo_id, plan in todo_plans.items()
         )
-        if not has_executed_worker_todo:
-            _emit_todo_snapshot("finalizing", todos, on_todo_update)
+
+        if not has_executed_worker_todo or ctx.taskKind not in TASK_KINDS_REQUIRING_VERIFICATION:
+            _emit_todo_snapshot("completed", todos, on_todo_update)
             return synthesize_final_answer(ctx, aggregate_worker, None)
 
         _emit_todo_snapshot("validating", todos, on_todo_update)
@@ -295,26 +288,14 @@ async def run_coordinator_turn(
         )
 
         if verification.verdict == "PASS":
-            unexplained = [
-                todo
-                for todo in todos
-                if todo.status in {"blocked", "failed", "impossible"} and not todo.blockingReason.strip()
-            ]
-            if unexplained:
-                _emit_todo_snapshot("blocked", todos, on_todo_update)
-                return _build_stuck_report(todos, "Found unresolved blocked/failed/impossible todos without reason")
             _emit_todo_snapshot("completed", todos, on_todo_update)
             return synthesize_final_answer(ctx, aggregate_worker, verification)
 
         validation_failures += 1
-        if validation_failures > MAX_VALIDATION_FAILURE_RETRIES:
+        remediation_todos = verification.remediationTodos
+        if validation_failures > MAX_VALIDATION_FAILURE_RETRIES or not remediation_todos:
             _emit_todo_snapshot("finalizing", todos, on_todo_update)
             return synthesize_final_answer(ctx, aggregate_worker, verification)
-
-        remediation_todos = verification.remediationTodos
-        if not remediation_todos:
-            _emit_todo_snapshot("blocked", todos, on_todo_update)
-            return _build_stuck_report(todos, "Validation failed without remediation path")
 
         existing_signatures = {_todo_signature(todo) for todo in todos}
         added_any = False
@@ -323,6 +304,7 @@ async def run_coordinator_turn(
             signature = _todo_signature(remediation)
             if signature in existing_signatures:
                 continue
+
             remediation.id = _make_todo_id(todos)
             remediation.status = "pending"
             remediation.assignedTo = remediation.assignedTo or "main_agent"
@@ -331,17 +313,21 @@ async def run_coordinator_turn(
             added_any = True
 
             remediation_ctx = CoordinatorTurnContext(
-                userRequest=f"{ctx.userRequest}\n\n[Validation remediation]\n{remediation.title}\n{remediation.description}",
+                userRequest=(
+                    f"{ctx.userRequest}\n\n"
+                    f"[Validation remediation]\n{remediation.title}\n{remediation.description}"
+                ),
                 taskKind="implementation",
             )
             remediation_plan = await make_or_update_plan(remediation_ctx)
             if remediation_plan.type == "answer-directly":
-                remediation.notes = remediation_plan.finalAnswer
+                remediation.result = remediation_plan.finalAnswer
+                remediation.status = "completed"
             elif remediation_plan.type == "spawn-worker" and remediation_plan.workerSpec is not None:
                 remediation.assignedTo = remediation_plan.workerSpec.agentType
             else:
                 remediation.status = "impossible"
-                remediation.blockingReason = "Planner 無法為 remediation 產生執行計畫"
+                remediation.blockingReason = "coordinator could not create a remediation step"
             todo_plans[remediation.id] = remediation_plan
 
         if not added_any:
@@ -349,13 +335,8 @@ async def run_coordinator_turn(
             return synthesize_final_answer(ctx, aggregate_worker, verification)
 
         _emit_todo_snapshot("executing", todos, on_todo_update)
-
-        progress_made = True
-        if progress_made:
-            stuck_turns = 0
-        else:
-            stuck_turns += 1
+        stuck_turns = 0 if progress_made or added_any else stuck_turns + 1
 
         if stuck_turns >= MAX_STUCK_TURNS:
             _emit_todo_snapshot("blocked", todos, on_todo_update)
-            return _build_stuck_report(todos, "No effective progress detected for multiple turns")
+            return _build_stuck_report(todos, "no effective progress detected for multiple turns")

@@ -1218,7 +1218,6 @@ class MainAgent:
 
     async def _coordinator_make_or_update_plan(self, ctx: CoordinatorTurnContext) -> CoordinatorPlan:
         worker_type = "implementation" if ctx.taskKind in {"implementation", "bugfix", "infra"} else "research"
-        coordinator_guidance = await self._coordinator_generate_main_guidance(ctx.userRequest)
 
         if self._coordinator_should_run_background(ctx.userRequest):
             payload = AgentToolInput(
@@ -1252,53 +1251,107 @@ class MainAgent:
             answer = await execute_turn(ctx.userRequest)
             return CoordinatorPlan(type="answer-directly", finalAnswer=answer)
 
-        breakdown_specs = await self._coordinator_generate_todo_breakdown(
+        worker_specs = self._coordinator_build_worker_specs(
             user_request=ctx.userRequest,
+            task_kind=ctx.taskKind,
             worker_type=worker_type,
-            coordinator_guidance=coordinator_guidance,
         )
 
         return CoordinatorPlan(
             type="spawn-worker",
-            workerSpec=breakdown_specs[0],
-            workerSpecs=breakdown_specs,
+            workerSpec=worker_specs[0],
+            workerSpecs=worker_specs,
         )
 
-    async def _coordinator_generate_main_guidance(self, user_request: str) -> str:
-        execute_turn = getattr(self, "_execute_turn_core", None)
-        if not callable(execute_turn):
-            return ""
-
-        guidance_prompt = (
-            "You are acting as the coordinator planner for an internal execution pipeline.\n"
-            "Generate concise internal guidance for workers.\n"
-            "Requirements:\n"
-            "- Prioritize existing skills/tools first.\n"
-            "- Mention key checks or risks.\n"
-            "- Keep under 8 bullet points.\n"
-            "- Do not include user-facing niceties.\n\n"
-            "User request:\n"
-            f"{user_request}"
-        )
-        try:
-            guidance = await execute_turn(guidance_prompt)
-        except Exception:
-            return ""
-        return (guidance or "").strip()
-
-    async def _coordinator_generate_todo_breakdown(
+    def _coordinator_should_decompose_todos(
         self,
         *,
         user_request: str,
+        task_kind: str,
+    ) -> bool:
+        lowered = user_request.lower().strip()
+        if task_kind == "question":
+            return False
+        if "[validation remediation]" in lowered:
+            return False
+        if self._coordinator_should_run_background(user_request):
+            return True
+        if len(user_request) >= 220:
+            return True
+        multi_step_markers = (
+            "\n-",
+            "\n*",
+            "\n1.",
+            "\n1)",
+            "step by step",
+            "first",
+            "then",
+            "finally",
+            "after that",
+            "before",
+            "multi-file",
+            "multiple files",
+            "refactor",
+            "rewrite",
+            "migration",
+            "先",
+            "再",
+            "然後",
+            "最後",
+            "逐步",
+            "重構",
+            "多檔",
+            "多個檔案",
+        )
+        return any(marker in lowered for marker in multi_step_markers)
+
+    def _coordinator_extract_todo_steps(self, user_request: str) -> list[str]:
+        bullet_steps: list[str] = []
+        for raw_line in user_request.splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            if re.match(r"^([-*]|\d+[.)])\s+", line):
+                bullet_steps.append(re.sub(r"^([-*]|\d+[.)])\s+", "", line).strip())
+        if bullet_steps:
+            return bullet_steps[:4]
+
+        parts = [
+            part.strip()
+            for part in re.split(r"[，,；;。]\s*", user_request)
+            if part.strip()
+        ]
+        sequenced = [
+            re.sub(
+                r"^(先|再|然後|最後|first|then|finally|after that|next)\s+",
+                "",
+                part,
+                flags=re.IGNORECASE,
+            ).strip()
+            for part in parts
+            if re.match(
+                r"^(先|再|然後|最後|first|then|finally|after that|next)",
+                part,
+                flags=re.IGNORECASE,
+            )
+        ]
+        if len(sequenced) >= 2:
+            return sequenced[:4]
+
+        return []
+
+    def _coordinator_build_worker_specs(
+        self,
+        *,
+        user_request: str,
+        task_kind: str,
         worker_type: str,
-        coordinator_guidance: str,
     ) -> list[SpawnWorkerInput]:
         base_instruction = self._build_planning_instruction(user_request)
-        if coordinator_guidance:
-            base_instruction += f"\n\n[Coordinator guidance from main]\n{coordinator_guidance}"
-
-        execute_turn = getattr(self, "_execute_turn_core", None)
-        if not callable(execute_turn):
+        if not self._coordinator_should_decompose_todos(
+            user_request=user_request,
+            task_kind=task_kind,
+        ):
             return [
                 SpawnWorkerInput(
                     agentType=worker_type,
@@ -1309,55 +1362,38 @@ class MainAgent:
                 )
             ]
 
-        breakdown_prompt = (
-            "You are decomposing a user task into actionable execution todos.\n"
-            "Return JSON only as an array with at most 4 items.\n"
-            "Each item must include: title, instruction.\n"
-            "Do not include markdown fences.\n"
-            "Prefer concrete, executable steps; avoid status-only items.\n\n"
-            "User request:\n"
-            f"{user_request}\n\n"
-            "Coordinator guidance:\n"
-            f"{coordinator_guidance or '(none)'}"
-        )
+        todo_steps = self._coordinator_extract_todo_steps(user_request)
+        if len(todo_steps) < 2:
+            return [
+                SpawnWorkerInput(
+                    agentType=worker_type,
+                    title=f"{worker_type}-task",
+                    originalUserRequest=user_request,
+                    instruction=base_instruction,
+                    runInBackground=False,
+                )
+            ]
 
-        try:
-            raw = await execute_turn(breakdown_prompt)
-            parsed = json.loads((raw or "").strip())
-        except Exception:
-            parsed = []
-
-        items = parsed if isinstance(parsed, list) else []
+        todo_list = "\n".join(f"{index + 1}. {step}" for index, step in enumerate(todo_steps))
         specs: list[SpawnWorkerInput] = []
-        for item in items[:4]:
-            if not isinstance(item, dict):
-                continue
-            title = str(item.get("title", "")).strip()
-            instruction = str(item.get("instruction", "")).strip()
-            if not title or not instruction:
-                continue
+        for index, step in enumerate(todo_steps[:4], start=1):
+            title = step[:64].strip() or f"{worker_type}-task-{index}"
             specs.append(
                 SpawnWorkerInput(
                     agentType=worker_type,
                     title=title,
                     originalUserRequest=user_request,
-                    instruction=f"{base_instruction}\n\n[Todo step]\n{instruction}",
+                    instruction=(
+                        f"{base_instruction}\n\n"
+                        "[Main agent todo list]\n"
+                        f"{todo_list}\n\n"
+                        "[Current todo]\n"
+                        f"{step}"
+                    ),
                     runInBackground=False,
                 )
             )
-
-        if specs:
-            return specs
-
-        return [
-            SpawnWorkerInput(
-                agentType=worker_type,
-                title=f"{worker_type}-task",
-                originalUserRequest=user_request,
-                instruction=base_instruction,
-                runInBackground=False,
-            )
-        ]
+        return specs
 
     async def _coordinator_spawn_worker(self, spec: SpawnWorkerInput) -> WorkerResult:
         subagent_type = spec.agentType if spec.agentType != "general-purpose" else ""
@@ -1548,21 +1584,6 @@ class MainAgent:
                 self._last_messages = None
             self._last_assistant_reply = self._extract_user_reply(output_text)
 
-            if await self._follow_through_needs_retry(self._last_user_prompt or "", output_text):
-                retry_context = self._build_follow_through_retry_context()
-                user_content_with_retry = self._append_error_to_user_content(user_content, retry_context)
-                retry_result = await self.agent.run(
-                    user_content_with_retry,
-                    message_history=safe_history,
-                )
-                retry_output_text = enforce_absolute_image_paths(retry_result.output or "")
-                try:
-                    self._last_messages = retry_result.all_messages()
-                except Exception:
-                    self._last_messages = None
-                self._last_assistant_reply = self._extract_user_reply(retry_output_text)
-                return retry_output_text
-
             return output_text
         except Exception as e:
             if self._is_context_overflow_error(e):
@@ -1679,23 +1700,6 @@ class MainAgent:
                 except Exception:
                     self._last_messages = None
                 self._last_assistant_reply = self._extract_user_reply(collected)
-
-                if await self._follow_through_needs_retry(self._last_user_prompt or "", collected):
-                    retry_context = self._build_follow_through_retry_context()
-                    user_content_with_retry = self._append_error_to_user_content(user_content, retry_context)
-                    retry_result = await self.agent.run(
-                        user_content_with_retry,
-                        message_history=safe_history,
-                    )
-                    retry_output_text = enforce_absolute_image_paths(retry_result.output or "")
-                    try:
-                        self._last_messages = retry_result.all_messages()
-                    except Exception:
-                        self._last_messages = None
-                    self._last_assistant_reply = self._extract_user_reply(retry_output_text)
-                    if retry_output_text:
-                        yield retry_output_text
-                    return
         except Exception as e:
             if self._is_context_overflow_error(e):
                 retry_history = self._overflow_retry_history(safe_history)
