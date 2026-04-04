@@ -233,6 +233,11 @@ def create_runtime(
     main_agent: object,
     on_todo_update: Callable[[str], None] | None = None,
 ) -> OrchestrationRuntime:
+    fork_runtime = getattr(main_agent, "fork_coordinator_runtime", None)
+    if callable(fork_runtime):
+        runtime = fork_runtime(on_todo_update=on_todo_update)
+        if isinstance(runtime, OrchestrationRuntime):
+            return runtime
     return OrchestrationRuntime(main_agent=main_agent, on_todo_update=on_todo_update)
 
 

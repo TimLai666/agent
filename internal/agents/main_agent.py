@@ -1010,12 +1010,15 @@ class MainAgent:
         message_history: list[ModelRequest | ModelResponse] | None = None,
         skip_plan_execution: bool = True,
     ):
-        from internal.app.handle_user_turn import create_runtime
-
         _ = skip_plan_execution  # backward compatibility
-        runtime = create_runtime(self)
+        runtime = self.fork_coordinator_runtime()
         async for chunk in runtime.handle_user_turn_stream(prompt, message_history=message_history):
             yield chunk
+
+    def fork_coordinator_runtime(self, on_todo_update: Callable[[str], None] | None = None) -> Any:
+        from internal.app.handle_user_turn import OrchestrationRuntime
+
+        return OrchestrationRuntime(main_agent=self, on_todo_update=on_todo_update)
 
     async def _execute_turn_stream_core(
         self,

@@ -236,3 +236,21 @@ def test_planning_instruction_prioritizes_skills_and_tools():
 
     assert "優先使用現有 skills 與已可用 tools" in instruction
     assert "User request" in instruction
+
+
+def test_create_runtime_prefers_main_agent_fork():
+    from internal.app.handle_user_turn import create_runtime
+
+    captured: dict[str, str] = {}
+
+    class FakeMainAgent:
+        def fork_coordinator_runtime(self, on_todo_update=None):
+            captured["called"] = "yes"
+            captured["callback"] = "yes" if on_todo_update else "no"
+            return OrchestrationRuntime(main_agent=self, on_todo_update=on_todo_update)
+
+    runtime = create_runtime(FakeMainAgent(), on_todo_update=lambda _x: None)
+
+    assert isinstance(runtime, OrchestrationRuntime)
+    assert captured.get("called") == "yes"
+    assert captured.get("callback") == "yes"
