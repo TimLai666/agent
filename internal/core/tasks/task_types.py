@@ -8,6 +8,18 @@ TaskStatus = Literal["pending", "running", "completed", "failed", "killed"]
 AgentType = Literal["general-purpose", "research", "implementation", "verification"]
 TaskKind = Literal["question", "research", "implementation", "bugfix", "infra"]
 VerificationVerdict = Literal["PASS", "FAIL", "PARTIAL"]
+RunStatus = Literal["planning", "executing", "validating", "finalizing", "completed", "blocked", "failed"]
+TodoStatus = Literal[
+    "pending",
+    "in_progress",
+    "completed",
+    "blocked",
+    "failed",
+    "impossible",
+    "not_applicable",
+    "retrying",
+]
+TodoPriority = Literal["high", "medium", "low"]
 
 
 @dataclass
@@ -69,6 +81,23 @@ class WorkerResult:
 
 
 @dataclass
+class CoordinatorTodo:
+    id: str
+    title: str
+    description: str
+    status: TodoStatus = "pending"
+    priority: TodoPriority = "medium"
+    dependencies: list[str] = field(default_factory=list)
+    assignedTo: str = "main_agent"
+    toolRequired: bool = False
+    notes: str = ""
+    result: str = ""
+    blockingReason: str = ""
+    evidence: list[str] = field(default_factory=list)
+    retryCount: int = 0
+
+
+@dataclass
 class VerificationEvidence:
     command: str
     output: str
@@ -83,6 +112,7 @@ class VerificationResult:
     evidence: list[VerificationEvidence]
     missingRequirements: list[str]
     suspectedProblems: list[str]
+    remediationTodos: list[CoordinatorTodo] = field(default_factory=list)
 
 
 @dataclass

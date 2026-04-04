@@ -17,6 +17,14 @@ VERDICT: PASS
 VERDICT: FAIL
 VERDICT: PARTIAL
 
+If VERDICT is FAIL or PARTIAL, you MUST include concrete remediation items.
+Use one or more lines in this exact format:
+REMEDIATION_TODO: <title> | <description> | <priority>
+
+Optional but recommended for traceability:
+MISSING_REQUIREMENT: <what is missing>
+SUSPECTED_PROBLEM: <what appears wrong>
+
 Do not avoid verification by saying:
 - \"the code looks correct\"
 - \"I assume tests would pass\"
