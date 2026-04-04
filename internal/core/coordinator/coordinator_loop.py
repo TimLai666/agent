@@ -116,6 +116,31 @@ def _build_aggregate_worker_result(todos: list[CoordinatorTodo]) -> WorkerResult
     )
 
 
+def _format_todo_snapshot(phase: str, todos: list[CoordinatorTodo]) -> str:
+    lines = [f"[TODO] phase={phase}"]
+    if not todos:
+        lines.append("- (empty)")
+        return "\n".join(lines)
+
+    for todo in todos:
+        desc = todo.title.strip() or todo.description.strip() or todo.id
+        suffix = ""
+        if todo.status in {"blocked", "failed", "impossible"}:
+            suffix = f" | reason={todo.blockingReason or todo.notes or 'n/a'}"
+        lines.append(f"- {todo.id} [{todo.status}] {desc}{suffix}")
+    return "\n".join(lines)
+
+
+def _emit_todo_snapshot(
+    phase: str,
+    todos: list[CoordinatorTodo],
+    callback: Callable[[str], None] | None,
+) -> None:
+    if callback is None:
+        return
+    callback(_format_todo_snapshot(phase, todos))
+
+
 @dataclass
 class CoordinatorTurnContext:
     userRequest: str
@@ -137,6 +162,7 @@ async def run_coordinator_turn(
     spawn_verification_worker: Callable[[SpawnVerificationInput], Awaitable[VerificationResult]],
     synthesize_final_answer: Callable[[CoordinatorTurnContext, WorkerResult, VerificationResult | None], str],
     augment_context_with_failure: Callable[[CoordinatorTurnContext, WorkerResult, VerificationResult | None], CoordinatorTurnContext],
+    on_todo_update: Callable[[str], None] | None = None,
 ) -> str:
     todos: list[CoordinatorTodo] = []
     todo_plans: dict[str, CoordinatorPlan] = {}
@@ -151,6 +177,7 @@ async def run_coordinator_turn(
         progress_made = False
 
         if not todos:
+            _emit_todo_snapshot("planning", todos, on_todo_update)
             plan = await make_or_update_plan(ctx)
             todo = CoordinatorTodo(
                 id=_make_todo_id(todos),
@@ -172,11 +199,13 @@ async def run_coordinator_turn(
 
             todos.append(todo)
             todo_plans[todo.id] = plan
+            _emit_todo_snapshot("planning", todos, on_todo_update)
             progress_made = True
 
         next_todo = _select_next_runnable_todo(todos)
         if next_todo is not None:
             next_todo.status = "in_progress"
+            _emit_todo_snapshot("executing", todos, on_todo_update)
             progress_made = True
             plan = todo_plans.get(next_todo.id)
 
@@ -211,6 +240,8 @@ async def run_coordinator_turn(
             if next_todo.status in {"blocked", "failed", "impossible"} and not next_todo.blockingReason.strip():
                 next_todo.blockingReason = next_todo.notes or "未提供阻塞原因"
 
+            _emit_todo_snapshot("executing", todos, on_todo_update)
+
             if progress_made:
                 stuck_turns = 0
             else:
@@ -218,6 +249,7 @@ async def run_coordinator_turn(
             continue
 
         if not _can_enter_validation(todos):
+            _emit_todo_snapshot("blocked", todos, on_todo_update)
             return _build_stuck_report(todos, "Todos unresolved but no runnable task found")
 
         aggregate_worker = _build_aggregate_worker_result(todos)
@@ -227,8 +259,10 @@ async def run_coordinator_turn(
             for todo_id, plan in todo_plans.items()
         )
         if not has_executed_worker_todo:
+            _emit_todo_snapshot("finalizing", todos, on_todo_update)
             return synthesize_final_answer(ctx, aggregate_worker, None)
 
+        _emit_todo_snapshot("validating", todos, on_todo_update)
         verification = await spawn_verification_worker(
             SpawnVerificationInput(
                 originalUserRequest=ctx.userRequest,
@@ -244,11 +278,14 @@ async def run_coordinator_turn(
                 if todo.status in {"blocked", "failed", "impossible"} and not todo.blockingReason.strip()
             ]
             if unexplained:
+                _emit_todo_snapshot("blocked", todos, on_todo_update)
                 return _build_stuck_report(todos, "Found unresolved blocked/failed/impossible todos without reason")
+            _emit_todo_snapshot("completed", todos, on_todo_update)
             return synthesize_final_answer(ctx, aggregate_worker, verification)
 
         remediation_todos = verification.remediationTodos
         if not remediation_todos:
+            _emit_todo_snapshot("blocked", todos, on_todo_update)
             return _build_stuck_report(todos, "Validation failed without remediation path")
 
         for remediation in remediation_todos:
@@ -271,6 +308,8 @@ async def run_coordinator_turn(
                 remediation.blockingReason = "Planner 無法為 remediation 產生執行計畫"
             todo_plans[remediation.id] = remediation_plan
 
+        _emit_todo_snapshot("executing", todos, on_todo_update)
+
         progress_made = True
         if progress_made:
             stuck_turns = 0
@@ -278,4 +317,5 @@ async def run_coordinator_turn(
             stuck_turns += 1
 
         if stuck_turns >= MAX_STUCK_TURNS:
+            _emit_todo_snapshot("blocked", todos, on_todo_update)
             return _build_stuck_report(todos, "No effective progress detected for multiple turns")

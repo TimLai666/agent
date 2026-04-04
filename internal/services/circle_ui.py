@@ -222,6 +222,7 @@ from PySide6.QtCore import (
     QEventLoop,
     QMetaObject,
     Property,
+    QRect,
     QSize,
     Signal,
     QTimer,
@@ -2322,6 +2323,72 @@ class EdgeHandle(QWidget):
         painter.drawRoundedRect(rect, 9, 9)
 
 
+class TodoPanelWindow(QWidget):
+    """Floating todo panel window shown separately from the main orb UI."""
+
+    def __init__(self, parent=None):
+        super().__init__(None)
+        self.setWindowTitle("Todo List")
+        self.setMinimumSize(280, 360)
+        self.resize(320, 460)
+        self.setWindowFlags(
+            Qt.WindowType.Window
+            | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.Tool
+        )
+        self.setStyleSheet(
+            "QWidget { background-color: rgba(18, 22, 32, 238); color: #EAF3FF; }"
+            "QLabel#todoPanelTitle { font-size: 13px; font-weight: bold; color: #F1F7FF; }"
+            "QTextBrowser {"
+            "background-color: rgba(11, 15, 22, 196);"
+            "color: #EAF3FF;"
+            "border: 1px solid rgba(120, 170, 230, 80);"
+            "border-radius: 8px;"
+            "padding: 6px;"
+            "font-size: 12px;"
+            "}"
+        )
+
+        self.layout = QVBoxLayout(self)
+        self.layout.setContentsMargins(10, 8, 10, 10)
+        self.layout.setSpacing(6)
+
+        header = QWidget(self)
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(0, 0, 0, 0)
+        header_layout.setSpacing(6)
+
+        self.title_label = QLabel("Todo List", header)
+        self.title_label.setObjectName("todoPanelTitle")
+
+        self.close_button = QToolButton(header)
+        self.close_button.setText("✕")
+        self.close_button.setAutoRaise(True)
+        self.close_button.setStyleSheet(
+            "QToolButton { color: rgba(230, 240, 255, 200); font-size: 11px; }"
+            "QToolButton:hover { color: #FFFFFF; }"
+        )
+        self.close_button.clicked.connect(self.hide)
+
+        header_layout.addWidget(self.title_label)
+        header_layout.addStretch(1)
+        header_layout.addWidget(self.close_button)
+
+        self.content = AutoWrapTextBrowser(self)
+        self.content.setOpenExternalLinks(True)
+        self.content.setMarkdown("_尚無 todo 資訊_")
+
+        self.layout.addWidget(header)
+        self.layout.addWidget(self.content, 1)
+
+    def set_todo_text(self, text: str) -> None:
+        data = (text or "").strip()
+        if data:
+            self.content.setMarkdown(f"```text\n{data}\n```")
+        else:
+            self.content.setMarkdown("_尚無 todo 資訊_")
+
+
 class MainWindow(QMainWindow):
     # 信号：请求显示确认对话框
     confirm_requested = Signal(str, str, object)  # message, default_choice, result_container
@@ -2438,6 +2505,24 @@ class MainWindow(QMainWindow):
         )
         self.collapse_button.clicked.connect(self.collapse_to_edge)
         self.collapse_button.hide()
+
+        self.todo_toggle_button = QPushButton("Todo", self)
+        self.todo_toggle_button.setFixedSize(54, 22)
+        self.todo_toggle_button.setStyleSheet(
+            "QPushButton { "
+            "background-color: rgba(24, 52, 82, 210); "
+            "color: #DCEFFF; "
+            "border: 1px solid rgba(170, 210, 255, 120); "
+            "border-radius: 11px; "
+            "font-size: 11px; "
+            "font-weight: bold; "
+            "}"
+            "QPushButton:hover { background-color: rgba(36, 72, 112, 230); }"
+        )
+        self.todo_toggle_button.clicked.connect(self.toggle_todo_drawer)
+        self.todo_toggle_button.hide()
+        self.todo_panel_window = TodoPanelWindow(self)
+        self._todo_snapshot_text = ""
 
 
         self.input_layout.addWidget(self.voice_button)
@@ -2572,6 +2657,49 @@ class MainWindow(QMainWindow):
             self.INPUT_HEIGHT,
         )
         self._position_collapse_button()
+        self._position_todo_toggle_button()
+
+    def _position_todo_toggle_button(self) -> None:
+        btn_w = self.todo_toggle_button.width()
+        btn_h = self.todo_toggle_button.height()
+        input_rect = self.input_container.geometry()
+        x = input_rect.center().x() - (btn_w // 2) - 66
+        y = max(10, input_rect.y() - btn_h - 6)
+        x = max(8, min(x, self.FIXED_WIDTH - btn_w - 8))
+        self.todo_toggle_button.setGeometry(x, y, btn_w, btn_h)
+
+    def _position_todo_window(self) -> None:
+        if self.todo_panel_window is None:
+            return
+        frame = self.frameGeometry()
+        x = frame.right() + 12
+        y = frame.top() + 20
+        self.todo_panel_window.move(x, y)
+
+    def toggle_todo_drawer(self) -> None:
+        if self.todo_panel_window.isVisible():
+            self.close_todo_drawer()
+        else:
+            self.open_todo_drawer()
+
+    def open_todo_drawer(self) -> None:
+        if self.todo_panel_window.isVisible():
+            return
+        self._position_todo_window()
+        self.todo_panel_window.show()
+        self.todo_panel_window.raise_()
+        self.todo_panel_window.activateWindow()
+        self._update_window_mask()
+
+    def close_todo_drawer(self) -> None:
+        if not self.todo_panel_window.isVisible():
+            return
+        self.todo_panel_window.hide()
+        self._update_window_mask()
+
+    def update_todo_drawer(self, text: str) -> None:
+        self._todo_snapshot_text = (text or "").strip()
+        self.todo_panel_window.set_todo_text(self._todo_snapshot_text)
 
     def _position_collapse_button(self) -> None:
         btn_w = self.collapse_button.width()
@@ -2585,6 +2713,9 @@ class MainWindow(QMainWindow):
         self._position_input_container()
         self.input_container.show()
         self.collapse_button.show()
+        self.todo_toggle_button.show()
+        if self.todo_panel_window.isVisible():
+            self._position_todo_window()
         self._update_window_mask()
 
     def _handle_user_typing(self, *_args):
@@ -2598,6 +2729,7 @@ class MainWindow(QMainWindow):
     def hide_input_container(self) -> None:
         self.input_container.hide()
         self.collapse_button.hide()
+        self.todo_toggle_button.hide()
         self._update_window_mask()
 
     def toggle_input_container(self) -> None:
@@ -2610,6 +2742,7 @@ class MainWindow(QMainWindow):
         if self._collapsed:
             return
         self._input_visible_before_collapse = self.input_container.isVisible()
+        self.close_todo_drawer()
         self.edge_handle.show_at_edge(self)
         self.edge_handle.raise_()
         self.hide()
@@ -2655,6 +2788,8 @@ class MainWindow(QMainWindow):
             delta = event.globalPosition().toPoint() - self.old_pos
             self.move(self.pos() + delta)
             self.old_pos = event.globalPosition().toPoint()
+            if self.todo_panel_window.isVisible():
+                self._position_todo_window()
             event.accept()
 
     def mouseReleaseEvent(self, event):
@@ -2666,6 +2801,14 @@ class MainWindow(QMainWindow):
         super().showEvent(event)
         # 延遲更新以確保所有子元素都已渲染
         QTimer.singleShot(100, self._update_window_mask)
+
+    def closeEvent(self, event):
+        try:
+            if self.todo_panel_window is not None:
+                self.todo_panel_window.close()
+        except Exception:
+            pass
+        super().closeEvent(event)
 
     def _update_window_mask(self):
         """更新窗口遮罩，定義可交互區域（跨平台方案）"""

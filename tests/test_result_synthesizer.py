@@ -24,7 +24,25 @@ def test_synthesizer_includes_worker_result_details():
 
     text = synthesize_final_answer(worker, verification)
 
-    assert "已完成：已完成搜尋與比較" in text
-    assert "驗證結果：已驗證通過。" in text
-    assert "詳細結果：" in text
+    assert "已完成：" not in text
+    assert "驗證結果：" not in text
+    assert "詳細結果：" not in text
     assert "- 主題 A" in text
+
+
+def test_synthesizer_strips_todo_prefix_lines():
+    worker = WorkerResult(
+        taskId="t-2",
+        status="completed",
+        summary="research-task",
+        result="[todo_001]\n[todo_002] 真正內容",
+        filesChanged=[],
+        commandsExecuted=[],
+        evidence=[],
+        unresolvedIssues=[],
+    )
+
+    text = synthesize_final_answer(worker)
+    assert "[todo_001]" not in text
+    assert "[todo_002]" not in text
+    assert text == "真正內容"

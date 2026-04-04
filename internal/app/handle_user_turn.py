@@ -4,6 +4,7 @@ import asyncio
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from types import SimpleNamespace
+from typing import Callable
 
 from pydantic_ai.messages import ModelRequest, ModelResponse
 
@@ -19,22 +20,17 @@ from internal.core.protocol.verdict_parser import parse_verification_verdict
 from internal.core.tasks.task_types import TaskUsage, VerificationResult, WorkerResult
 from internal.services.subagent_tasks import AgentToolInput
 
-from internal.core.session.session_mode import resolve_session_mode
-
 
 @dataclass
 class OrchestrationRuntime:
     main_agent: object
+    on_todo_update: Callable[[str], None] | None = None
 
     async def handle_user_turn(
         self,
         user_prompt: str,
         message_history: list[ModelRequest | ModelResponse] | None = None,
     ) -> str:
-        mode = resolve_session_mode(user_prompt)
-        if mode == "normal":
-            return await self.main_agent._execute_turn_core(user_prompt, message_history=message_history)
-
         ctx = CoordinatorTurnContext(
             userRequest=user_prompt,
             taskKind=self._infer_task_kind(user_prompt),
@@ -49,6 +45,7 @@ class OrchestrationRuntime:
                 worker, verification
             ),
             augment_context_with_failure=self._augment_context_with_failure,
+            on_todo_update=self.on_todo_update,
         )
 
     async def handle_user_turn_stream(
@@ -56,15 +53,6 @@ class OrchestrationRuntime:
         user_prompt: str,
         message_history: list[ModelRequest | ModelResponse] | None = None,
     ) -> AsyncIterator[str]:
-        mode = resolve_session_mode(user_prompt)
-        if mode == "normal":
-            async for chunk in self.main_agent._execute_turn_stream_core(
-                user_prompt,
-                message_history=message_history,
-            ):
-                yield chunk
-            return
-
         task = asyncio.create_task(
             self.handle_user_turn(user_prompt, message_history=message_history)
         )
@@ -231,8 +219,11 @@ class OrchestrationRuntime:
         return any(hint in lowered for hint in hints)
 
 
-def create_runtime(main_agent: object) -> OrchestrationRuntime:
-    return OrchestrationRuntime(main_agent=main_agent)
+def create_runtime(
+    main_agent: object,
+    on_todo_update: Callable[[str], None] | None = None,
+) -> OrchestrationRuntime:
+    return OrchestrationRuntime(main_agent=main_agent, on_todo_update=on_todo_update)
 
 
 async def handle_user_turn(

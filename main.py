@@ -120,7 +120,10 @@ class AgentRuntime(QThread):
                 self.http_client,
                 skill_root_dirs=self.skill_root_dirs,
             )
-            self._orchestration_runtime = create_runtime(self.main_agent)
+            self._orchestration_runtime = create_runtime(
+                self.main_agent,
+                on_todo_update=self._emit_todo_event,
+            )
 
             def _reload_skills_from_webui() -> dict[str, object]:
                 if self.main_agent is None:
@@ -235,6 +238,10 @@ class AgentRuntime(QThread):
         if not line:
             return
         payload = {"request_id": self._active_request_id, "line": line}
+        self.tool_event.emit(payload)
+
+    def _emit_todo_event(self, snapshot: str) -> None:
+        payload = {"request_id": self._active_request_id, "todo_text": snapshot}
         self.tool_event.emit(payload)
 
     async def _shutdown(self):
@@ -404,6 +411,7 @@ class GUIAgentApp:
         self._active_request_id = 0
         self._display_text = ""
         self._tool_log_lines: list[str] = []
+        self._todo_snapshot_text = ""
         self._ui_collapsed = False
         self._waiting_response = False
         self._waiting_status = ""
@@ -481,12 +489,33 @@ class GUIAgentApp:
     def _reset_tool_log(self) -> None:
         self._tool_log_lines = []
 
+    def _reset_todo_snapshot(self) -> None:
+        self._todo_snapshot_text = ""
+        try:
+            self.main_window.update_todo_drawer("")
+        except Exception:
+            pass
+
     def _compose_display_text(self, base_text: str | None = None) -> str:
         text = self._display_text if base_text is None else base_text
+        blocks: list[str] = []
+
+        if self._todo_snapshot_text:
+            blocks.append(
+                "<discussion>\n"
+                "```text\n"
+                f"{self._todo_snapshot_text}\n"
+                "```\n"
+                "</discussion>"
+            )
+
         if not self._tool_log_lines:
+            if blocks:
+                return "\n\n".join([*blocks, text]) if text else "\n\n".join(blocks)
             return text
+
         tool_lines = "\n".join(self._tool_log_lines)
-        tool_block = (
+        blocks.append(
             "<tool-execution>\n"
             "```text\n"
             f"{tool_lines}\n"
@@ -494,13 +523,26 @@ class GUIAgentApp:
             "</tool-execution>"
         )
         if text:
-            return tool_block + "\n\n" + text
-        return tool_block
+            return "\n\n".join([*blocks, text])
+        return "\n\n".join(blocks)
 
     def handle_tool_event(self, payload: dict) -> None:
         request_id = payload.get("request_id")
+        if request_id != self._active_request_id:
+            return
+        todo_text = payload.get("todo_text")
+        if isinstance(todo_text, str) and todo_text.strip():
+            self._todo_snapshot_text = todo_text.strip()
+            try:
+                self.main_window.update_todo_drawer(self._todo_snapshot_text)
+            except Exception:
+                pass
+            self._request_display_update()
+            self._reset_idle_timer()
+            return
+
         line = payload.get("line")
-        if request_id != self._active_request_id or not line:
+        if not line:
             return
         line_text = str(line).rstrip()
         self._tool_log_lines.append(line_text)
@@ -812,6 +854,7 @@ class GUIAgentApp:
                 return
 
         if user_input:
+            self._reset_todo_snapshot()
             # 檢查是否為指令
             if user_input.startswith(COMMAND_PREFIX):
                 if not self.command_handler:
@@ -832,6 +875,7 @@ class GUIAgentApp:
                             self._last_assistant_reply = ""
                             self._display_text = ""
                             self._reset_tool_log()
+                            self._reset_todo_snapshot()
                             self.main_window.update_speech_bubble("對話 context 已清空")
                         except Exception as exc:
                             self.main_window.update_speech_bubble(f"清空 context 失敗：{exc}")

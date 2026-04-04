@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Literal
 
-SessionMode = Literal["normal", "coordinator"]
+SessionMode = Literal["coordinator"]
 TaskStatus = Literal["pending", "running", "completed", "failed", "killed"]
 AgentType = Literal["general-purpose", "research", "implementation", "verification"]
 TaskKind = Literal["question", "research", "implementation", "bugfix", "infra"]
