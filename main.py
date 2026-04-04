@@ -10,7 +10,7 @@ from pathlib import Path
 
 from httpx import AsyncClient
 from pydantic_ai.messages import ModelRequest, ModelResponse
-from PySide6.QtCore import QObject, QThread, QTimer, Signal
+from PySide6.QtCore import QObject, QThread, QTimer, Signal, Qt
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import QApplication
 
@@ -419,6 +419,8 @@ class GUIAgentApp(QObject):
         self._discussion_text = ""  # Q&A from AskUserQuestion
         self._stop_context = ""    # context saved when user stops mid-run
         self._pending_tmp_images: list[str] = []  # temp image paths to delete after agent done
+        self._prev_context_tokens = 0   # context token count from previous turn
+        self._total_tokens_consumed = 0  # cumulative tokens consumed this session
         self._ui_collapsed = False
         self._waiting_response = False
         self._waiting_status = ""
@@ -474,11 +476,15 @@ class GUIAgentApp(QObject):
         set_gui_question_handler(self._gui_question_handler)
         
         self.runtime = AgentRuntime(self.base_config, skill_root_dirs=skill_root_dirs)
-        self.runtime.ready.connect(self.handle_runtime_ready)
-        self.runtime.result_ready.connect(self.handle_result)
-        self.runtime.chunk_ready.connect(self.handle_chunk)
-        self.runtime.error_occurred.connect(self.handle_error)
-        self.runtime.tool_event.connect(self.handle_tool_event)
+        # AgentRuntime (QThread) lives in the main thread but emits signals from run().
+        # Qt sees sender/receiver both as main-thread objects and uses DirectConnection.
+        # Force QueuedConnection so slots always execute in the main thread event loop.
+        _Q = Qt.ConnectionType.QueuedConnection
+        self.runtime.ready.connect(self.handle_runtime_ready, _Q)
+        self.runtime.result_ready.connect(self.handle_result, _Q)
+        self.runtime.chunk_ready.connect(self.handle_chunk, _Q)
+        self.runtime.error_occurred.connect(self.handle_error, _Q)
+        self.runtime.tool_event.connect(self.handle_tool_event, _Q)
         self.runtime.start()
 
         self.main_window = MainWindow()
@@ -646,46 +652,54 @@ class GUIAgentApp(QObject):
             return ""
         if not self._tool_events_cache_dirty and self._tool_events_html_cache:
             return self._tool_events_html_cache
-        # Pair [>] start and [OK]/[ERR] together into single rows
+        # Pair [>] start and [OK]/[ERR] together into single rows.
+        # Use a FIFO queue so concurrent tool calls are matched correctly.
         rows: list[str] = []
-        pending_start: str = ""
+        in_flight: list[str] = []
+        esc = _html_module.escape
         for line in self._tool_log_lines[-40:]:  # show last 40 events at most
             if line.startswith("[>] "):
-                pending_start = line[4:]
-            elif line.startswith("[OK]") and pending_start:
-                icon = self._tool_icon(pending_start)
-                esc = _html_module.escape
-                rows.append(
-                    f'<div style="padding:1px 0 1px 2px;color:#4db87a;font-size:11px;'
-                    f'font-family:monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">'
-                    f'✓ {icon} <span style="color:#7ec8a0;">{esc(pending_start)}</span>'
-                    f'</div>'
-                )
-                pending_start = ""
-            elif line.startswith("[ERR] ") and pending_start:
+                in_flight.append(line[4:])
+            elif line.startswith("[OK]"):
+                if in_flight:
+                    label = in_flight.pop(0)
+                    icon = self._tool_icon(label)
+                    rows.append(
+                        f'<div style="padding:1px 0 1px 2px;color:#4db87a;font-size:11px;'
+                        f'font-family:monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">'
+                        f'✓ {icon} <span style="color:#7ec8a0;">{esc(label)}</span>'
+                        f'</div>'
+                    )
+                # If no in_flight match, skip orphan [OK] to avoid bare ✓
+            elif line.startswith("[ERR] "):
                 err = line[6:]
-                icon = self._tool_icon(pending_start)
-                esc = _html_module.escape
-                rows.append(
-                    f'<div style="padding:1px 0 1px 2px;color:#f06b6b;font-size:11px;'
-                    f'font-family:monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">'
-                    f'✗ {icon} <span style="color:#f09090;">{esc(pending_start)}: {esc(err)}</span>'
-                    f'</div>'
-                )
-                pending_start = ""
+                if in_flight:
+                    label = in_flight.pop(0)
+                    icon = self._tool_icon(label)
+                    rows.append(
+                        f'<div style="padding:1px 0 1px 2px;color:#f06b6b;font-size:11px;'
+                        f'font-family:monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">'
+                        f'✗ {icon} <span style="color:#f09090;">{esc(label)}: {esc(err)}</span>'
+                        f'</div>'
+                    )
+                else:
+                    rows.append(
+                        f'<div style="padding:1px 0 1px 2px;color:#f06b6b;font-size:11px;">'
+                        f'✗ {esc(err)}'
+                        f'</div>'
+                    )
             else:
                 rendered = self._render_tool_line_html(line)
                 if rendered:
                     rows.append(rendered)
 
-        # If a tool is still running (pending_start has no [OK] yet), show it as in-progress
-        if pending_start:
-            icon = self._tool_icon(pending_start)
-            esc = _html_module.escape
+        # Show all still-running tools as in-progress
+        for label in in_flight:
+            icon = self._tool_icon(label)
             rows.append(
                 f'<div style="padding:1px 0 1px 2px;color:#6eaee8;font-size:11px;'
                 f'font-family:monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">'
-                f'▶ {icon} <span style="color:#8bbcf0;">{esc(pending_start)}</span>'
+                f'▶ {icon} <span style="color:#8bbcf0;">{esc(label)}</span>'
                 f'</div>'
             )
 
@@ -888,11 +902,16 @@ class GUIAgentApp(QObject):
             # 更新 GUI 歷史
             if self._last_user_input:
                 self._gui_history.append((self._last_user_input, output or ""))
-            # Update context meter
+            # Update token usage display
             try:
                 from internal.compaction import MAX_CONTEXT_TOKENS
-                used = getattr(self.runtime._conversation_state, "totalTokens", 0) or 0
-                self.main_window.update_context_meter(used, MAX_CONTEXT_TOKENS)
+                ctx = getattr(self.runtime._conversation_state, "totalTokens", 0) or 0
+                # Accumulate delta: how many new tokens were consumed this turn.
+                # If ctx shrank (compaction occurred), count the new context size as the contribution.
+                delta = ctx - self._prev_context_tokens
+                self._total_tokens_consumed += delta if delta > 0 else ctx
+                self._prev_context_tokens = ctx
+                self.main_window.update_context_meter(ctx, MAX_CONTEXT_TOKENS, self._total_tokens_consumed)
             except Exception:
                 pass
 

@@ -2750,9 +2750,14 @@ class MainWindow(QMainWindow):
         self._slash_btn.clicked.connect(self._on_slash_shortcut)
         toolbar_layout.addWidget(self._slash_btn)
 
-        self._ctx_label = QLabel("CTX —")
+        self._total_tok_label = QLabel("Σ —")
+        self._total_tok_label.setStyleSheet(_tlbl)
+        self._total_tok_label.setToolTip("本次對話累計消耗 token 數（全部）")
+        toolbar_layout.addWidget(self._total_tok_label)
+
+        self._ctx_label = QLabel("ctx —")
         self._ctx_label.setStyleSheet(_tlbl)
-        self._ctx_label.setToolTip("Context 使用量")
+        self._ctx_label.setToolTip("目前 context 窗口用量 / 最大值")
         toolbar_layout.addWidget(self._ctx_label)
 
         toolbar_layout.addStretch(1)
@@ -3082,13 +3087,31 @@ class MainWindow(QMainWindow):
     def is_bypass_mode(self) -> bool:
         return self._bypass_mode
 
-    def update_context_meter(self, used_tokens: int, max_tokens: int) -> None:
-        """Update the context usage label in the toolbar."""
+    def update_context_meter(self, used_tokens: int, max_tokens: int, total_tokens: int = 0) -> None:
+        """Update the token usage labels in the toolbar.
+
+        Args:
+            used_tokens:  tokens currently in the context window
+            max_tokens:   maximum context window size
+            total_tokens: cumulative tokens consumed across the whole session
+        """
+        def _fmt(n: int) -> str:
+            if n >= 1_000_000:
+                return f"{n / 1_000_000:.1f}M"
+            if n >= 1_000:
+                return f"{n / 1_000:.1f}k"
+            return str(n)
+
         if max_tokens > 0:
             pct = min(100, round(used_tokens * 100 / max_tokens))
-            self._ctx_label.setText(f"CTX {pct}%")
-            color = "#f06b6b" if pct >= 80 else "#f0c060" if pct >= 50 else "rgba(160,180,200,160)"
-            self._ctx_label.setStyleSheet(f"QLabel {{ color: {color}; font-size: 10px; }}")
+            ctx_color = "#f06b6b" if pct >= 80 else "#f0c060" if pct >= 50 else "rgba(160,180,200,160)"
+            self._ctx_label.setText(f"ctx {_fmt(used_tokens)}/{_fmt(max_tokens)} ({pct}%)")
+            self._ctx_label.setStyleSheet(f"QLabel {{ color: {ctx_color}; font-size: 10px; }}")
+
+        if total_tokens > 0:
+            self._total_tok_label.setText(f"Σ {_fmt(total_tokens)}")
+        else:
+            self._total_tok_label.setText("Σ —")
 
     # ── Chip style helpers ────────────────────────────────────────────────
     _CHIP_STYLE = (
