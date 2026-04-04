@@ -281,6 +281,32 @@ except Exception:
 from internal.logger import logger
 
 
+def _compute_todo_window_position(
+    frame: QRect,
+    button_rect: QRect,
+    panel_size: QSize,
+    screen_rect: QRect,
+) -> tuple[int, int]:
+    x = frame.right() + 12
+    min_x = screen_rect.left() + 8
+    max_x = screen_rect.right() - panel_size.width() - 8
+    if max_x < min_x:
+        max_x = min_x
+    x = max(min_x, min(x, max_x))
+
+    if button_rect.width() <= 0 or button_rect.height() <= 0:
+        anchor_y = frame.top() + 20
+    else:
+        anchor_y = frame.top() + button_rect.center().y() - (panel_size.height() // 2)
+
+    min_y = screen_rect.top() + 8
+    max_y = screen_rect.bottom() - panel_size.height() - 8
+    if max_y < min_y:
+        max_y = min_y
+    y = max(min_y, min(anchor_y, max_y))
+    return x, y
+
+
 class AutoWrapTextBrowser(QTextBrowser):
     """QTextBrowser that keeps document width aligned to viewport width."""
 
@@ -2685,8 +2711,17 @@ class MainWindow(QMainWindow):
         if self._todo_window_position_initialized and not force:
             return
         frame = self.frameGeometry()
-        x = frame.right() + 12
-        y = frame.top() + 20
+        screen = self.screen() or QGuiApplication.screenAt(frame.center()) or QGuiApplication.primaryScreen()
+        if screen is not None:
+            screen_rect = screen.availableGeometry()
+        else:
+            screen_rect = QRect(frame.left(), frame.top(), frame.width(), frame.height())
+        x, y = _compute_todo_window_position(
+            frame,
+            self.todo_toggle_button.geometry(),
+            self.todo_panel_window.size(),
+            screen_rect,
+        )
         self.todo_panel_window.move(x, y)
         self._todo_window_position_initialized = True
 

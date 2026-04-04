@@ -53,6 +53,17 @@ from internal.core.coordinator.coordinator_loop import (
     run_coordinator_turn,
 )
 from internal.core.coordinator.result_synthesizer import synthesize_final_answer
+from internal.core.orchestration.runtime import OrchestrationRuntime
+from internal.core.orchestration.store import OrchestrationStore
+from internal.core.orchestration.types import (
+    RecoveryPolicy as OrchestrationRecoveryPolicy,
+    StepContract as OrchestrationStepContract,
+    StepExecutionResult,
+    StepSpec,
+    TaskGraphPlan,
+    VerificationEvidenceItem,
+    VerificationReport,
+)
 from internal.core.protocol.task_notification import parse_task_notification_xml
 from internal.core.protocol.image_output_paths import (
     ImagePathStreamNormalizer,
@@ -482,6 +493,10 @@ class MainAgent:
             worker=self._run_subagent_task,
             enqueue_notification=self._enqueue_pending_notification,
         )
+        # Orchestration v2 stays disabled on the main hot path until it is
+        # redesigned to match the lighter ref_docs coordinator/todo model.
+        self._orchestration_store: OrchestrationStore | None = None
+        self._orchestration_runtime: OrchestrationRuntime | None = None
         setattr(self.agent, "_tool_event_callback", None)
         # tools are registered via add_all_tools during create()
 
@@ -673,6 +688,15 @@ class MainAgent:
     def set_tool_event_callback(self, callback) -> None:
         """Register a callback for tool execution events."""
         setattr(self.agent, "_tool_event_callback", callback)
+
+    def resume_incomplete_runs(self) -> list[str]:
+        if self._orchestration_store is None:
+            return []
+        return self._orchestration_store.resume_incomplete_runs()
+
+    @property
+    def orchestration_store(self) -> OrchestrationStore | None:
+        return self._orchestration_store
 
     def _reload_model_from_db(self) -> None:
         """Pick up any model config changes made via the UI since the last call."""
@@ -916,6 +940,134 @@ class MainAgent:
             f"{user_request}"
         )
 
+    @staticmethod
+    def _orchestration_default_contract(goal: str) -> OrchestrationStepContract:
+        return OrchestrationStepContract(
+            doneWhen=goal,
+            mustProduce=["summary"],
+            mustNotChange=[],
+            requiredChecks=[],
+            evidenceShape=["summary"],
+            repairHint="narrow the failing scope and preserve prior successful checks",
+        )
+
+    @staticmethod
+    def _orchestration_default_recovery_policy() -> OrchestrationRecoveryPolicy:
+        return OrchestrationRecoveryPolicy(
+            maxAttempts=2,
+            onTransient="retry-step",
+            onDeterministic="create-repair-step",
+            onDependency="wait-dependency",
+            onUserDecision="wait-user",
+            onSystemCrash="resume-from-checkpoint",
+        )
+
+    @staticmethod
+    def _orchestration_step_kind_for_task(task_kind: str) -> str:
+        return "implement" if task_kind in {"implementation", "bugfix", "infra"} else "discover"
+
+    def _orchestration_parse_plan_json(
+        self,
+        raw: str,
+        task_kind: str,
+        user_request: str,
+    ) -> TaskGraphPlan:
+        fallback_kind = self._orchestration_step_kind_for_task(task_kind)
+        try:
+            payload = json.loads((raw or "").strip())
+        except Exception:
+            payload = {}
+
+        if isinstance(payload, list):
+            payload = {"steps": payload}
+        steps_payload = payload.get("steps") if isinstance(payload, dict) else None
+        steps: list[StepSpec] = []
+        if isinstance(steps_payload, list):
+            for index, item in enumerate(steps_payload, start=1):
+                if not isinstance(item, dict):
+                    continue
+                step_id = str(item.get("step_id") or item.get("stepId") or f"step_{index:03d}").strip()
+                kind = str(item.get("kind") or fallback_kind).strip().lower()
+                if kind not in {"discover", "plan", "implement", "verify", "repair", "synthesize", "ask_user"}:
+                    kind = fallback_kind
+                goal = str(item.get("goal") or item.get("title") or user_request).strip() or user_request
+                depends_on_raw = item.get("depends_on") or item.get("dependsOn") or []
+                depends_on = [str(dep).strip() for dep in depends_on_raw] if isinstance(depends_on_raw, list) else []
+                inputs = item.get("inputs") if isinstance(item.get("inputs"), dict) else {}
+                inputs = {"user_request": user_request, **inputs}
+                contract_payload = item.get("contract") if isinstance(item.get("contract"), dict) else {}
+                contract = OrchestrationStepContract(
+                    doneWhen=str(contract_payload.get("done_when") or contract_payload.get("doneWhen") or goal),
+                    mustProduce=list(contract_payload.get("must_produce") or contract_payload.get("mustProduce") or ["summary"]),
+                    mustNotChange=list(contract_payload.get("must_not_change") or contract_payload.get("mustNotChange") or []),
+                    requiredChecks=list(contract_payload.get("required_checks") or contract_payload.get("requiredChecks") or []),
+                    evidenceShape=list(contract_payload.get("evidence_shape") or contract_payload.get("evidenceShape") or ["summary"]),
+                    repairHint=str(contract_payload.get("repair_hint") or contract_payload.get("repairHint") or "retry with narrowed scope"),
+                )
+                retry_payload = item.get("retry_policy") if isinstance(item.get("retry_policy"), dict) else item.get("retryPolicy")
+                retry_payload = retry_payload if isinstance(retry_payload, dict) else {}
+                steps.append(
+                    StepSpec(
+                        stepId=step_id,
+                        kind=cast(Any, kind),
+                        goal=goal,
+                        dependsOn=depends_on,
+                        executor=str(item.get("executor") or "worker"),
+                        inputs=inputs,
+                        contract=contract,
+                        verificationMode=str(item.get("verification_mode") or item.get("verificationMode") or "none"),
+                        retryPolicy=OrchestrationRecoveryPolicy(
+                            maxAttempts=int(retry_payload.get("max_attempts") or retry_payload.get("maxAttempts") or 2),
+                            onTransient=str(retry_payload.get("on_transient") or retry_payload.get("onTransient") or "retry-step"),
+                            onDeterministic=str(retry_payload.get("on_deterministic") or retry_payload.get("onDeterministic") or "create-repair-step"),
+                            onDependency=str(retry_payload.get("on_dependency") or retry_payload.get("onDependency") or "wait-dependency"),
+                            onUserDecision=str(retry_payload.get("on_user_decision") or retry_payload.get("onUserDecision") or "wait-user"),
+                            onSystemCrash=str(retry_payload.get("on_system_crash") or retry_payload.get("onSystemCrash") or "resume-from-checkpoint"),
+                        ),
+                        recoveryPoint=str(item.get("recovery_point") or item.get("recoveryPoint") or f"checkpoint:{step_id}"),
+                    )
+                )
+
+        if not steps:
+            steps = [
+                StepSpec(
+                    stepId="step_001",
+                    kind=cast(Any, fallback_kind),
+                    goal=user_request,
+                    executor="worker",
+                    inputs={"user_request": user_request},
+                    contract=self._orchestration_default_contract(user_request),
+                    verificationMode="independent" if task_kind in {"implementation", "bugfix", "infra"} else "none",
+                    retryPolicy=self._orchestration_default_recovery_policy(),
+                    recoveryPoint="checkpoint:step_001",
+                )
+            ]
+        return TaskGraphPlan(taskKind=cast(Any, task_kind), steps=steps)
+
+    async def _orchestration_build_task_graph(self, task_kind: str, user_request: str) -> TaskGraphPlan:
+        execute_turn = getattr(self, "_execute_turn_core", None)
+        if not callable(execute_turn):
+            return self._orchestration_parse_plan_json("", task_kind, user_request)
+        planner_prompt = (
+            "You are the Task Graph Planner for a durable orchestration engine.\n"
+            "Return JSON only with shape: {\"steps\": [...]}.\n"
+            "Each step must include: step_id, kind, goal, depends_on, executor, inputs, contract, verification_mode, retry_policy, recovery_point.\n"
+            "Allowed kinds: discover, plan, implement, verify, repair, synthesize, ask_user.\n"
+            "Rules:\n"
+            "- use at most 5 steps\n"
+            "- implementation, bugfix, infra must include verify after implement\n"
+            "- synthesize should depend on all user-visible work being done\n"
+            "- keep inputs minimal and task-scoped\n"
+            "- do not include markdown fences\n\n"
+            f"Task kind: {task_kind}\n"
+            f"User request:\n{user_request}"
+        )
+        try:
+            raw = await execute_turn(planner_prompt)
+        except Exception:
+            raw = ""
+        return self._orchestration_parse_plan_json(raw, task_kind, user_request)
+
     async def coordinator_handle_user_turn(
         self,
         user_prompt: str,
@@ -923,11 +1075,18 @@ class MainAgent:
         on_todo_update: Callable[[str], None] | None = None,
     ) -> str:
         _ = message_history
+        task_kind = self._coordinator_infer_task_kind(user_prompt)
+        execute_turn = getattr(self, "_execute_turn_core", None)
+        if task_kind == "question" and callable(execute_turn):
+            return await execute_turn(
+                user_prompt,
+                message_history=message_history,
+                skip_plan_execution=True,
+            )
         ctx = CoordinatorTurnContext(
             userRequest=user_prompt,
-            taskKind=self._coordinator_infer_task_kind(user_prompt),
+            taskKind=task_kind,
         )
-
         return await run_coordinator_turn(
             ctx,
             make_or_update_plan=self._coordinator_make_or_update_plan,
@@ -953,6 +1112,109 @@ class MainAgent:
         )
         if result:
             yield result
+
+    async def _orchestration_execute_step(
+        self,
+        step: StepSpec,
+        upstream_artifacts: list[dict[str, Any]],
+    ) -> StepExecutionResult:
+        if step.kind == "synthesize":
+            for artifact in reversed(upstream_artifacts):
+                candidate = str(artifact.get("result") or artifact.get("summary") or "").strip()
+                if candidate:
+                    return StepExecutionResult(
+                        status="completed",
+                        summary=step.goal,
+                        result=candidate,
+                        evidence=[candidate],
+                    )
+            return StepExecutionResult(status="completed", summary=step.goal, result=step.goal)
+
+        subagent_type = "implementation" if step.kind in {"implement", "repair"} else "research"
+        prompt_sections = [
+            f"STEP KIND: {step.kind}",
+            f"STEP GOAL: {step.goal}",
+            f"DONE WHEN: {step.contract.doneWhen}",
+            "USER REQUEST:\n" + str(step.inputs.get("user_request", step.goal)),
+        ]
+        if step.contract.requiredChecks:
+            prompt_sections.append("REQUIRED CHECKS:\n" + "\n".join(step.contract.requiredChecks))
+        if upstream_artifacts:
+            prompt_sections.append("UPSTREAM ARTIFACTS:\n" + json.dumps(upstream_artifacts, ensure_ascii=False))
+        output = await self._run_subagent_task(
+            SimpleNamespace(subagentType=subagent_type, mode="spawn"),
+            "\n\n".join(prompt_sections),
+        )
+        worker_result = self._task_manager._build_worker_result(  # noqa: SLF001
+            step.stepId,
+            output,
+            __import__("time").time(),
+        )
+        failed = bool(worker_result.unresolvedIssues)
+        return StepExecutionResult(
+            status=cast(Any, "failed" if failed else "completed"),
+            summary=worker_result.summary,
+            result=worker_result.result,
+            filesChanged=worker_result.filesChanged,
+            commandsExecuted=worker_result.commandsExecuted,
+            evidence=worker_result.evidence,
+            unresolvedIssues=worker_result.unresolvedIssues,
+            failureClass=cast(Any, "deterministic") if failed else None,
+        )
+
+    async def _orchestration_execute_verification(
+        self,
+        step: StepSpec,
+        upstream_artifacts: list[dict[str, Any]],
+    ) -> VerificationReport:
+        original_request = str(step.inputs.get("user_request", step.goal))
+        claims = upstream_artifacts[-1] if upstream_artifacts else {}
+        output = await self._run_subagent_task(
+            SimpleNamespace(subagentType="verification", mode="spawn"),
+            (
+                "ORIGINAL USER REQUEST:\n"
+                f"{original_request}\n\n"
+                "STEP CONTRACT:\n"
+                f"{json.dumps({'done_when': step.contract.doneWhen, 'required_checks': step.contract.requiredChecks}, ensure_ascii=False)}\n\n"
+                "UPSTREAM ARTIFACTS:\n"
+                f"{json.dumps(upstream_artifacts, ensure_ascii=False)}\n\n"
+                "CLAIMS TO VERIFY:\n"
+                f"{json.dumps(claims, ensure_ascii=False)}"
+            ),
+        )
+        verdict = parse_verification_verdict(output, task_id=step.stepId)
+        remediation_steps = [
+            StepSpec(
+                stepId=todo.id,
+                kind="repair",
+                goal=todo.description or todo.title,
+                dependsOn=list(dict.fromkeys(step.dependsOn)),
+                executor="worker",
+                inputs={"user_request": original_request, "verification_feedback": todo.description or todo.title},
+                contract=self._orchestration_default_contract(todo.description or todo.title),
+                verificationMode="independent",
+                retryPolicy=self._orchestration_default_recovery_policy(),
+                recoveryPoint=f"{step.recoveryPoint}:repair:{todo.id}",
+            )
+            for todo in verdict.remediationTodos
+        ]
+        return VerificationReport(
+            verdict=cast(Any, verdict.verdict),
+            summary=verdict.summary,
+            checkedItems=[e.command for e in verdict.evidence if e.command],
+            failedItems=[*verdict.missingRequirements, *verdict.suspectedProblems],
+            evidence=[
+                VerificationEvidenceItem(
+                    name=e.command or "check",
+                    result=e.result,
+                    detail=e.output,
+                )
+                for e in verdict.evidence
+            ],
+            remediationSteps=remediation_steps,
+            confidence=1.0 if verdict.verdict == "PASS" else 0.5,
+            requiresUserInput=False,
+        )
 
     async def _coordinator_make_or_update_plan(self, ctx: CoordinatorTurnContext) -> CoordinatorPlan:
         worker_type = "implementation" if ctx.taskKind in {"implementation", "bugfix", "infra"} else "research"
@@ -1178,7 +1440,25 @@ class MainAgent:
         )
 
     def _coordinator_infer_task_kind(self, prompt: str) -> str:
-        lowered = prompt.lower()
+        lowered = prompt.lower().strip()
+        greeting_prefixes = (
+            "hello",
+            "hi",
+            "hey",
+            "hello there",
+            "good morning",
+            "good afternoon",
+            "good evening",
+            "yo",
+            "嗨",
+            "哈囉",
+            "你好",
+            "早安",
+            "午安",
+            "晚安",
+        )
+        if any(lowered.startswith(token) for token in greeting_prefixes):
+            return "question"
         if any(token in lowered for token in ["fix", "bug", "修", "錯誤"]):
             return "bugfix"
         if any(token in lowered for token in ["implement", "build", "新增", "實作", "重構"]):
@@ -1191,6 +1471,26 @@ class MainAgent:
 
     def _coordinator_looks_like_direct_question(self, prompt: str) -> bool:
         lowered = prompt.lower().strip()
+        greeting_prefixes = (
+            "hello",
+            "hi",
+            "hey",
+            "hello there",
+            "good morning",
+            "good afternoon",
+            "good evening",
+            "yo",
+            "嗨",
+            "哈囉",
+            "你好",
+            "早安",
+            "午安",
+            "晚安",
+        )
+        if any(lowered.startswith(token) for token in greeting_prefixes):
+            return True
+        if "can you explain" in lowered or "tell me about" in lowered:
+            return True
         if lowered.endswith("?") or lowered.endswith("？"):
             return True
         direct_tokens = ["是什麼", "what is", "how does", "怎麼"]
