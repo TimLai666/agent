@@ -669,6 +669,11 @@ class MainAgent:
         return (
             "<internal-task-notifications>\n"
             f"{joined}\n"
+            "---\n"
+            "These are internal signals from workers — do not acknowledge, thank, or address workers directly in your response.\n"
+            "Read the results, synthesize the key findings yourself, then decide the next concrete action.\n"
+            "If delegating to another worker based on these findings, write a specific prompt: include exact file paths, line numbers, and what to change — never say 'based on your findings' or re-delegate understanding.\n"
+            "Update the todo list to reflect what is now completed and what comes next.\n"
             "</internal-task-notifications>\n\n"
             f"{prompt}"
         )
@@ -678,14 +683,17 @@ class MainAgent:
             "<active-session-todos>\n"
             "Use the `todo` tool whenever the task has more than one distinct step — use your judgment on what counts as a step.\n"
             "Skip it only for truly trivial one-shot responses (e.g. a factual question, a single-line fix).\n"
-            "Break the task into as many items as naturally fit — no minimum, no maximum. Each item should be the smallest unit of work you can confidently track and complete independently.\n"
-            "Good breakdowns: granular enough to show progress, coarse enough to avoid noise. Avoid wrapping the entire request in one item.\n"
+            "Break the task into as many items as naturally fit. Each item should be the smallest unit of work you can confidently track and complete independently.\n"
+            "Good breakdowns: granular enough to show progress, coarse enough to avoid noise. Never wrap the entire request in a single item.\n"
             "Each item must have a concrete, action-oriented title that describes what you will actually do, not what the user asked.\n"
             "Never use vague placeholder titles like 'todo', 'task', 'step', or 'item'.\n"
-            "Allowed phases: planning, executing, blocked, completed.\n"
+            "Allowed phases: planning (researching/understanding), executing (actively doing the work), blocked, completed.\n"
             "Allowed statuses: pending, in_progress, blocked, completed.\n"
-            "Mark items in_progress as you work on them (at most one at a time), and completed as soon as they are done.\n"
-            "Use `AgentTool` to delegate a step when parallel or specialized subagent execution helps.\n"
+            "IMPORTANT: Call `todo` to mark an item `in_progress` BEFORE you begin working on it, not after.\n"
+            "Mark items `completed` immediately after finishing — do not batch completions.\n"
+            "Only mark an item completed when you have FULLY accomplished it. Never mark completed if tests are failing, implementation is partial, or errors remain unresolved.\n"
+            "When delegating a step via `AgentTool`: write a specific, self-contained prompt — include exact file paths, line numbers, and what to change. Never write vague prompts like 'based on your findings, fix it'.\n"
+            "Use `SendMessageTool` to continue an existing worker (when it already has relevant context). Use `AgentTool` to spawn fresh (when you need a clean, unbiased perspective or a completely different task).\n"
         )
         if self._todo_tool_snapshot:
             return (
