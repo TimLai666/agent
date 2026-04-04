@@ -959,6 +959,7 @@ class MainAgent:
             return CoordinatorPlan(type="answer-directly", finalAnswer=answer)
 
         worker_type = "implementation" if ctx.taskKind in {"implementation", "bugfix", "infra"} else "research"
+        coordinator_guidance = await self._coordinator_generate_main_guidance(ctx.userRequest)
 
         if self._coordinator_should_run_background(ctx.userRequest):
             payload = AgentToolInput(
@@ -985,10 +986,33 @@ class MainAgent:
                 agentType=worker_type,
                 title=f"{worker_type}-task",
                 originalUserRequest=ctx.userRequest,
-                instruction=self._build_planning_instruction(ctx.userRequest),
+                instruction=self._build_planning_instruction(ctx.userRequest)
+                + (f"\n\n[Coordinator guidance from main]\n{coordinator_guidance}" if coordinator_guidance else ""),
                 runInBackground=False,
             ),
         )
+
+    async def _coordinator_generate_main_guidance(self, user_request: str) -> str:
+        execute_turn = getattr(self, "_execute_turn_core", None)
+        if not callable(execute_turn):
+            return ""
+
+        guidance_prompt = (
+            "You are acting as the coordinator planner for an internal execution pipeline.\n"
+            "Generate concise internal guidance for workers.\n"
+            "Requirements:\n"
+            "- Prioritize existing skills/tools first.\n"
+            "- Mention key checks or risks.\n"
+            "- Keep under 8 bullet points.\n"
+            "- Do not include user-facing niceties.\n\n"
+            "User request:\n"
+            f"{user_request}"
+        )
+        try:
+            guidance = await execute_turn(guidance_prompt)
+        except Exception:
+            return ""
+        return (guidance or "").strip()
 
     async def _coordinator_spawn_worker(self, spec: SpawnWorkerInput) -> WorkerResult:
         subagent_type = spec.agentType if spec.agentType != "general-purpose" else ""

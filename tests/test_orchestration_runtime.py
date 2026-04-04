@@ -15,6 +15,7 @@ def _bind_main_coordinator_methods(fake_main: object) -> None:
         "coordinator_handle_user_turn",
         "coordinator_handle_user_turn_stream",
         "_coordinator_make_or_update_plan",
+        "_coordinator_generate_main_guidance",
         "_coordinator_spawn_worker",
         "_coordinator_spawn_verification",
         "_coordinator_find_task_notification",
@@ -260,3 +261,28 @@ def test_planning_instruction_prioritizes_skills_and_tools():
 
     assert "優先使用現有 skills 與已可用 tools" in instruction
     assert "User request" in instruction
+
+
+def test_coordinator_plan_uses_main_guidance_from_execute_turn():
+    async def scenario() -> None:
+        main_agent = SimpleNamespace()
+        _bind_main_coordinator_methods(main_agent)
+
+        async def fake_execute_turn_core(prompt: str, message_history=None, skip_plan_execution=True):
+            _ = message_history
+            _ = skip_plan_execution
+            assert "coordinator planner" in prompt
+            return "- Use existing skills first\n- Verify changed files"
+
+        main_agent._execute_turn_core = fake_execute_turn_core
+
+        plan = await main_agent._coordinator_make_or_update_plan(
+            SimpleNamespace(userRequest="請修復 bug", taskKind="bugfix")
+        )
+
+        assert plan.type == "spawn-worker"
+        assert plan.workerSpec is not None
+        assert "[Coordinator guidance from main]" in plan.workerSpec.instruction
+        assert "Use existing skills first" in plan.workerSpec.instruction
+
+    asyncio.run(scenario())
