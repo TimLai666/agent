@@ -948,16 +948,15 @@ class CommandLineEdit(QLineEdit):
                         else:
                             pil_img.save(buf, format="PNG")
                             img_bytes = buf.getvalue()
-                        # Walk up to find MainWindow and store image
-                        w = img.width()
-                        h = img.height()
+                        # Walk up to find MainWindow and append image
+                        iw = img.width()
+                        ih = img.height()
                         parent = self.parent()
                         while parent is not None:
-                            if hasattr(parent, "_attached_image_data"):
-                                parent._attached_image_data = img_bytes
-                                parent._attached_file_path = ""
+                            if hasattr(parent, "_attached_images"):
+                                parent._attached_images.append(img_bytes)
                                 if hasattr(parent, "_show_attach_chip"):
-                                    parent._show_attach_chip(f"📷 image.png  {w}×{h}")
+                                    parent._show_attach_chip(f"📷 image.png  {iw}×{ih}")
                                 break
                             parent = parent.parent() if hasattr(parent, "parent") else None
                     except Exception as e:
@@ -2581,7 +2580,9 @@ class MainWindow(QMainWindow):
         self.BALL_CENTER_FROM_BOTTOM = 130
         # 固定輸入框的位置（距離底部40px，使輸入框上移，與球更接近）
         self.INPUT_FROM_BOTTOM = 40
-        self.INPUT_HEIGHT = 88  # attachment row (22) + input card (42) + toolbar (18) + spacing
+        self.INPUT_HEIGHT_BASE = 72    # input card (38) + separator (1) + toolbar (20) + margins
+        self.INPUT_HEIGHT_CHIPS = 100  # + chip row (26) + spacing
+        self.INPUT_HEIGHT = self.INPUT_HEIGHT_BASE
 
         # 移除右上角關閉按鈕以簡化 UI（由視窗系統或快捷鍵關閉）
 
@@ -2602,7 +2603,7 @@ class MainWindow(QMainWindow):
 
         # ── Input container (single card: [attach chips] / [input row] / [toolbar row]) ──
         self._attached_file_path: str = ""
-        self._attached_image_data: bytes = b""
+        self._attached_images: list[bytes] = []   # multiple pasted images
         self._is_running = False
         self._bypass_mode = False  # auto-approve all permissions
 
@@ -2631,37 +2632,11 @@ class MainWindow(QMainWindow):
         # ── Attachment chip row (hidden until something is attached) ──────
         self._attach_row = QWidget()
         self._attach_row.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        attach_row_layout = QHBoxLayout(self._attach_row)
-        attach_row_layout.setContentsMargins(2, 0, 2, 0)
-        attach_row_layout.setSpacing(6)
-
-        self._attach_chip = QLabel("")
-        self._attach_chip.setStyleSheet(
-            "QLabel { "
-            "background: rgba(45,55,80,200); "
-            "color: #a8d4ff; "
-            "border: 1px solid rgba(90,140,220,100); "
-            "border-radius: 8px; "
-            "padding: 3px 10px; "
-            "font-size: 11px; "
-            "}"
-        )
-        self._attach_chip.setMaximumWidth(230)
-        self._attach_chip.hide()
-
-        self._attach_chip_close = QPushButton("✕")
-        self._attach_chip_close.setFixedSize(16, 16)
-        self._attach_chip_close.setStyleSheet(
-            "QPushButton { background: transparent; color: rgba(180,180,200,170); "
-            "border: none; font-size: 10px; } "
-            "QPushButton:hover { color: #ff6b6b; }"
-        )
-        self._attach_chip_close.hide()
-        self._attach_chip_close.clicked.connect(self._clear_attachment)
-
-        attach_row_layout.addWidget(self._attach_chip)
-        attach_row_layout.addWidget(self._attach_chip_close)
-        attach_row_layout.addStretch(1)
+        self._attach_chips_layout = QHBoxLayout(self._attach_row)
+        self._attach_chips_layout.setContentsMargins(2, 0, 2, 0)
+        self._attach_chips_layout.setSpacing(5)
+        self._attach_chips_layout.addStretch(1)
+        self._attach_row.setFixedHeight(26)
         self._attach_row.hide()
         card_vbox.addWidget(self._attach_row)
 
@@ -3115,18 +3090,83 @@ class MainWindow(QMainWindow):
             color = "#f06b6b" if pct >= 80 else "#f0c060" if pct >= 50 else "rgba(160,180,200,160)"
             self._ctx_label.setStyleSheet(f"QLabel {{ color: {color}; font-size: 10px; }}")
 
+    # ── Chip style helpers ────────────────────────────────────────────────
+    _CHIP_STYLE = (
+        "QLabel { background: rgba(45,55,80,200); color: #a8d4ff; "
+        "border: 1px solid rgba(90,140,220,100); border-radius: 8px; "
+        "padding: 2px 8px; font-size: 11px; }"
+    )
+    _CHIP_CLOSE_STYLE = (
+        "QPushButton { background: transparent; color: rgba(160,170,200,160); "
+        "border: none; font-size: 9px; padding: 0; } "
+        "QPushButton:hover { color: #ff6b6b; }"
+    )
+
+    def _add_chip(self, label: str, on_remove) -> None:
+        """Insert a chip + ✕ button pair into the attach row (before the stretch)."""
+        chip = QLabel(label)
+        chip.setStyleSheet(self._CHIP_STYLE)
+        chip.setMaximumWidth(200)
+
+        close_btn = QPushButton("✕")
+        close_btn.setFixedSize(14, 14)
+        close_btn.setStyleSheet(self._CHIP_CLOSE_STYLE)
+
+        # Store refs on buttons for cleanup
+        chip._close_btn = close_btn
+
+        def _remove():
+            on_remove()
+            # Remove chip + close_btn from layout
+            for w in (chip, close_btn):
+                self._attach_chips_layout.removeWidget(w)
+                w.deleteLater()
+            self._refresh_chip_row()
+
+        close_btn.clicked.connect(_remove)
+
+        # Insert before the trailing stretch (last item)
+        insert_pos = max(0, self._attach_chips_layout.count() - 1)
+        self._attach_chips_layout.insertWidget(insert_pos, chip)
+        self._attach_chips_layout.insertWidget(insert_pos + 1, close_btn)
+        self._refresh_chip_row()
+
+    def _refresh_chip_row(self) -> None:
+        """Show/hide the chip row and reposition the container accordingly."""
+        has_chips = self._attach_chips_layout.count() > 1  # >1 means chips present (not just stretch)
+        if has_chips:
+            self._attach_row.show()
+            self.INPUT_HEIGHT = self.INPUT_HEIGHT_CHIPS
+        else:
+            self._attach_row.hide()
+            self.INPUT_HEIGHT = self.INPUT_HEIGHT_BASE
+        if self.input_container.isVisible():
+            self._position_input_container()
+
     def _show_attach_chip(self, label: str) -> None:
-        self._attach_chip.setText(label)
-        self._attach_chip.show()
-        self._attach_chip_close.show()
-        self._attach_row.show()
+        """Add an image chip (called for clipboard paste)."""
+        idx = len(self._attached_images) - 1  # index of the image just appended
+
+        def on_remove():
+            # Remove this specific image by index (find by closure)
+            try:
+                if 0 <= idx < len(self._attached_images):
+                    self._attached_images.pop(idx)
+            except Exception:
+                pass
+
+        self._add_chip(label, on_remove)
 
     def _clear_attachment(self) -> None:
+        """Clear ALL attachments and remove all chips."""
         self._attached_file_path = ""
-        self._attached_image_data = b""
-        self._attach_chip.hide()
-        self._attach_chip_close.hide()
-        self._attach_row.hide()
+        self._attached_images = []
+        # Remove all chip widgets (everything except the trailing stretch)
+        while self._attach_chips_layout.count() > 1:
+            item = self._attach_chips_layout.takeAt(0)
+            if item and item.widget():
+                item.widget().deleteLater()
+        self._refresh_chip_row()
 
     def _on_attach_file(self) -> None:
         """Open file dialog and attach a file to the next message."""
@@ -3135,10 +3175,13 @@ class MainWindow(QMainWindow):
         )
         if path:
             self._attached_file_path = path
-            self._attached_image_data = b""
             name = path.split("/")[-1].split("\\")[-1]
             short = name if len(name) <= 20 else name[:17] + "…"
-            self._show_attach_chip(f"📎 {short}")
+
+            def on_remove():
+                self._attached_file_path = ""
+
+            self._add_chip(f"📎 {short}", on_remove)
 
     def _on_slash_shortcut(self) -> None:
         """Insert '/' into the input field to trigger command completion."""
@@ -3156,29 +3199,33 @@ class MainWindow(QMainWindow):
         return path
 
     def get_attached_image_data(self) -> bytes:
-        """Return raw pasted image bytes (cleared after retrieval)."""
-        data = self._attached_image_data
-        if data:
-            self._attached_image_data = b""
-            self._clear_attachment()
-        return data
+        """Return first pasted image bytes (legacy; use pop_attached_images_as_tempfiles for multi)."""
+        if self._attached_images:
+            return self._attached_images[0]
+        return b""
+
+    def pop_attached_images_as_tempfiles(self) -> list[str]:
+        """Save all pasted images to temp PNG files and return their paths.
+        Clears the image list. Caller is responsible for deleting the files."""
+        if not self._attached_images:
+            return []
+        import tempfile, os
+        paths = []
+        for data in self._attached_images:
+            fd, path = tempfile.mkstemp(suffix=".png", prefix="agent_clip_")
+            try:
+                os.write(fd, data)
+            finally:
+                os.close(fd)
+            paths.append(path)
+        self._attached_images = []
+        self._clear_attachment()
+        return paths
 
     def pop_attached_image_as_tempfile(self) -> str:
-        """Save pasted image to a temp PNG file and return the path.
-        The caller is responsible for deleting the file after use.
-        Returns empty string if no image is attached."""
-        data = self._attached_image_data
-        if not data:
-            return ""
-        self._attached_image_data = b""
-        self._clear_attachment()
-        import tempfile, os
-        fd, path = tempfile.mkstemp(suffix=".png", prefix="agent_clip_")
-        try:
-            os.write(fd, data)
-        finally:
-            os.close(fd)
-        return path
+        """Legacy single-image version — returns first image path only."""
+        paths = self.pop_attached_images_as_tempfiles()
+        return paths[0] if paths else ""
 
     # ── Input callback ────────────────────────────────────────────────────
 
@@ -3303,13 +3350,17 @@ class MainWindow(QMainWindow):
             self._waveform.set_level(level)
 
     def voice_result_ready(self, text: str | None) -> None:
-        """Called when recognition finishes (from main.py signal). Places text in field."""
+        """Called when recognition finishes. Appends recognized text to the input field."""
         if not self._voice_active:
             return
         self._exit_voice_mode()
         if text:
-            self.input_field.setText(text)
+            existing = self.input_field.text().strip()
+            sep = " " if existing else ""
+            self.input_field.setText(existing + sep + text)
             self.input_field.setFocus()
+            # Move cursor to end
+            self.input_field.setCursorPosition(len(self.input_field.text()))
 
     # --- Mouse Events for dragging the window ---
     def mousePressEvent(self, event):

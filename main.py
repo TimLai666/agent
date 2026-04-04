@@ -418,7 +418,7 @@ class GUIAgentApp(QObject):
         self._todo_snapshot_text = ""
         self._discussion_text = ""  # Q&A from AskUserQuestion
         self._stop_context = ""    # context saved when user stops mid-run
-        self._pending_tmp_image: str = ""  # temp image path to delete after agent done
+        self._pending_tmp_images: list[str] = []  # temp image paths to delete after agent done
         self._ui_collapsed = False
         self._waiting_response = False
         self._waiting_status = ""
@@ -524,12 +524,11 @@ class GUIAgentApp(QObject):
         self.voice_manager.start_listening(on_result=_on_result)
 
     def _on_voice_result(self, text) -> None:
-        """Called in main thread when recognition finishes (text or None)."""
+        """Called in main thread when recognition finishes.
+        Appends text to the input field — user presses 發送 manually to submit."""
         self.main_window.voice_result_ready(text)
         if text:
             logger.info(f"Voice recognized: {text[:60]}")
-            # Auto-submit the recognized text
-            self.process_input(text)
         else:
             self.main_window.update_speech_bubble("未識別到語音，請再試一次")
 
@@ -850,17 +849,16 @@ class GUIAgentApp(QObject):
         self._reset_idle_timer()
 
     def _cleanup_pending_tmp_image(self) -> None:
-        """Delete the temp image file created for clipboard paste, if any."""
-        if self._pending_tmp_image:
-            import os
+        """Delete all temp image files created for clipboard paste."""
+        import os
+        for path in self._pending_tmp_images:
             try:
-                if os.path.exists(self._pending_tmp_image):
-                    os.unlink(self._pending_tmp_image)
-                    logger.debug(f"Deleted temp image: {self._pending_tmp_image}")
+                if os.path.exists(path):
+                    os.unlink(path)
+                    logger.debug(f"Deleted temp image: {path}")
             except Exception as e:
-                logger.debug(f"Could not delete temp image: {e}")
-            finally:
-                self._pending_tmp_image = ""
+                logger.debug(f"Could not delete temp image {path}: {e}")
+        self._pending_tmp_images = []
 
     def handle_result(self, request_id, output, updated_history):
         if request_id != self._active_request_id:
@@ -1096,6 +1094,7 @@ class GUIAgentApp(QObject):
                             self._display_text = ""
                             self._discussion_text = ""
                             self._stop_context = ""
+                            self._cleanup_pending_tmp_image()
                             self._reset_tool_log()
                             self._reset_todo_snapshot()
                             self.main_window.update_speech_bubble("對話 context 已清空")
@@ -1137,7 +1136,7 @@ class GUIAgentApp(QObject):
                 self.command_handler.update_last_prompt(user_input)
 
             # ── Retrieve any attachment from the input bar ─────────────────
-            _tmp_image_path: str = ""
+            _tmp_image_paths: list[str] = []
             try:
                 attached_file = self.main_window.get_attached_file_path()
                 if attached_file:
@@ -1145,14 +1144,23 @@ class GUIAgentApp(QObject):
             except Exception:
                 pass
             try:
-                _tmp_image_path = self.main_window.pop_attached_image_as_tempfile()
-                if _tmp_image_path:
-                    self._pending_tmp_image = _tmp_image_path
-                    user_input = (
-                        f"{user_input}\n\n"
-                        f"[User pasted an image. It has been saved to: {_tmp_image_path}]\n"
-                        f"Read or analyse this image file."
-                    )
+                _tmp_image_paths = self.main_window.pop_attached_images_as_tempfiles()
+                if _tmp_image_paths:
+                    self._pending_tmp_images = _tmp_image_paths
+                    if len(_tmp_image_paths) == 1:
+                        user_input = (
+                            f"{user_input}\n\n"
+                            f"[User pasted an image saved to: {_tmp_image_paths[0]}]\n"
+                            f"Read or analyse this image file."
+                        )
+                    else:
+                        paths_str = "\n".join(f"  - {p}" for p in _tmp_image_paths)
+                        user_input = (
+                            f"{user_input}\n\n"
+                            f"[User pasted {len(_tmp_image_paths)} images saved to:]\n"
+                            f"{paths_str}\n"
+                            f"Read or analyse these image files."
+                        )
             except Exception:
                 pass
             # ──────────────────────────────────────────────────────────────
