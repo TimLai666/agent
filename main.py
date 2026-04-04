@@ -1,6 +1,7 @@
 import argparse
 import asyncio
 import concurrent.futures
+import html as _html_module
 import sys
 import warnings
 from collections import deque
@@ -500,9 +501,140 @@ class GUIAgentApp:
         except Exception:
             pass
 
+    # ── Tool event rendering (Claude Code style) ──────────────────────────
+
+    _TOOL_ICONS: dict[str, str] = {
+        "bash": "⬛",
+        "terminal": "⬛",
+        "read": "📄",
+        "write": "✏️",
+        "edit": "✏️",
+        "glob": "🔍",
+        "grep": "🔍",
+        "web": "🌐",
+        "fetch": "🌐",
+        "search": "🔍",
+        "skill": "⚡",
+        "agent": "🤖",
+        "subagent": "🤖",
+        "todo": "📋",
+    }
+
+    def _tool_icon(self, label: str) -> str:
+        low = label.lower()
+        for key, icon in self._TOOL_ICONS.items():
+            if key in low:
+                return icon
+        return "🔧"
+
+    def _render_tool_line_html(self, line: str) -> str:
+        esc = _html_module.escape
+        if line.startswith("[>] "):
+            label = line[4:]
+            icon = self._tool_icon(label)
+            return (
+                f'<div style="padding:1px 0 1px 2px;color:#6eaee8;font-size:11px;'
+                f'font-family:monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">'
+                f'{icon} <span style="color:#8bbcf0;">{esc(label)}</span>'
+                f'</div>'
+            )
+        if line.startswith("[OK]"):
+            return (
+                f'<div style="padding:1px 0 1px 2px;color:#4ec94e;font-size:11px;">'
+                f'✓</div>'
+            )
+        if line.startswith("[ERR] "):
+            label = line[6:]
+            return (
+                f'<div style="padding:1px 0 1px 2px;color:#f06b6b;font-size:11px;'
+                f'font-family:monospace;">'
+                f'✗ {esc(label)}'
+                f'</div>'
+            )
+        if line.startswith("[SKILL] "):
+            label = line[8:]
+            return (
+                f'<div style="padding:1px 0 1px 2px;color:#c792ea;font-size:11px;">'
+                f'⚡ {esc(label)}'
+                f'</div>'
+            )
+        if line.startswith("[*] "):
+            label = line[4:]
+            return (
+                f'<div style="padding:1px 0 1px 2px;color:#888;font-size:11px;'
+                f'font-family:monospace;">'
+                f'· {esc(label)}'
+                f'</div>'
+            )
+        return ""
+
+    def _render_tool_events_html(self) -> str:
+        """Render tool log lines as compact Claude Code-style HTML rows."""
+        if not self._tool_log_lines:
+            return ""
+        # Pair [>] start and [OK]/[ERR] together into single rows
+        rows: list[str] = []
+        pending_start: str = ""
+        for line in self._tool_log_lines[-40:]:  # show last 40 events at most
+            if line.startswith("[>] "):
+                pending_start = line[4:]
+            elif line.startswith("[OK]") and pending_start:
+                icon = self._tool_icon(pending_start)
+                esc = _html_module.escape
+                rows.append(
+                    f'<div style="padding:1px 0 1px 2px;color:#4db87a;font-size:11px;'
+                    f'font-family:monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">'
+                    f'✓ {icon} <span style="color:#7ec8a0;">{esc(pending_start)}</span>'
+                    f'</div>'
+                )
+                pending_start = ""
+            elif line.startswith("[ERR] ") and pending_start:
+                err = line[6:]
+                icon = self._tool_icon(pending_start)
+                esc = _html_module.escape
+                rows.append(
+                    f'<div style="padding:1px 0 1px 2px;color:#f06b6b;font-size:11px;'
+                    f'font-family:monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">'
+                    f'✗ {icon} <span style="color:#f09090;">{esc(pending_start)}: {esc(err)}</span>'
+                    f'</div>'
+                )
+                pending_start = ""
+            else:
+                rendered = self._render_tool_line_html(line)
+                if rendered:
+                    rows.append(rendered)
+
+        # If a tool is still running (pending_start has no [OK] yet), show it as in-progress
+        if pending_start:
+            icon = self._tool_icon(pending_start)
+            esc = _html_module.escape
+            rows.append(
+                f'<div style="padding:1px 0 1px 2px;color:#6eaee8;font-size:11px;'
+                f'font-family:monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">'
+                f'▶ {icon} <span style="color:#8bbcf0;">{esc(pending_start)}</span>'
+                f'</div>'
+            )
+
+        if not rows:
+            return ""
+        inner = "\n".join(rows)
+        return (
+            f'<div style="margin:0 0 6px 0;padding:4px 6px;'
+            f'background:rgba(20,20,28,0.7);border-left:2px solid rgba(100,160,255,0.4);'
+            f'border-radius:4px;">'
+            f'{inner}'
+            f'</div>'
+        )
+
+    # ── Display composition ────────────────────────────────────────────────
+
     def _compose_display_text(self, base_text: str | None = None) -> str:
         text = self._display_text if base_text is None else base_text
         blocks: list[str] = []
+
+        tool_html = self._render_tool_events_html()
+        if tool_html:
+            blocks.append(tool_html)
 
         if self._todo_snapshot_text:
             blocks.append(
@@ -513,21 +645,9 @@ class GUIAgentApp:
                 "</discussion>"
             )
 
-        if not self._tool_log_lines:
-            if blocks:
-                return "\n\n".join([*blocks, text]) if text else "\n\n".join(blocks)
-            return text
-
-        tool_lines = "\n".join(self._tool_log_lines)
-        blocks.append(
-            "<tool-execution>\n"
-            "```text\n"
-            f"{tool_lines}\n"
-            "```\n"
-            "</tool-execution>"
-        )
         if text:
-            return "\n\n".join([*blocks, text])
+            blocks.append(text)
+
         return "\n\n".join(blocks)
 
     def handle_tool_event(self, payload: dict) -> None:

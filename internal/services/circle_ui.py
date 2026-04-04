@@ -3154,55 +3154,49 @@ class ChoiceDialog(QDialog):
 
 
 class ConfirmDialog(QDialog):
-    """確認對話框，用於工具執行確認"""
+    """確認對話框，用於工具執行確認（與 ChoiceDialog 共用視覺語言）"""
 
     _STYLE = """
         QDialog {
             background-color: #1c1c1e;
             border-radius: 14px;
         }
-        QLabel#icon {
-            font-size: 22px;
-        }
+        QLabel#icon { font-size: 22px; }
         QLabel#title {
             color: #f0f0f0;
             font-size: 15px;
             font-weight: bold;
         }
         QLabel#body {
-            color: #c8c8cc;
-            font-size: 13px;
+            color: #b8b8bc;
+            font-size: 12px;
             line-height: 1.5;
         }
-        QFrame#sep {
-            color: rgba(255, 255, 255, 25);
-        }
+        QFrame#sep { color: rgba(255,255,255,25); }
         QPushButton#allow {
-            background-color: #007AFF;
-            color: white;
-            border: none;
+            background-color: rgba(0, 112, 240, 200);
+            color: #e8f0ff;
+            border: 1px solid rgba(80, 160, 255, 180);
             border-radius: 9px;
-            padding: 9px 20px;
+            padding: 10px 16px;
             font-size: 13px;
-            font-weight: bold;
-            min-width: 90px;
+            text-align: left;
         }
-        QPushButton#allow:hover  { background-color: #228EFF; }
-        QPushButton#allow:pressed { background-color: #005FCC; }
+        QPushButton#allow:hover  { background-color: rgba(0, 130, 255, 220); }
+        QPushButton#allow:pressed { background-color: rgba(0, 80, 200, 240); }
         QPushButton#deny {
-            background-color: rgba(80, 80, 90, 200);
-            color: #e0e0e0;
-            border: 1px solid rgba(255, 255, 255, 35);
+            background-color: rgba(58, 58, 68, 200);
+            color: #c0c0c4;
+            border: 1px solid rgba(255,255,255,35);
             border-radius: 9px;
-            padding: 9px 20px;
+            padding: 10px 16px;
             font-size: 13px;
-            min-width: 90px;
+            text-align: left;
         }
-        QPushButton#deny:hover  { background-color: rgba(100, 100, 110, 220); }
-        QPushButton#deny:pressed { background-color: rgba(60, 60, 70, 230); }
+        QPushButton#deny:hover  { background-color: rgba(80, 80, 92, 220); }
+        QPushButton#deny:pressed { background-color: rgba(45, 45, 55, 240); }
     """
 
-    # Keywords that suggest a higher-risk operation → show ⚠️ instead of 🔧
     _DANGER_KEYWORDS = {"delete", "remove", "rm ", "drop", "kill", "truncate", "format", "wipe"}
 
     def __init__(self, message: str, default_choice: str = '', parent=None):
@@ -3213,13 +3207,14 @@ class ConfirmDialog(QDialog):
         self.setStyleSheet(self._STYLE)
 
         msg_lower = message.lower()
-        icon_char = "⚠️" if any(kw in msg_lower for kw in self._DANGER_KEYWORDS) else "🔧"
+        is_danger = any(kw in msg_lower for kw in self._DANGER_KEYWORDS)
+        icon_char = "⚠️" if is_danger else "🔧"
 
         layout = QVBoxLayout(self)
         layout.setSpacing(10)
         layout.setContentsMargins(22, 22, 22, 22)
 
-        # Header: icon + title
+        # Header
         header = QHBoxLayout()
         header.setSpacing(10)
         icon = QLabel(icon_char)
@@ -3227,45 +3222,36 @@ class ConfirmDialog(QDialog):
         icon.setFixedWidth(32)
         icon.setAlignment(Qt.AlignmentFlag.AlignVCenter)
         header.addWidget(icon)
-
         title = QLabel("工具執行請求")
         title.setObjectName("title")
         header.addWidget(title, 1)
         layout.addLayout(header)
 
-        # Separator
         sep = QFrame()
         sep.setObjectName("sep")
         sep.setFrameShape(QFrame.Shape.HLine)
         layout.addWidget(sep)
 
-        # Message body
         body = QLabel(message)
         body.setObjectName("body")
         body.setWordWrap(True)
-        body.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         layout.addWidget(body)
 
-        layout.addSpacing(6)
+        layout.addSpacing(4)
 
-        # Button row
-        btn_row = QHBoxLayout()
-        btn_row.addStretch()
-
-        deny_btn = QPushButton("拒絕 (N)")
-        deny_btn.setObjectName("deny")
-        deny_btn.clicked.connect(self.reject)
-
-        allow_btn = QPushButton("允許 (Y)")
+        # Full-width option buttons (same style as ChoiceDialog)
+        allow_btn = QPushButton("  ✅ 允許執行  (Y)")
         allow_btn.setObjectName("allow")
+        allow_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         allow_btn.clicked.connect(self.accept)
+        layout.addWidget(allow_btn)
 
-        btn_row.addWidget(deny_btn)
-        btn_row.addSpacing(8)
-        btn_row.addWidget(allow_btn)
-        layout.addLayout(btn_row)
+        deny_btn = QPushButton("  ❌ 拒絕  (N)")
+        deny_btn.setObjectName("deny")
+        deny_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        deny_btn.clicked.connect(self.reject)
+        layout.addWidget(deny_btn)
 
-        # Default focus
         if default_choice.upper() == 'Y':
             allow_btn.setDefault(True)
             allow_btn.setFocus()

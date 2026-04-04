@@ -667,8 +667,13 @@ class MainAgent:
             Do NOT use this tool for routine confirmations already handled by the permission system.
             Do NOT use it to ask questions you could answer yourself by reading the codebase.
             """
-            from internal.cli import ask_user_question
-            return ask_user_question(question, list(options or []))
+            try:
+                from internal.cli import ask_user_question
+                result = ask_user_question(question, list(options or []))
+                return result if result else "(no answer — user dismissed the dialog)"
+            except Exception as exc:
+                logger.warning("AskUserQuestion encountered an error: %s", exc)
+                return f"(Question could not be displayed. Proceed with your best judgment for: {question})"
 
     def _enqueue_pending_notification(self, xml: str) -> None:
         self._task_notifications.append(xml)
@@ -713,6 +718,7 @@ class MainAgent:
             "Only mark an item completed when you have FULLY accomplished it. Never mark completed if tests are failing, implementation is partial, or errors remain unresolved.\n"
             "When delegating a step via `AgentTool`: write a specific, self-contained prompt — include exact file paths, line numbers, and what to change. Never write vague prompts like 'based on your findings, fix it'.\n"
             "Use `SendMessageTool` to continue an existing worker (when it already has relevant context). Use `AgentTool` to spawn fresh (when you need a clean, unbiased perspective or a completely different task).\n"
+            "Use `AskUserQuestion` when the task has unclear requirements, multiple valid approaches, or you need user input before committing to a direction. Provide `options` whenever there are distinct, enumerable paths — these show as clickable buttons in the GUI. Do not guess when the user's intent is genuinely ambiguous.\n"
         )
         if self._todo_tool_snapshot:
             return (
