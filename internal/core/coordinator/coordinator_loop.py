@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from internal.core.agents.agent_types import SpawnVerificationInput, SpawnWorkerInput
 from internal.core.tasks.task_types import CoordinatorTodo, TaskKind, TodoStatus, VerificationResult, WorkerResult
@@ -157,6 +157,7 @@ class CoordinatorPlan:
     type: str
     finalAnswer: str = ""
     workerSpec: SpawnWorkerInput | None = None
+    workerSpecs: list[SpawnWorkerInput] = field(default_factory=list)
 
 
 async def run_coordinator_turn(
@@ -185,26 +186,42 @@ async def run_coordinator_turn(
         if not todos:
             _emit_todo_snapshot("planning", todos, on_todo_update)
             plan = await make_or_update_plan(ctx)
-            todo = CoordinatorTodo(
-                id=_make_todo_id(todos),
-                title="初始執行任務",
-                description=ctx.userRequest,
-                status="pending",
-                priority="high",
-                assignedTo="main_agent",
-            )
             if plan.type == "answer-directly":
-                todo.title = "直接回覆任務"
-                todo.notes = plan.finalAnswer
-            elif plan.type == "spawn-worker" and plan.workerSpec is not None:
-                todo.title = plan.workerSpec.title or "worker-task"
-                todo.assignedTo = plan.workerSpec.agentType
-                todo.description = plan.workerSpec.instruction
+                todo = CoordinatorTodo(
+                    id=_make_todo_id(todos),
+                    title="直接回覆任務",
+                    description=ctx.userRequest,
+                    status="pending",
+                    priority="high",
+                    assignedTo="main_agent",
+                    notes=plan.finalAnswer,
+                )
+                todos.append(todo)
+                todo_plans[todo.id] = plan
+            elif plan.type == "spawn-worker":
+                specs = list(plan.workerSpecs)
+                if not specs and plan.workerSpec is not None:
+                    specs = [plan.workerSpec]
+                if not specs:
+                    return "無法產生可執行計畫。"
+
+                prev_todo_id: str | None = None
+                for spec in specs:
+                    todo = CoordinatorTodo(
+                        id=_make_todo_id(todos),
+                        title=spec.title or "worker-task",
+                        description=spec.instruction,
+                        status="pending",
+                        priority="high",
+                        assignedTo=spec.agentType,
+                        dependencies=[prev_todo_id] if prev_todo_id else [],
+                    )
+                    todos.append(todo)
+                    todo_plans[todo.id] = CoordinatorPlan(type="spawn-worker", workerSpec=spec)
+                    prev_todo_id = todo.id
             else:
                 return "無法產生可執行計畫。"
 
-            todos.append(todo)
-            todo_plans[todo.id] = plan
             _emit_todo_snapshot("planning", todos, on_todo_update)
             progress_made = True
 

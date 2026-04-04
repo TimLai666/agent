@@ -1,5 +1,6 @@
 import functools
 import inspect
+import json
 import re
 import sys
 import uuid
@@ -989,16 +990,16 @@ class MainAgent:
             answer = await execute_turn(ctx.userRequest)
             return CoordinatorPlan(type="answer-directly", finalAnswer=answer)
 
+        breakdown_specs = await self._coordinator_generate_todo_breakdown(
+            user_request=ctx.userRequest,
+            worker_type=worker_type,
+            coordinator_guidance=coordinator_guidance,
+        )
+
         return CoordinatorPlan(
             type="spawn-worker",
-            workerSpec=SpawnWorkerInput(
-                agentType=worker_type,
-                title=f"{worker_type}-task",
-                originalUserRequest=ctx.userRequest,
-                instruction=self._build_planning_instruction(ctx.userRequest)
-                + (f"\n\n[Coordinator guidance from main]\n{coordinator_guidance}" if coordinator_guidance else ""),
-                runInBackground=False,
-            ),
+            workerSpec=breakdown_specs[0],
+            workerSpecs=breakdown_specs,
         )
 
     async def _coordinator_generate_main_guidance(self, user_request: str) -> str:
@@ -1022,6 +1023,79 @@ class MainAgent:
         except Exception:
             return ""
         return (guidance or "").strip()
+
+    async def _coordinator_generate_todo_breakdown(
+        self,
+        *,
+        user_request: str,
+        worker_type: str,
+        coordinator_guidance: str,
+    ) -> list[SpawnWorkerInput]:
+        base_instruction = self._build_planning_instruction(user_request)
+        if coordinator_guidance:
+            base_instruction += f"\n\n[Coordinator guidance from main]\n{coordinator_guidance}"
+
+        execute_turn = getattr(self, "_execute_turn_core", None)
+        if not callable(execute_turn):
+            return [
+                SpawnWorkerInput(
+                    agentType=worker_type,
+                    title=f"{worker_type}-task",
+                    originalUserRequest=user_request,
+                    instruction=base_instruction,
+                    runInBackground=False,
+                )
+            ]
+
+        breakdown_prompt = (
+            "You are decomposing a user task into actionable execution todos.\n"
+            "Return JSON only as an array with at most 4 items.\n"
+            "Each item must include: title, instruction.\n"
+            "Do not include markdown fences.\n"
+            "Prefer concrete, executable steps; avoid status-only items.\n\n"
+            "User request:\n"
+            f"{user_request}\n\n"
+            "Coordinator guidance:\n"
+            f"{coordinator_guidance or '(none)'}"
+        )
+
+        try:
+            raw = await execute_turn(breakdown_prompt)
+            parsed = json.loads((raw or "").strip())
+        except Exception:
+            parsed = []
+
+        items = parsed if isinstance(parsed, list) else []
+        specs: list[SpawnWorkerInput] = []
+        for item in items[:4]:
+            if not isinstance(item, dict):
+                continue
+            title = str(item.get("title", "")).strip()
+            instruction = str(item.get("instruction", "")).strip()
+            if not title or not instruction:
+                continue
+            specs.append(
+                SpawnWorkerInput(
+                    agentType=worker_type,
+                    title=title,
+                    originalUserRequest=user_request,
+                    instruction=f"{base_instruction}\n\n[Todo step]\n{instruction}",
+                    runInBackground=False,
+                )
+            )
+
+        if specs:
+            return specs
+
+        return [
+            SpawnWorkerInput(
+                agentType=worker_type,
+                title=f"{worker_type}-task",
+                originalUserRequest=user_request,
+                instruction=base_instruction,
+                runInBackground=False,
+            )
+        ]
 
     async def _coordinator_spawn_worker(self, spec: SpawnWorkerInput) -> WorkerResult:
         subagent_type = spec.agentType if spec.agentType != "general-purpose" else ""

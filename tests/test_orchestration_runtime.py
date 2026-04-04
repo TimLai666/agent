@@ -16,6 +16,7 @@ def _bind_main_coordinator_methods(fake_main: object) -> None:
         "coordinator_handle_user_turn_stream",
         "_coordinator_make_or_update_plan",
         "_coordinator_generate_main_guidance",
+        "_coordinator_generate_todo_breakdown",
         "_coordinator_spawn_worker",
         "_coordinator_spawn_verification",
         "_coordinator_find_task_notification",
@@ -271,8 +272,9 @@ def test_coordinator_plan_uses_main_guidance_from_execute_turn():
         async def fake_execute_turn_core(prompt: str, message_history=None, skip_plan_execution=True):
             _ = message_history
             _ = skip_plan_execution
-            assert "coordinator planner" in prompt
-            return "- Use existing skills first\n- Verify changed files"
+            if "coordinator planner" in prompt:
+                return "- Use existing skills first\n- Verify changed files"
+            return "not-json"
 
         main_agent._execute_turn_core = fake_execute_turn_core
 
@@ -284,6 +286,37 @@ def test_coordinator_plan_uses_main_guidance_from_execute_turn():
         assert plan.workerSpec is not None
         assert "[Coordinator guidance from main]" in plan.workerSpec.instruction
         assert "Use existing skills first" in plan.workerSpec.instruction
+
+    asyncio.run(scenario())
+
+
+def test_coordinator_plan_can_decompose_into_multiple_todos():
+    async def scenario() -> None:
+        main_agent = SimpleNamespace()
+        _bind_main_coordinator_methods(main_agent)
+
+        async def fake_execute_turn_core(prompt: str, message_history=None, skip_plan_execution=True):
+            _ = message_history
+            _ = skip_plan_execution
+            if "coordinator planner" in prompt:
+                return "prioritize tools"
+            if "Return JSON only as an array" in prompt:
+                return (
+                    '[{"title":"蒐集需求重點","instruction":"整理輸入與限制"},'
+                    '{"title":"產出答案","instruction":"給出精簡可執行建議"}]'
+                )
+            return ""
+
+        main_agent._execute_turn_core = fake_execute_turn_core
+
+        plan = await main_agent._coordinator_make_or_update_plan(
+            SimpleNamespace(userRequest="請幫我拆解並回答", taskKind="research")
+        )
+
+        assert plan.type == "spawn-worker"
+        assert len(plan.workerSpecs) == 2
+        assert plan.workerSpecs[0].title == "蒐集需求重點"
+        assert "[Todo step]" in plan.workerSpecs[0].instruction
 
     asyncio.run(scenario())
 
