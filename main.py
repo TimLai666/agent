@@ -49,7 +49,8 @@ class AgentRuntime(QThread):
     result_ready = Signal(int, str, list)
     error_occurred = Signal(int, str)
     tool_event = Signal(object)
-    compaction_event = Signal(bool)  # True = started, False = finished
+    compaction_event = Signal(bool)   # True = started, False = finished
+    compact_result = Signal(object)   # (changed, before, after, messages) or Exception
 
     def __init__(self, base_config, skill_root_dirs: list[Path] | None = None):
         super().__init__()
@@ -379,11 +380,27 @@ class AgentRuntime(QThread):
         changed = after_count < before_count
         return changed, before_count, after_count, after_messages
 
-    def force_compact(self):
+    def force_compact(self, done_callback=None):
+        """Schedule _force_compact on the asyncio loop without blocking the caller.
+
+        done_callback(changed, before, after, updated_history) is called from a
+        background thread when compaction finishes — wire it through a Qt signal
+        if you need to touch the UI from the callback.
+        """
         if not self.loop:
             raise RuntimeError("Initialization failed. Check logs.")
         future = asyncio.run_coroutine_threadsafe(self._force_compact(), self.loop)
-        return future.result()
+
+        def _on_done(fut):
+            try:
+                result = fut.result()
+            except Exception as exc:
+                result = (False, 0, 0, [], exc)
+            if done_callback:
+                done_callback(*result)
+
+        future.add_done_callback(_on_done)
+        return future
 
     def clear_context(self):
         if not self.loop:
@@ -494,6 +511,7 @@ class GUIAgentApp(QObject):
         self.runtime.error_occurred.connect(self.handle_error, _Q)
         self.runtime.tool_event.connect(self.handle_tool_event, _Q)
         self.runtime.compaction_event.connect(self.handle_compaction_event, _Q)
+        self.runtime.compact_result.connect(self.handle_compact_result, _Q)
         self.runtime.start()
 
         self.main_window = MainWindow()
@@ -788,6 +806,19 @@ class GUIAgentApp(QObject):
             self.main_window.set_compact_indicator(started)
         except Exception:
             pass
+
+    def handle_compact_result(self, payload: object) -> None:
+        """Called in main thread when /compact finishes."""
+        self.main_window.set_compact_indicator(False)
+        try:
+            changed, before, after, updated_history = payload  # type: ignore[misc]
+            self.chat_history = updated_history or self.chat_history
+            if changed:
+                self.main_window.update_speech_bubble(f"已執行壓縮：訊息數 {before} → {after}")
+            else:
+                self.main_window.update_speech_bubble("已嘗試壓縮，但目前可壓縮內容不足（需要超過最近保留訊息量）。")
+        except Exception as exc:
+            self.main_window.update_speech_bubble(f"手動壓縮失敗：{exc}")
 
     def _set_waiting_status(self, status: str) -> None:
         self._waiting_status = status
@@ -1136,14 +1167,19 @@ class GUIAgentApp(QObject):
                             self.main_window.update_speech_bubble(f"清空 context 失敗：{exc}")
                         return
                     if result == "__compact__":
+                        self.main_window.update_speech_bubble("壓縮中…")
+                        self.main_window.set_compact_indicator(True)
+
+                        def _on_compact_done(changed, before, after, updated_history, *_exc):
+                            # called from background thread — emit signal to main thread
+                            self.runtime.compact_result.emit(
+                                (changed, before, after, updated_history)
+                            )
+
                         try:
-                            changed, before, after, updated_history = self.runtime.force_compact()
-                            self.chat_history = updated_history or self.chat_history
-                            if changed:
-                                self.main_window.update_speech_bubble(f"已執行壓縮：訊息數 {before} -> {after}")
-                            else:
-                                self.main_window.update_speech_bubble("已嘗試壓縮，但目前可壓縮內容不足（需要超過最近保留訊息量）。")
+                            self.runtime.force_compact(done_callback=_on_compact_done)
                         except Exception as exc:
+                            self.main_window.set_compact_indicator(False)
                             self.main_window.update_speech_bubble(f"手動壓縮失敗：{exc}")
                         return
                     if result:
