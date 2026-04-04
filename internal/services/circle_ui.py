@@ -287,8 +287,9 @@ class AutoWrapTextBrowser(QTextBrowser):
     @staticmethod
     def _sanitize_font(font: QFont) -> QFont:
         safe_font = QFont(font)
-        # Guard against invalid inherited fonts (point size/pixel size both unset or <= 0).
-        if safe_font.pointSize() <= 0 and safe_font.pointSizeF() <= 0 and safe_font.pixelSize() <= 0:
+        # Qt rich text may internally call setPointSize(font.pointSize()).
+        # If pointSize is -1 (even when pixelSize is set), warnings will spam logs.
+        if safe_font.pointSize() <= 0 and safe_font.pointSizeF() <= 0:
             safe_font.setPointSize(11)
         return safe_font
 

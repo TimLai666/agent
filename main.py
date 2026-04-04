@@ -406,7 +406,7 @@ class GUIAgentApp:
 
         self.app = QApplication.instance() or QApplication(sys.argv)
         app_font = self.app.font()
-        if app_font.pointSize() <= 0 and app_font.pointSizeF() <= 0 and app_font.pixelSize() <= 0:
+        if app_font.pointSize() <= 0 and app_font.pointSizeF() <= 0:
             safe_app_font = QFont(app_font)
             safe_app_font.setPointSize(11)
             self.app.setFont(safe_app_font)
