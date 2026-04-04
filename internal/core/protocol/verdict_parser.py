@@ -79,7 +79,7 @@ def parse_verification_verdict(text: str, task_id: str = "") -> VerificationResu
         verdict = "PARTIAL"
 
     if not verdict:
-        raise ValueError("Verification output missing VERDICT")
+        verdict = "FAIL"
 
     evidence: list[VerificationEvidence] = []
     missing_requirements: list[str] = []
@@ -94,6 +94,8 @@ def parse_verification_verdict(text: str, task_id: str = "") -> VerificationResu
             suspected_problems.append(stripped.removeprefix("SUSPECTED_PROBLEM:").strip())
 
     summary = text.strip().splitlines()[0] if text.strip() else ""
+    if not summary:
+        summary = "Verification output missing VERDICT"
     remediation_todos = _parse_remediation_json(text)
     if not remediation_todos:
         remediation_todos = _parse_remediation_lines(text.splitlines())

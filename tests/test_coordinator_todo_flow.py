@@ -30,6 +30,14 @@ def test_parse_verification_verdict_extracts_remediation_todo():
     assert verdict.remediationTodos[0].title == "補 API 驗證"
 
 
+def test_parse_verification_verdict_missing_verdict_falls_back_to_fail():
+    verdict = parse_verification_verdict("沒有任何格式化 verdict", task_id="t-missing")
+
+    assert verdict.verdict == "FAIL"
+    assert verdict.summary
+    assert verdict.remediationTodos
+
+
 def test_coordinator_validation_failure_generates_remediation_todo_and_retries():
     async def scenario() -> str:
         state = {"worker_calls": 0, "verify_calls": 0}

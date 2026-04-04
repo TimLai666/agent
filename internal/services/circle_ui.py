@@ -238,6 +238,7 @@ from PySide6.QtGui import (
     QConicalGradient,
     QCursor,
     QDesktopServices,
+    QFont,
     QGuiApplication,
     QImage,
     QKeyEvent,
@@ -285,6 +286,13 @@ class AutoWrapTextBrowser(QTextBrowser):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        # Some environments propagate an invalid font size (-1), which triggers
+        # repeated QFont::setPointSize warnings during markdown/layout rendering.
+        current_font = self.font()
+        if current_font.pointSize() <= 0 and current_font.pointSizeF() <= 0:
+            safe_font = QFont(current_font)
+            safe_font.setPointSize(11)
+            self.setFont(safe_font)
         self._raw_markdown = None
         self._last_rendered_markdown = None
         self._markdown_refresh_pending = False
