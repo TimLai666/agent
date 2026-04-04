@@ -10,6 +10,7 @@ from internal.core.tasks.task_types import CoordinatorTodo, TaskKind, TodoStatus
 MAX_COORDINATOR_LOOP = 40
 MAX_TODO_RETRY = 3
 MAX_STUCK_TURNS = 6
+MAX_VALIDATION_FAILURE_RETRIES = 2
 
 
 def _requires_blocking_reason(status: TodoStatus) -> bool:
@@ -116,6 +117,10 @@ def _build_aggregate_worker_result(todos: list[CoordinatorTodo]) -> WorkerResult
     )
 
 
+def _todo_signature(todo: CoordinatorTodo) -> tuple[str, str]:
+    return (todo.title.strip().lower(), todo.description.strip().lower())
+
+
 def _format_todo_snapshot(phase: str, todos: list[CoordinatorTodo]) -> str:
     lines = [f"[TODO] phase={phase}"]
     if not todos:
@@ -168,6 +173,7 @@ async def run_coordinator_turn(
     todo_plans: dict[str, CoordinatorPlan] = {}
     loop_count = 0
     stuck_turns = 0
+    validation_failures = 0
 
     while True:
         loop_count += 1
@@ -283,16 +289,29 @@ async def run_coordinator_turn(
             _emit_todo_snapshot("completed", todos, on_todo_update)
             return synthesize_final_answer(ctx, aggregate_worker, verification)
 
+        validation_failures += 1
+        if validation_failures > MAX_VALIDATION_FAILURE_RETRIES:
+            _emit_todo_snapshot("finalizing", todos, on_todo_update)
+            return synthesize_final_answer(ctx, aggregate_worker, verification)
+
         remediation_todos = verification.remediationTodos
         if not remediation_todos:
             _emit_todo_snapshot("blocked", todos, on_todo_update)
             return _build_stuck_report(todos, "Validation failed without remediation path")
 
+        existing_signatures = {_todo_signature(todo) for todo in todos}
+        added_any = False
+
         for remediation in remediation_todos:
+            signature = _todo_signature(remediation)
+            if signature in existing_signatures:
+                continue
             remediation.id = _make_todo_id(todos)
             remediation.status = "pending"
             remediation.assignedTo = remediation.assignedTo or "main_agent"
             todos.append(remediation)
+            existing_signatures.add(signature)
+            added_any = True
 
             remediation_ctx = CoordinatorTurnContext(
                 userRequest=f"{ctx.userRequest}\n\n[Validation remediation]\n{remediation.title}\n{remediation.description}",
@@ -307,6 +326,10 @@ async def run_coordinator_turn(
                 remediation.status = "impossible"
                 remediation.blockingReason = "Planner 無法為 remediation 產生執行計畫"
             todo_plans[remediation.id] = remediation_plan
+
+        if not added_any:
+            _emit_todo_snapshot("finalizing", todos, on_todo_update)
+            return synthesize_final_answer(ctx, aggregate_worker, verification)
 
         _emit_todo_snapshot("executing", todos, on_todo_update)
 

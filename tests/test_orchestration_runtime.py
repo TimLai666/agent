@@ -286,3 +286,25 @@ def test_coordinator_plan_uses_main_guidance_from_execute_turn():
         assert "Use existing skills first" in plan.workerSpec.instruction
 
     asyncio.run(scenario())
+
+
+def test_question_task_kind_always_answers_directly():
+    async def scenario() -> None:
+        main_agent = SimpleNamespace()
+        _bind_main_coordinator_methods(main_agent)
+
+        async def fake_execute_turn_core(prompt: str, message_history=None, skip_plan_execution=True):
+            _ = message_history
+            _ = skip_plan_execution
+            return f"direct:{prompt}"
+
+        main_agent._execute_turn_core = fake_execute_turn_core
+
+        plan = await main_agent._coordinator_make_or_update_plan(
+            SimpleNamespace(userRequest="請介紹這個架構", taskKind="question")
+        )
+
+        assert plan.type == "answer-directly"
+        assert plan.finalAnswer.startswith("direct:")
+
+    asyncio.run(scenario())

@@ -954,10 +954,6 @@ class MainAgent:
             yield result
 
     async def _coordinator_make_or_update_plan(self, ctx: CoordinatorTurnContext) -> CoordinatorPlan:
-        if ctx.taskKind in {"question", "research"} and self._coordinator_looks_like_direct_question(ctx.userRequest):
-            answer = await self._execute_turn_core(ctx.userRequest)
-            return CoordinatorPlan(type="answer-directly", finalAnswer=answer)
-
         worker_type = "implementation" if ctx.taskKind in {"implementation", "bugfix", "infra"} else "research"
         coordinator_guidance = await self._coordinator_generate_main_guidance(ctx.userRequest)
 
@@ -979,6 +975,19 @@ class MainAgent:
                     "可用 ListSubagentTasks 查狀態；完成後結果會在下一輪自動帶入。"
                 ),
             )
+
+        execute_turn = getattr(self, "_execute_turn_core", None)
+        if ctx.taskKind == "question" and callable(execute_turn):
+            answer = await execute_turn(ctx.userRequest)
+            return CoordinatorPlan(type="answer-directly", finalAnswer=answer)
+
+        if (
+            ctx.taskKind == "research"
+            and self._coordinator_looks_like_direct_question(ctx.userRequest)
+            and callable(execute_turn)
+        ):
+            answer = await execute_turn(ctx.userRequest)
+            return CoordinatorPlan(type="answer-directly", finalAnswer=answer)
 
         return CoordinatorPlan(
             type="spawn-worker",

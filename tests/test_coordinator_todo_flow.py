@@ -160,3 +160,64 @@ def test_coordinator_emits_todo_snapshots():
     assert snapshots
     assert any("[TODO] phase=planning" in item for item in snapshots)
     assert any("[TODO] phase=completed" in item for item in snapshots)
+
+
+def test_coordinator_stops_on_repeated_identical_remediation_todos():
+    async def scenario() -> str:
+        async def make_or_update_plan(ctx: CoordinatorTurnContext) -> CoordinatorPlan:
+            title = "research-task"
+            if "[Validation remediation]" in ctx.userRequest:
+                title = "remediation-task"
+            return CoordinatorPlan(
+                type="spawn-worker",
+                workerSpec=SpawnWorkerInput(
+                    agentType="research",
+                    title=title,
+                    originalUserRequest=ctx.userRequest,
+                    instruction="整理答案",
+                    runInBackground=False,
+                ),
+            )
+
+        async def spawn_worker(spec: SpawnWorkerInput) -> WorkerResult:
+            return WorkerResult(
+                taskId=f"task-{spec.title}",
+                status="completed",
+                summary=spec.title,
+                result="答案草稿",
+                filesChanged=[],
+                commandsExecuted=[],
+                evidence=[],
+                unresolvedIssues=[],
+                usage=TaskUsage(durationMs=5),
+            )
+
+        async def spawn_verification_worker(_input) -> VerificationResult:
+            return parse_verification_verdict(
+                "\n".join(
+                    [
+                        "VERDICT: FAIL",
+                        "REMEDIATION_TODO: 修補驗證未通過項目 | 補足證據與說明 | high",
+                    ]
+                ),
+                task_id="verify-loop",
+            )
+
+        def synthesize_final_answer(_ctx, worker, verification):
+            verdict = verification.verdict if verification else "NONE"
+            return f"{worker.summary}|{verdict}"
+
+        def augment_context_with_failure(ctx, _worker, _verification):
+            return ctx
+
+        return await run_coordinator_turn(
+            CoordinatorTurnContext(userRequest="請回答簡單問題", taskKind="research"),
+            make_or_update_plan=make_or_update_plan,
+            spawn_worker=spawn_worker,
+            spawn_verification_worker=spawn_verification_worker,
+            synthesize_final_answer=synthesize_final_answer,
+            augment_context_with_failure=augment_context_with_failure,
+        )
+
+    result = asyncio.run(scenario())
+    assert result.endswith("|FAIL")
