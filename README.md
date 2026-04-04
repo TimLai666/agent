@@ -6,7 +6,9 @@
 - 支援主 agent + 工具導向執行架構。
 - 可透過 `/tools` 查看可用能力。
 - 具備語音輸入（Whisper）與 CLI 互動流程。
-- **新功能**: SQLite 配置系統，支援多種模型提供者 (OpenAI、Claude、GitHub Copilot 等)
+- SQLite 配置系統，支援多種模型提供者 (OpenAI、Claude、GitHub Copilot 等)
+- **512k context window**：每次對話支援大量內容
+- **持久記憶系統**：agent 自動維護 `~/.tim-agent/memory/` 下的五個記憶檔案，每輪自動注入最新內容
 
 ## 🚀 快速開始
 
@@ -94,6 +96,38 @@ asyncio.run(main())
 ```
 
 `workspace` 可在程式化使用時覆寫 agent 工作目錄；未覆寫時會使用預設沙盒模式。
+
+**記憶系統（SDK 參數）**：
+
+```python
+# 預設：~/.tim-agent/memory/ 自動啟用
+Agent()
+
+# 覆寫記憶目錄
+Agent(memory_dir="/path/to/custom/memory")
+
+# 關閉記憶系統
+Agent(memory_enabled=False)
+
+# 帶入外部記憶系統實例
+from internal.memory import MemoryManager
+Agent(memory_system=MemoryManager(memory_dir="/shared/memory"))
+```
+
+記憶檔案說明：
+
+| 檔案 | 用途 |
+| --- | --- |
+| `ME.md` | Agent 自身身份與角色定義 |
+| `USER.md` | 使用者資訊與偏好設定 |
+| `TOOLS.md` | 環境工具與服務配置資訊 |
+| `MEMORY.md` | 長期對話記憶重點 |
+| `TODO.md` | 長期計劃與待辦事項 |
+
+- 所有紀錄以重點摘要式儲存，不長篇大論
+- Agent 可隨時用 `memory_read` / `memory_write` 工具讀寫，無需額外授權
+- 每次寫入時同步整理舊內容（合併重複、移除過時項目）
+- 目錄路徑可透過環境變數 `TIM_AGENT_MEMORY_DIR` 覆寫
 
 **程式化串流回應**：
 

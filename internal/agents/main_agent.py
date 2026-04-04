@@ -41,6 +41,7 @@ from internal.services.subagent_tasks import (
     SubagentTaskManager,
     TaskStopToolInput,
 )
+from internal.memory import MemoryManager
 from internal.set_tools import add_all_tools
 from internal.skills_loader import SkillRegistry, load_skill_registry
 
@@ -271,6 +272,7 @@ class MainAgent:
         extra_tools: list[Callable[..., Any]] | None = None,
         include_skill_tool: bool = True,
         include_subagent_tools: bool = True,
+        memory_manager: MemoryManager | None = None,
     ) -> "MainAgent":
         # Load skills first
         if skills is None:
@@ -438,6 +440,7 @@ class MainAgent:
             skills,
             http_client,
             skill_root_dirs,
+            memory_manager=memory_manager,
         )
         try:
             # Register skill tool inside wrapped phase so skill activations
@@ -454,6 +457,9 @@ class MainAgent:
             main_agent._register_todo_tools()
             if include_subagent_tools:
                 main_agent._register_subagent_tools()
+            if memory_manager is not None and memory_manager.enabled:
+                from internal.tools.memory_tools import add_memory_tools
+                add_memory_tools(agent, memory_manager)
             logger.info("Registered tools on MainAgent")
         except Exception:
             logger.exception(
@@ -471,10 +477,12 @@ class MainAgent:
         skills: SkillRegistry | None = None,
         http_client: AsyncClient | None = None,
         skill_root_dirs: list[Path] | None = None,
+        memory_manager: MemoryManager | None = None,
     ) -> None:
         self.agent = agent
         self.sub_agents = None
         self.skills = skills
+        self._memory_manager = memory_manager
         self._last_messages: list[ModelRequest | ModelResponse] | None = None
         self._last_execution_steps: list[dict[str, Any]] = []
         self._last_user_prompt: str | None = None
@@ -993,6 +1001,15 @@ class MainAgent:
     ) -> list[UserContent]:
         return [*content, error_context]
 
+    def _inject_memory(self, prompt: str) -> str:
+        """Inject the latest persistent memory context into the user prompt."""
+        if self._memory_manager is None:
+            return prompt
+        block = self._memory_manager.build_context_block()
+        if not block:
+            return prompt
+        return f"{block}\n\n{prompt}"
+
     def _inject_local_timestamp(self, prompt: str) -> str:
         """Inject per-turn local timestamp into user prompt context."""
         dt = datetime.now().astimezone()
@@ -1418,6 +1435,7 @@ class MainAgent:
         prompt = self._inject_task_notifications(prompt)
         prompt = self._inject_todo_snapshot(prompt)
         prompt = self._inject_local_timestamp(prompt)
+        prompt = self._inject_memory(prompt)
         user_content, _ = self._build_user_prompt_content(prompt)
         safe_history = self._trim_message_history_for_budget(message_history, user_content)
 
@@ -1513,6 +1531,7 @@ class MainAgent:
         prompt = self._inject_task_notifications(prompt)
         prompt = self._inject_todo_snapshot(prompt)
         prompt = self._inject_local_timestamp(prompt)
+        prompt = self._inject_memory(prompt)
         user_content, _ = self._build_user_prompt_content(prompt)
         safe_history = self._trim_message_history_for_budget(message_history, user_content)
 

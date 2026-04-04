@@ -14,6 +14,7 @@ from pydantic_ai.providers.openai import OpenAIProvider
 
 from internal.agents import MainAgent
 from internal.logger import logger
+from internal.memory import MemoryManager
 from internal.paths import set_runtime_paths
 from internal.services.agent_factory import AgentConfig, load_base_config
 from internal.services.config_manager import normalize_base_url
@@ -53,6 +54,9 @@ class Agent:
         auto_load_all_prompts: bool = True,
         start_mcp_servers: bool = True,
         workspace: str | Path | None = None,
+        memory_enabled: bool = True,
+        memory_dir: str | Path | None = None,
+        memory_system: MemoryManager | None = None,
     ) -> None:
         self.workspace_root = self._resolve_workspace_root(workspace)
         if self.workspace_root is not None:
@@ -71,6 +75,17 @@ class Agent:
         self.additional_system_prompts = additional_system_prompts
         self.auto_load_all_prompts = auto_load_all_prompts
         self.start_mcp_servers = start_mcp_servers
+
+        # Memory system: use provided instance, or build one from flags/dir
+        if memory_system is not None:
+            self._memory_manager: MemoryManager | None = memory_system
+        elif not memory_enabled:
+            self._memory_manager = MemoryManager(enabled=False)
+        else:
+            self._memory_manager = MemoryManager(
+                memory_dir=memory_dir,
+                enabled=True,
+            )
 
         self._http_client: AsyncClient | None = None
         self._main_agent: MainAgent | None = None
@@ -162,6 +177,7 @@ class Agent:
             extra_tools=self.extra_tools,
             include_skill_tool=self.include_skill_tool,
             include_subagent_tools=self.include_subagent_tools,
+            memory_manager=self._memory_manager,
         )
 
         if self.start_mcp_servers:

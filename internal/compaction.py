@@ -11,7 +11,7 @@ Role = Literal["system", "user", "assistant", "tool"]
 CompactMode = Literal["base", "partial_from", "partial_up_to"]
 MessageLike = ModelRequest | ModelResponse
 
-MAX_CONTEXT_TOKENS = 128000
+MAX_CONTEXT_TOKENS = 512000
 COMPACT_TRIGGER_RATIO = 0.75
 RECENT_KEEP_COUNT = 20   # keep more recent messages for richer continuation context
 TOOL_OUTPUT_RECENT_KEEP = 8

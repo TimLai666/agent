@@ -18,6 +18,7 @@ from PySide6.QtWidgets import QApplication
 
 from internal.agents import MainAgent
 from internal.logger import logger
+from internal.memory import MemoryManager
 from internal.runtime.stream_printer import BACKLOG_SCALE, BASE_DELAY, MIN_FACTOR
 from internal.runtime.system import run_cli
 from internal.services.agent_factory import load_base_config
@@ -121,6 +122,7 @@ class AgentRuntime(QThread):
                 self.base_config,
                 self.http_client,
                 skill_root_dirs=self.skill_root_dirs,
+                memory_manager=MemoryManager(),
             )
 
             def _reload_skills_from_webui() -> dict[str, object]:

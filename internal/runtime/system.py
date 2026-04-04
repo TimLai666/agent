@@ -10,6 +10,7 @@ from internal.runtime.stream_printer import stream_print
 from internal.agents import MainAgent
 from internal.cli import confirm
 from internal.logger import logger
+from internal.memory import MemoryManager
 from internal.services.agent_factory import load_base_config
 from internal.services import config_webui
 from internal.services import config_cli
@@ -169,6 +170,7 @@ async def run_cli(
             base_config,
             http_client,
             skill_root_dirs=skill_root_dirs,
+            memory_manager=MemoryManager(),
         )
 
         def reload_skills_from_webui() -> dict[str, object]:
