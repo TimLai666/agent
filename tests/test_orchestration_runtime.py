@@ -228,3 +228,11 @@ def test_coordinator_stream_has_no_progress_labels():
         assert "final output" in text
 
     asyncio.run(scenario())
+
+
+def test_planning_instruction_prioritizes_skills_and_tools():
+    runtime = OrchestrationRuntime(main_agent=SimpleNamespace())
+    instruction = runtime._build_planning_instruction("請幫我完成任務")
+
+    assert "優先使用現有 skills 與已可用 tools" in instruction
+    assert "User request" in instruction

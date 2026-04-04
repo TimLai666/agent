@@ -26,6 +26,16 @@ class OrchestrationRuntime:
     main_agent: object
     on_todo_update: Callable[[str], None] | None = None
 
+    def _build_planning_instruction(self, user_request: str) -> str:
+        return (
+            "Planning policy:\n"
+            "1. 優先使用現有 skills 與已可用 tools 完成任務。\n"
+            "2. 只有在現有 skills/tools 無法滿足需求時，才改用替代方法。\n"
+            "3. 執行時請在結果中清楚說明使用了哪些 skills/tools。\n\n"
+            "User request:\n"
+            f"{user_request}"
+        )
+
     async def handle_user_turn(
         self,
         user_prompt: str,
@@ -98,7 +108,7 @@ class OrchestrationRuntime:
                 agentType=worker_type,
                 title=f"{worker_type}-task",
                 originalUserRequest=ctx.userRequest,
-                instruction=ctx.userRequest,
+                instruction=self._build_planning_instruction(ctx.userRequest),
                 runInBackground=False,
             ),
         )
