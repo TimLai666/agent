@@ -10,6 +10,7 @@ from pathlib import Path
 from httpx import AsyncClient
 from pydantic_ai.messages import ModelRequest, ModelResponse
 from PySide6.QtCore import QThread, QTimer, Signal
+from PySide6.QtGui import QFont
 from PySide6.QtWidgets import QApplication
 
 
@@ -404,6 +405,11 @@ class GUIAgentApp:
         warnings.filterwarnings("ignore", category=ResourceWarning)
 
         self.app = QApplication.instance() or QApplication(sys.argv)
+        app_font = self.app.font()
+        if app_font.pointSize() <= 0 and app_font.pointSizeF() <= 0 and app_font.pixelSize() <= 0:
+            safe_app_font = QFont(app_font)
+            safe_app_font.setPointSize(11)
+            self.app.setFont(safe_app_font)
         self.base_config = load_base_config()
         self.voice_manager = VoiceManager()
         self.chat_history: list[ModelRequest | ModelResponse] | None = None

@@ -284,15 +284,25 @@ from internal.logger import logger
 class AutoWrapTextBrowser(QTextBrowser):
     """QTextBrowser that keeps document width aligned to viewport width."""
 
+    @staticmethod
+    def _sanitize_font(font: QFont) -> QFont:
+        safe_font = QFont(font)
+        # Guard against invalid inherited fonts (point size/pixel size both unset or <= 0).
+        if safe_font.pointSize() <= 0 and safe_font.pointSizeF() <= 0 and safe_font.pixelSize() <= 0:
+            safe_font.setPointSize(11)
+        return safe_font
+
+    def _ensure_valid_font(self) -> None:
+        safe_font = self._sanitize_font(self.font())
+        self.setFont(safe_font)
+        try:
+            self.document().setDefaultFont(safe_font)
+        except Exception:
+            pass
+
     def __init__(self, parent=None):
         super().__init__(parent)
-        # Some environments propagate an invalid font size (-1), which triggers
-        # repeated QFont::setPointSize warnings during markdown/layout rendering.
-        current_font = self.font()
-        if current_font.pointSize() <= 0 and current_font.pointSizeF() <= 0:
-            safe_font = QFont(current_font)
-            safe_font.setPointSize(11)
-            self.setFont(safe_font)
+        self._ensure_valid_font()
         self._raw_markdown = None
         self._last_rendered_markdown = None
         self._markdown_refresh_pending = False
@@ -313,6 +323,7 @@ class AutoWrapTextBrowser(QTextBrowser):
             pass
 
     def setMarkdown(self, text: str) -> None:
+        self._ensure_valid_font()
         self._raw_markdown = text or ""
         self._last_rendered_markdown = None
         self._apply_markdown_with_images()
