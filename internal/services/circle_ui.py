@@ -2381,18 +2381,8 @@ class TodoPanelWindow(QWidget):
         self.title_label = QLabel("Todo List", header)
         self.title_label.setObjectName("todoPanelTitle")
 
-        self.close_button = QToolButton(header)
-        self.close_button.setText("✕")
-        self.close_button.setAutoRaise(True)
-        self.close_button.setStyleSheet(
-            "QToolButton { color: rgba(230, 240, 255, 200); font-size: 11px; }"
-            "QToolButton:hover { color: #FFFFFF; }"
-        )
-        self.close_button.clicked.connect(self.hide)
-
         header_layout.addWidget(self.title_label)
         header_layout.addStretch(1)
-        header_layout.addWidget(self.close_button)
 
         self.content = AutoWrapTextBrowser(self)
         self.content.setOpenExternalLinks(True)
@@ -2542,6 +2532,7 @@ class MainWindow(QMainWindow):
         self.todo_toggle_button.clicked.connect(self.toggle_todo_drawer)
         self.todo_toggle_button.hide()
         self.todo_panel_window = TodoPanelWindow(self)
+        self._todo_window_position_initialized = False
         self._todo_snapshot_text = ""
 
 
@@ -2688,13 +2679,16 @@ class MainWindow(QMainWindow):
         x = max(8, min(x, self.FIXED_WIDTH - btn_w - 8))
         self.todo_toggle_button.setGeometry(x, y, btn_w, btn_h)
 
-    def _position_todo_window(self) -> None:
+    def _position_todo_window(self, *, force: bool = False) -> None:
         if self.todo_panel_window is None:
+            return
+        if self._todo_window_position_initialized and not force:
             return
         frame = self.frameGeometry()
         x = frame.right() + 12
         y = frame.top() + 20
         self.todo_panel_window.move(x, y)
+        self._todo_window_position_initialized = True
 
     def toggle_todo_drawer(self) -> None:
         if self.todo_panel_window.isVisible():
@@ -2734,8 +2728,6 @@ class MainWindow(QMainWindow):
         self.input_container.show()
         self.collapse_button.show()
         self.todo_toggle_button.show()
-        if self.todo_panel_window.isVisible():
-            self._position_todo_window()
         self._update_window_mask()
 
     def _handle_user_typing(self, *_args):
@@ -2808,8 +2800,6 @@ class MainWindow(QMainWindow):
             delta = event.globalPosition().toPoint() - self.old_pos
             self.move(self.pos() + delta)
             self.old_pos = event.globalPosition().toPoint()
-            if self.todo_panel_window.isVisible():
-                self._position_todo_window()
             event.accept()
 
     def mouseReleaseEvent(self, event):
