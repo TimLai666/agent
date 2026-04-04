@@ -239,6 +239,7 @@ from PySide6.QtGui import (
     QDesktopServices,
     QFont,
     QGuiApplication,
+    QIcon,
     QImage,
     QKeyEvent,
     QLinearGradient,
@@ -250,6 +251,21 @@ from PySide6.QtGui import (
     QTextDocument,
     QTextImageFormat,
 )
+
+
+def _make_stop_icon(size: int = 28) -> QIcon:
+    """Draw a white rounded-square stop icon perfectly centred on a transparent pixmap."""
+    px = QPixmap(size, size)
+    px.fill(QColor(0, 0, 0, 0))
+    p = QPainter(px)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    sq = int(size * 0.38)
+    x = (size - sq) // 2
+    p.setBrush(QColor(255, 255, 255, 240))
+    p.setPen(Qt.PenStyle.NoPen)
+    p.drawRoundedRect(x, x, sq, sq, 2, 2)
+    p.end()
+    return QIcon(px)
 from PySide6.QtWidgets import (
     QApplication,
     QCompleter,
@@ -1082,6 +1098,74 @@ class SpinnerLabel(QLabel):
             self._timer.stop()
         self.setVisible(False)
         self.setText(self.base_text)
+
+
+class WaveformWidget(QWidget):
+    """Animated audio waveform bars shown inside the input field during voice capture."""
+
+    BAR_COUNT = 7
+    BAR_W = 4
+    BAR_GAP = 4
+    MIN_H = 4
+    MAX_H = 22
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        total_w = self.BAR_COUNT * (self.BAR_W + self.BAR_GAP) - self.BAR_GAP
+        self.setFixedWidth(total_w + 8)
+        self.setMinimumHeight(self.MAX_H + 8)
+        self._heights = [self.MIN_H] * self.BAR_COUNT
+        self._targets = [self.MIN_H] * self.BAR_COUNT
+        self._timer = QTimer(self)
+        self._timer.setInterval(80)
+        self._timer.timeout.connect(self._animate)
+        self._level = 0.0
+        import random
+        self._rng = random.Random()
+
+    def start(self):
+        self._timer.start()
+
+    def stop(self):
+        self._timer.stop()
+        self._heights = [self.MIN_H] * self.BAR_COUNT
+        self.update()
+
+    def set_level(self, level: float):
+        self._level = max(0.0, min(1.0, level))
+
+    def _animate(self):
+        import random, math
+        t = self._level
+        for i in range(self.BAR_COUNT):
+            center = self.BAR_COUNT / 2
+            dist = abs(i - center) / center
+            envelope = math.cos(dist * math.pi / 2) ** 2
+            base_h = self.MIN_H + (self.MAX_H - self.MIN_H) * t * envelope
+            noise = random.uniform(-3, 3) * (0.5 + t)
+            target = max(self.MIN_H, min(self.MAX_H, base_h + noise))
+            self._heights[i] += (target - self._heights[i]) * 0.4
+        self.update()
+
+    def paintEvent(self, _event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        w = self.width()
+        h = self.height()
+        cx = w // 2
+        total_w = self.BAR_COUNT * (self.BAR_W + self.BAR_GAP) - self.BAR_GAP
+        x0 = cx - total_w // 2
+        for i, bar_h in enumerate(self._heights):
+            x = x0 + i * (self.BAR_W + self.BAR_GAP)
+            bar_h = max(self.MIN_H, bar_h)
+            y = (h - bar_h) // 2
+            alpha = int(160 + 90 * (bar_h / self.MAX_H))
+            color = QColor(100, 180, 255, alpha)
+            p.setBrush(color)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.drawRoundedRect(int(x), int(y), self.BAR_W, int(bar_h), 2, 2)
+        p.end()
 
 
 class CollapsibleSection(QWidget):
@@ -2490,7 +2574,8 @@ class MainWindow(QMainWindow):
 
         self.old_pos = None  # 初始化拖拽位置
         self.input_callback = None  # 回調函數，用於處理用戶輸入
-        self._stop_callback = None  # 停止 agent 的回調
+        self._stop_callback = None   # 停止 agent 的回調
+        self._bypass_callback = None # bypass 模式切換回調
         
         # 固定球的位置參數（球心在底部往上130px，縮小與輸入框的距離）
         self.BALL_CENTER_FROM_BOTTOM = 130
@@ -2515,44 +2600,59 @@ class MainWindow(QMainWindow):
         self._mask_update_timer.setSingleShot(True)
         self._mask_update_timer.timeout.connect(self._update_window_mask)
 
-        # ── Input container (vertical: [attach chips] / [input row] / [toolbar row]) ──
+        # ── Input container (single card: [attach chips] / [input row] / [toolbar row]) ──
         self._attached_file_path: str = ""
         self._attached_image_data: bytes = b""
         self._is_running = False
+        self._bypass_mode = False  # auto-approve all permissions
 
         self.input_container = QWidget(self)
         self.input_container.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
 
-        # Outer vertical layout
+        # Outer vertical layout — no margins, contents sit inside the card
         outer_vbox = QVBoxLayout(self.input_container)
         outer_vbox.setContentsMargins(0, 0, 0, 0)
-        outer_vbox.setSpacing(4)
+        outer_vbox.setSpacing(0)
+
+        # ── Unified card widget (single rounded dark panel) ───────────────
+        self._input_card = QWidget()
+        self._input_card.setObjectName("InputCard")
+        self._input_card.setStyleSheet(
+            "#InputCard { "
+            "background: rgba(28, 30, 38, 230); "
+            "border: 1px solid rgba(255,255,255,35); "
+            "border-radius: 18px; "
+            "}"
+        )
+        card_vbox = QVBoxLayout(self._input_card)
+        card_vbox.setContentsMargins(8, 6, 8, 6)
+        card_vbox.setSpacing(4)
 
         # ── Attachment chip row (hidden until something is attached) ──────
         self._attach_row = QWidget()
         self._attach_row.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         attach_row_layout = QHBoxLayout(self._attach_row)
-        attach_row_layout.setContentsMargins(4, 0, 4, 0)
+        attach_row_layout.setContentsMargins(2, 0, 2, 0)
         attach_row_layout.setSpacing(6)
 
         self._attach_chip = QLabel("")
         self._attach_chip.setStyleSheet(
             "QLabel { "
-            "background: rgba(50,55,70,210); "
-            "color: #cce4ff; "
-            "border: 1px solid rgba(100,150,220,120); "
+            "background: rgba(45,55,80,200); "
+            "color: #a8d4ff; "
+            "border: 1px solid rgba(90,140,220,100); "
             "border-radius: 8px; "
             "padding: 3px 10px; "
             "font-size: 11px; "
             "}"
         )
-        self._attach_chip.setMaximumWidth(220)
+        self._attach_chip.setMaximumWidth(230)
         self._attach_chip.hide()
 
         self._attach_chip_close = QPushButton("✕")
         self._attach_chip_close.setFixedSize(16, 16)
         self._attach_chip_close.setStyleSheet(
-            "QPushButton { background: transparent; color: rgba(180,180,200,180); "
+            "QPushButton { background: transparent; color: rgba(180,180,200,170); "
             "border: none; font-size: 10px; } "
             "QPushButton:hover { color: #ff6b6b; }"
         )
@@ -2563,30 +2663,35 @@ class MainWindow(QMainWindow):
         attach_row_layout.addWidget(self._attach_chip_close)
         attach_row_layout.addStretch(1)
         self._attach_row.hide()
-        outer_vbox.addWidget(self._attach_row)
+        card_vbox.addWidget(self._attach_row)
 
-        # ── Main input row (card background) ─────────────────────────────
-        self._input_card = QWidget()
-        self._input_card.setStyleSheet(
-            "QWidget { "
-            "background: rgba(36, 37, 46, 215); "
-            "border: 1px solid rgba(255,255,255,40); "
-            "border-radius: 18px; "
-            "}"
-        )
-        input_row = QHBoxLayout(self._input_card)
-        input_row.setContentsMargins(6, 4, 6, 4)
+        # ── Main input row ────────────────────────────────────────────────
+        input_row_widget = QWidget()
+        input_row_widget.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        input_row = QHBoxLayout(input_row_widget)
+        input_row.setContentsMargins(0, 0, 0, 0)
         input_row.setSpacing(4)
 
+        self._voice_active = False
+        self._voice_callback = None  # set by main.py: fn(text|None)
+
         self.voice_button = QPushButton("🎤")
-        self.voice_button.setFixedSize(30, 30)
-        self.voice_button.setStyleSheet(
+        self.voice_button.setFixedSize(28, 28)
+        self._voice_btn_idle_style = (
             "QPushButton { "
-            "background: transparent; color: rgba(200,200,220,200); "
-            "border: none; font-size: 15px; border-radius: 15px; "
+            "background: transparent; color: rgba(200,200,220,190); "
+            "border: none; font-size: 14px; border-radius: 14px; "
             "}"
-            "QPushButton:hover { background: rgba(255,255,255,15); }"
+            "QPushButton:hover { background: rgba(255,255,255,12); }"
         )
+        self._voice_btn_cancel_style = (
+            "QPushButton { "
+            "background: rgba(180,40,40,200); color: #fff; "
+            "border: none; font-size: 13px; border-radius: 14px; "
+            "}"
+            "QPushButton:hover { background: rgba(210,55,55,230); }"
+        )
+        self.voice_button.setStyleSheet(self._voice_btn_idle_style)
         self.voice_button.clicked.connect(self.on_voice_requested)
 
         self.input_field = CommandLineEdit()
@@ -2594,7 +2699,7 @@ class MainWindow(QMainWindow):
         self.input_field.setStyleSheet(
             "QLineEdit { "
             "background: transparent; "
-            "color: white; "
+            "color: #e8eaf0; "
             "border: none; "
             "padding: 2px 4px; "
             "font-size: 12px; "
@@ -2606,7 +2711,10 @@ class MainWindow(QMainWindow):
         except Exception:
             self.input_field.textChanged.connect(self._handle_user_typing)
 
-        # Send / Stop dual-mode button
+        # Waveform widget — hidden until voice mode is active
+        self._waveform = WaveformWidget()
+        self._waveform.hide()
+
         self.send_button = QPushButton("發送")
         self.send_button.setFixedSize(52, 28)
         self._send_btn_send_style = (
@@ -2619,7 +2727,8 @@ class MainWindow(QMainWindow):
         self._send_btn_stop_style = (
             "QPushButton { "
             "background: rgba(210,55,55,220); color: #fff; border: none; "
-            "border-radius: 12px; font-weight: bold; font-size: 14px; "
+            "border-radius: 12px; font-size: 11px; "
+            "padding: 0 0 1px 0; "
             "}"
             "QPushButton:hover { background: rgba(230,70,70,240); }"
         )
@@ -2628,33 +2737,40 @@ class MainWindow(QMainWindow):
 
         input_row.addWidget(self.voice_button)
         input_row.addWidget(self.input_field, 1)
+        input_row.addWidget(self._waveform, 1)
         input_row.addWidget(self.send_button)
-        outer_vbox.addWidget(self._input_card)
+        card_vbox.addWidget(input_row_widget)
 
-        # ── Toolbar row (below card) ──────────────────────────────────────
+        # ── Separator line ────────────────────────────────────────────────
+        sep = QWidget()
+        sep.setFixedHeight(1)
+        sep.setStyleSheet("QWidget { background: rgba(255,255,255,18); border: none; }")
+        card_vbox.addWidget(sep)
+
+        # ── Toolbar row (inside card, has the card background) ────────────
         _tbtn = (
-            "QPushButton { background: transparent; color: rgba(160,170,190,170); "
-            "border: none; font-size: 12px; padding: 0 3px; border-radius: 4px; } "
-            "QPushButton:hover { color: rgba(220,230,255,230); background: rgba(255,255,255,10); }"
+            "QPushButton { background: transparent; color: rgba(150,165,185,160); "
+            "border: none; font-size: 12px; padding: 0 4px; border-radius: 4px; } "
+            "QPushButton:hover { color: rgba(210,225,255,220); background: rgba(255,255,255,8); }"
         )
-        _tlbl = "QLabel { color: rgba(150,165,185,160); font-size: 10px; }"
+        _tlbl = "QLabel { color: rgba(140,158,180,150); font-size: 10px; background: transparent; }"
 
         toolbar_row = QWidget()
         toolbar_row.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         toolbar_layout = QHBoxLayout(toolbar_row)
-        toolbar_layout.setContentsMargins(8, 0, 8, 0)
+        toolbar_layout.setContentsMargins(2, 0, 2, 0)
         toolbar_layout.setSpacing(2)
 
         self._attach_btn = QPushButton("＋")
         self._attach_btn.setToolTip("附加檔案")
-        self._attach_btn.setFixedSize(22, 18)
+        self._attach_btn.setFixedSize(22, 20)
         self._attach_btn.setStyleSheet(_tbtn)
         self._attach_btn.clicked.connect(self._on_attach_file)
         toolbar_layout.addWidget(self._attach_btn)
 
         self._slash_btn = QPushButton("／")
         self._slash_btn.setToolTip("插入 /指令")
-        self._slash_btn.setFixedSize(22, 18)
+        self._slash_btn.setFixedSize(22, 20)
         self._slash_btn.setStyleSheet(_tbtn)
         self._slash_btn.clicked.connect(self._on_slash_shortcut)
         toolbar_layout.addWidget(self._slash_btn)
@@ -2665,8 +2781,20 @@ class MainWindow(QMainWindow):
         toolbar_layout.addWidget(self._ctx_label)
 
         toolbar_layout.addStretch(1)
-        outer_vbox.addWidget(toolbar_row)
-        # keep reference so show/hide still works
+
+        # Bypass toggle button (right side of toolbar)
+        self._bypass_btn = QPushButton("🔒")
+        self._bypass_btn.setToolTip("全開模式：自動允許所有工具執行（再按恢復）")
+        self._bypass_btn.setFixedSize(22, 20)
+        self._bypass_btn.setCheckable(True)
+        self._bypass_btn.setStyleSheet(_tbtn)
+        self._bypass_btn.clicked.connect(self._on_bypass_toggled)
+        toolbar_layout.addWidget(self._bypass_btn)
+
+        card_vbox.addWidget(toolbar_row)
+        outer_vbox.addWidget(self._input_card)
+
+        # keep reference so existing code that calls toolbar_widget.show/hide still works
         self.toolbar_widget = toolbar_row
 
         # ── Collapse / Todo buttons (floating on parent) ──────────────────
@@ -2927,11 +3055,14 @@ class MainWindow(QMainWindow):
         """Toggle send/stop button between run mode and stop mode."""
         self._is_running = running
         if running:
-            self.send_button.setText("■")
+            self.send_button.setText("")
+            self.send_button.setIcon(_make_stop_icon(20))
+            self.send_button.setIconSize(QSize(20, 20))
             self.send_button.setStyleSheet(self._send_btn_stop_style)
             self.send_button.clicked.disconnect()
             self.send_button.clicked.connect(self._on_stop_requested)
         else:
+            self.send_button.setIcon(QIcon())  # clear icon
             self.send_button.setText("發送")
             self.send_button.setStyleSheet(self._send_btn_send_style)
             self.send_button.clicked.disconnect()
@@ -2940,6 +3071,41 @@ class MainWindow(QMainWindow):
     def _on_stop_requested(self) -> None:
         if self._stop_callback:
             self._stop_callback()
+
+    def set_bypass_callback(self, callback) -> None:
+        """Set callback invoked when bypass mode is toggled. callback(enabled: bool)"""
+        self._bypass_callback = callback
+
+    def _on_bypass_toggled(self, checked: bool) -> None:
+        self._bypass_mode = checked
+        _bypass_on = (
+            "QPushButton { background: rgba(220,120,0,180); color: #ffe0a0; "
+            "border: none; font-size: 12px; padding: 0 4px; border-radius: 4px; } "
+            "QPushButton:hover { background: rgba(240,140,0,210); }"
+        )
+        _bypass_off = (
+            "QPushButton { background: transparent; color: rgba(150,165,185,160); "
+            "border: none; font-size: 12px; padding: 0 4px; border-radius: 4px; } "
+            "QPushButton:hover { color: rgba(210,225,255,220); background: rgba(255,255,255,8); }"
+        )
+        if checked:
+            self._bypass_btn.setText("🔓")
+            self._bypass_btn.setToolTip("全開模式已開啟 — 自動允許所有工具（點擊關閉）")
+            self._bypass_btn.setStyleSheet(_bypass_on)
+        else:
+            self._bypass_btn.setText("🔒")
+            self._bypass_btn.setToolTip("全開模式：自動允許所有工具執行（再按恢復）")
+            self._bypass_btn.setStyleSheet(
+                "QPushButton { background: transparent; color: rgba(150,165,185,160); "
+                "border: none; font-size: 12px; padding: 0 4px; border-radius: 4px; } "
+                "QPushButton:hover { color: rgba(210,225,255,220); background: rgba(255,255,255,8); }"
+            )
+        cb = getattr(self, "_bypass_callback", None)
+        if cb:
+            cb(checked)
+
+    def is_bypass_mode(self) -> bool:
+        return self._bypass_mode
 
     def update_context_meter(self, used_tokens: int, max_tokens: int) -> None:
         """Update the context usage label in the toolbar."""
@@ -2990,12 +3156,29 @@ class MainWindow(QMainWindow):
         return path
 
     def get_attached_image_data(self) -> bytes:
-        """Return pasted image bytes (cleared after retrieval)."""
+        """Return raw pasted image bytes (cleared after retrieval)."""
         data = self._attached_image_data
         if data:
             self._attached_image_data = b""
             self._clear_attachment()
         return data
+
+    def pop_attached_image_as_tempfile(self) -> str:
+        """Save pasted image to a temp PNG file and return the path.
+        The caller is responsible for deleting the file after use.
+        Returns empty string if no image is attached."""
+        data = self._attached_image_data
+        if not data:
+            return ""
+        self._attached_image_data = b""
+        self._clear_attachment()
+        import tempfile, os
+        fd, path = tempfile.mkstemp(suffix=".png", prefix="agent_clip_")
+        try:
+            os.write(fd, data)
+        finally:
+            os.close(fd)
+        return path
 
     # ── Input callback ────────────────────────────────────────────────────
 
@@ -3053,10 +3236,80 @@ class MainWindow(QMainWindow):
             self.input_field.setPlaceholderText("輸入文字、指令或按🎤啟動語音...")
             self.input_callback(text)
 
+    # ── Voice mode ────────────────────────────────────────────────────────
+
+    def set_voice_callback(self, cb) -> None:
+        """cb(text: str|None) called when voice recognition finishes or is cancelled."""
+        self._voice_callback = cb
+
     def on_voice_requested(self):
-        """處理語音請求"""
-        if self.input_callback:
-            self.input_callback(None)  # None 表示使用語音輸入
+        if self._voice_active:
+            self._cancel_voice()
+        else:
+            self._enter_voice_mode()
+
+    def _enter_voice_mode(self) -> None:
+        self._voice_active = True
+        # Swap text field → waveform
+        self.input_field.hide()
+        self._waveform.show()
+        self._waveform.start()
+        # Voice button → cancel (✕)
+        self.voice_button.setText("✕")
+        self.voice_button.setStyleSheet(self._voice_btn_cancel_style)
+        # Send button becomes "送出語音"
+        self._prev_send_click = None
+        try:
+            self.send_button.clicked.disconnect()
+        except Exception:
+            pass
+        self.send_button.clicked.connect(self._submit_voice_now)
+        # Notify main.py to start recognition
+        if self._voice_callback:
+            self._voice_callback("__start__")
+
+    def _exit_voice_mode(self) -> None:
+        self._voice_active = False
+        self._waveform.stop()
+        self._waveform.hide()
+        self.input_field.show()
+        self.input_field.setFocus()
+        self.voice_button.setText("🎤")
+        self.voice_button.setStyleSheet(self._voice_btn_idle_style)
+        # Restore send button
+        try:
+            self.send_button.clicked.disconnect()
+        except Exception:
+            pass
+        if self._is_running:
+            self.send_button.clicked.connect(self._on_stop_requested)
+        else:
+            self.send_button.clicked.connect(self.on_input_submitted)
+
+    def _cancel_voice(self) -> None:
+        self._exit_voice_mode()
+        if self._voice_callback:
+            self._voice_callback("__cancel__")
+
+    def _submit_voice_now(self) -> None:
+        """User pressed send during recording — commit immediately."""
+        self._exit_voice_mode()
+        if self._voice_callback:
+            self._voice_callback("__submit__")
+
+    def set_voice_level(self, level: float) -> None:
+        """Called from voice worker thread (via queued signal) to update waveform."""
+        if self._voice_active:
+            self._waveform.set_level(level)
+
+    def voice_result_ready(self, text: str | None) -> None:
+        """Called when recognition finishes (from main.py signal). Places text in field."""
+        if not self._voice_active:
+            return
+        self._exit_voice_mode()
+        if text:
+            self.input_field.setText(text)
+            self.input_field.setFocus()
 
     # --- Mouse Events for dragging the window ---
     def mousePressEvent(self, event):
@@ -3325,25 +3578,59 @@ class ChoiceDialog(QDialog):
         layout.addWidget(sep)
         layout.addSpacing(2)
 
-        # Option buttons
-        for opt in options:
-            btn = QPushButton(f"  {opt}")
-            btn.setObjectName("option")
-            btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            btn.clicked.connect(lambda _checked, o=opt: self._select(o))
-            layout.addWidget(btn)
+        # Option buttons OR free-text input
+        if options:
+            for opt in options:
+                btn = QPushButton(f"  {opt}")
+                btn.setObjectName("option")
+                btn.setCursor(Qt.CursorShape.PointingHandCursor)
+                btn.clicked.connect(lambda _checked, o=opt: self._select(o))
+                layout.addWidget(btn)
+        else:
+            # Open-ended: show a text input field + confirm button
+            self._text_input = QLineEdit()
+            self._text_input.setPlaceholderText("請輸入回覆…")
+            self._text_input.setStyleSheet(
+                "QLineEdit { "
+                "background: rgba(50,52,65,220); "
+                "color: #e8eaf0; "
+                "border: 1px solid rgba(255,255,255,50); "
+                "border-radius: 8px; "
+                "padding: 8px 12px; "
+                "font-size: 13px; "
+                "}"
+                "QLineEdit:focus { border-color: rgba(80,150,255,180); }"
+            )
+            self._text_input.returnPressed.connect(self._submit_text)
+            layout.addWidget(self._text_input)
+            layout.addSpacing(4)
 
-        if not options:
-            close_btn = QPushButton("關閉")
-            close_btn.clicked.connect(self.reject)
-            layout.addWidget(close_btn)
+            confirm_btn = QPushButton("確認")
+            confirm_btn.setObjectName("option")
+            confirm_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            confirm_btn.setStyleSheet(
+                "QPushButton { "
+                "background: rgba(0,100,220,200); color: #fff; "
+                "border: none; border-radius: 9px; "
+                "padding: 10px 16px; font-size: 13px; "
+                "}"
+                "QPushButton:hover { background: rgba(0,120,255,220); }"
+            )
+            confirm_btn.clicked.connect(self._submit_text)
+            layout.addWidget(confirm_btn)
+            QTimer.singleShot(0, self._text_input.setFocus)
+
+    def _submit_text(self) -> None:
+        text = self._text_input.text().strip() if hasattr(self, "_text_input") else ""
+        self._selected = text
+        self.accept()
 
     def _select(self, option: str) -> None:
         self._selected = option
         self.accept()
 
     def get_result(self) -> str:
-        """顯示對話框並返回使用者選擇的選項（取消時返回空字串）"""
+        """顯示對話框並返回使用者選擇的選項或輸入的文字（取消時返回空字串）"""
         self.exec()
         return self._selected
 

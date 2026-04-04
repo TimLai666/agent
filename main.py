@@ -10,7 +10,7 @@ from pathlib import Path
 
 from httpx import AsyncClient
 from pydantic_ai.messages import ModelRequest, ModelResponse
-from PySide6.QtCore import QThread, QTimer, Signal
+from PySide6.QtCore import QObject, QThread, QTimer, Signal
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import QApplication
 
@@ -393,8 +393,13 @@ class AgentRuntime(QThread):
         future.result()
 
 
-class GUIAgentApp:
+class GUIAgentApp(QObject):
+    # Signals for cross-thread voice updates (worker thread → main/Qt thread)
+    _voice_level_signal = Signal(float)
+    _voice_result_signal = Signal(object)  # str | None
+
     def __init__(self, skill_root_dirs: list[Path] | None = None):
+        super().__init__()
         warnings.filterwarnings("ignore", category=DeprecationWarning)
         warnings.filterwarnings("ignore", category=ResourceWarning)
 
@@ -479,7 +484,12 @@ class GUIAgentApp:
         self.main_window = MainWindow()
         self.main_window.set_input_callback(self.process_input)
         self.main_window.set_stop_callback(self.stop_current_request)
+        self.main_window.set_bypass_callback(self._on_bypass_changed)
+        self.main_window.set_voice_callback(self._on_voice_event)
         self.main_window.collapse_state_changed.connect(self._on_collapse_state_changed)
+        # Wire cross-thread voice signals to main-window slots
+        self._voice_level_signal.connect(self.main_window.set_voice_level)
+        self._voice_result_signal.connect(self._on_voice_result)
         # 當使用者在輸入框輸入時，重置閒置計時
         try:
             self.main_window.typing.connect(self._reset_idle_timer)
@@ -490,8 +500,49 @@ class GUIAgentApp:
         self.main_window.update_speech_bubble("Initializing...")
         self.main_window.speech_bubble.show()
 
+    def _on_bypass_changed(self, enabled: bool) -> None:
+        logger.info(f"Bypass mode {'enabled' if enabled else 'disabled'}")
+
+    # ── Voice mode handlers ───────────────────────────────────────────────
+
+    def _on_voice_event(self, event: str) -> None:
+        """Called from MainWindow when user interacts with voice button/send."""
+        if event == "__start__":
+            self._start_voice_recognition()
+        elif event == "__cancel__":
+            self.voice_manager.cancel()
+            self.main_window.update_speech_bubble("語音取消")
+        elif event == "__submit__":
+            self.voice_manager.submit_now()
+            self.main_window.update_speech_bubble("辨識中...")
+
+    def _start_voice_recognition(self) -> None:
+        self.main_window.update_speech_bubble("Listening...")
+
+        def _on_result(text):
+            self._voice_result_signal.emit(text)
+
+        def _on_level(lvl):
+            self._voice_level_signal.emit(lvl)
+
+        self.voice_manager.start_listening(on_result=_on_result, on_level=_on_level)
+
+    def _on_voice_result(self, text) -> None:
+        """Called in main thread when recognition finishes (text or None)."""
+        self.main_window.voice_result_ready(text)
+        if text:
+            logger.info(f"Voice recognized: {text[:60]}")
+            # Auto-submit the recognized text
+            self.process_input(text)
+        else:
+            self.main_window.update_speech_bubble("未識別到語音，請再試一次")
+
     def _gui_confirm_handler(self, message: str, default_choice: str) -> bool:
         """GUI 模式下的確認處理器（線程安全）"""
+        # Bypass mode: auto-approve everything
+        if getattr(self.main_window, "is_bypass_mode", lambda: False)():
+            logger.info(f"[bypass] auto-approving: {message[:60]}")
+            return True
         logger.info(f"_gui_confirm_handler called: {message[:50]}...")
         result = self.main_window.show_confirm_dialog(message, default_choice)
         logger.info(f"_gui_confirm_handler returning: {result}")
@@ -1008,15 +1059,8 @@ class GUIAgentApp:
             return
 
         if user_input is None:
-            self.main_window.update_speech_bubble("Listening...")
-            user_input = self.voice_manager.recognize_speech()
-            if user_input:
-                logger.info(f"Speech recognized: {user_input}")
-            else:
-                self.main_window.update_speech_bubble(
-                    "No speech recognized. Try again."
-                )
-                return
+            # Legacy CLI voice path (GUI voice now goes through _on_voice_result)
+            return
 
         if user_input:
             self._reset_todo_snapshot()
@@ -1082,6 +1126,7 @@ class GUIAgentApp:
                 self.command_handler.update_last_prompt(user_input)
 
             # ── Retrieve any attachment from the input bar ─────────────────
+            _tmp_image_path: str = ""
             try:
                 attached_file = self.main_window.get_attached_file_path()
                 if attached_file:
@@ -1089,10 +1134,13 @@ class GUIAgentApp:
             except Exception:
                 pass
             try:
-                attached_image = self.main_window.get_attached_image_data()
-                if attached_image:
-                    # stored for agent to use; append note to prompt
-                    user_input = f"{user_input}\n\n[User attached an image for context]"
+                _tmp_image_path = self.main_window.pop_attached_image_as_tempfile()
+                if _tmp_image_path:
+                    user_input = (
+                        f"{user_input}\n\n"
+                        f"[User pasted an image. It has been saved to: {_tmp_image_path}]\n"
+                        f"Read or analyse this image file, then delete it when done."
+                    )
             except Exception:
                 pass
             # ──────────────────────────────────────────────────────────────
@@ -1155,6 +1203,19 @@ class GUIAgentApp:
             request_id = self.runtime.submit(user_input, self.chat_history)
             if request_id:
                 self._active_request_id = request_id
+            # Schedule temp image cleanup after agent finishes (fallback if agent didn't delete)
+            if _tmp_image_path:
+                def _cleanup_tmp(path=_tmp_image_path):
+                    import os, time
+                    time.sleep(30)  # wait 30s for agent to read it
+                    try:
+                        if os.path.exists(path):
+                            os.unlink(path)
+                            logger.debug(f"Cleaned up temp image: {path}")
+                    except Exception:
+                        pass
+                import threading
+                threading.Thread(target=_cleanup_tmp, daemon=True).start()
 
     def stop_current_request(self) -> None:
         """Cancel the current agent request (stop button handler)."""
