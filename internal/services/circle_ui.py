@@ -2777,6 +2777,21 @@ class MainWindow(QMainWindow):
         # keep reference so existing code that calls toolbar_widget.show/hide still works
         self.toolbar_widget = toolbar_row
 
+        # ── Compaction indicator (floating pill, hidden until compaction runs) ─
+        self._compact_label = QLabel("✂ 壓縮記憶中…", self)
+        self._compact_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._compact_label.setFixedHeight(22)
+        self._compact_label.setStyleSheet(
+            "QLabel { background: rgba(90, 60, 160, 210); color: #ddc8ff; "
+            "border: 1px solid rgba(180,140,255,120); border-radius: 11px; "
+            "font-size: 10px; padding: 0 10px; }"
+        )
+        self._compact_label.hide()
+        self._compact_pulse_timer = QTimer(self)
+        self._compact_pulse_timer.setInterval(500)
+        self._compact_pulse_timer.timeout.connect(self._pulse_compact_label)
+        self._compact_pulse_phase = 0
+
         # ── Collapse / Todo buttons (floating on parent) ──────────────────
         self.collapse_button = QPushButton("收合", self)
         self.collapse_button.setFixedSize(60, 22)
@@ -2959,6 +2974,15 @@ class MainWindow(QMainWindow):
         )
         self._position_collapse_button()
         self._position_todo_toggle_button()
+        self._position_compact_label()
+
+    def _position_compact_label(self) -> None:
+        lbl_w = max(140, self._compact_label.sizeHint().width() + 20)
+        lbl_h = 22
+        input_rect = self.input_container.geometry()
+        x = (self.FIXED_WIDTH - lbl_w) // 2
+        y = input_rect.y() - lbl_h - 6
+        self._compact_label.setGeometry(x, y, lbl_w, lbl_h)
 
     def _position_todo_toggle_button(self) -> None:
         btn_w = self.todo_toggle_button.width()
@@ -3500,6 +3524,34 @@ class MainWindow(QMainWindow):
         """停止 agent 運行動畫"""
         self.speech_bubble.stop_animation()
         self.edge_handle.set_active_glow(False)
+
+    def set_compact_indicator(self, active: bool) -> None:
+        """Show or hide the compaction-in-progress indicator."""
+        if active:
+            self._position_compact_label()
+            self._compact_label.show()
+            self._compact_label.raise_()
+            self._compact_pulse_phase = 0
+            self._compact_pulse_timer.start()
+        else:
+            self._compact_pulse_timer.stop()
+            self._compact_label.hide()
+
+    def _pulse_compact_label(self) -> None:
+        """Alternate label opacity to create a pulsing effect."""
+        self._compact_pulse_phase = 1 - self._compact_pulse_phase
+        if self._compact_pulse_phase:
+            self._compact_label.setStyleSheet(
+                "QLabel { background: rgba(110, 75, 190, 230); color: #eedeff; "
+                "border: 1px solid rgba(200,160,255,160); border-radius: 11px; "
+                "font-size: 10px; padding: 0 10px; }"
+            )
+        else:
+            self._compact_label.setStyleSheet(
+                "QLabel { background: rgba(70, 45, 130, 180); color: #c8aaee; "
+                "border: 1px solid rgba(160,120,220,90); border-radius: 11px; "
+                "font-size: 10px; padding: 0 10px; }"
+            )
     
     def _update_bubble_geometry(self):
         """更新氣泡幾何形狀（延遲調用以避免阻塞）"""

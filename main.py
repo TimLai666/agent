@@ -49,6 +49,7 @@ class AgentRuntime(QThread):
     result_ready = Signal(int, str, list)
     error_occurred = Signal(int, str)
     tool_event = Signal(object)
+    compaction_event = Signal(bool)  # True = started, False = finished
 
     def __init__(self, base_config, skill_root_dirs: list[Path] | None = None):
         super().__init__()
@@ -308,7 +309,14 @@ class AgentRuntime(QThread):
             self._conversation_state.fullMessages = messages
             self._conversation_state.totalTokens = recalc_total_tokens(messages)
             if self._compact_coordinator is not None:
+                tokens_before = self._conversation_state.totalTokens
+                self.compaction_event.emit(True)
                 self._conversation_state = await self._compact_coordinator.maybeCompact(self._conversation_state)
+                if self._conversation_state.totalTokens < tokens_before:
+                    # tokens decreased → compaction actually ran
+                    self.compaction_event.emit(False)
+                else:
+                    self.compaction_event.emit(False)
             updated_history = self._conversation_state.fullMessages
         return result_text, updated_history
 
@@ -485,6 +493,7 @@ class GUIAgentApp(QObject):
         self.runtime.chunk_ready.connect(self.handle_chunk, _Q)
         self.runtime.error_occurred.connect(self.handle_error, _Q)
         self.runtime.tool_event.connect(self.handle_tool_event, _Q)
+        self.runtime.compaction_event.connect(self.handle_compaction_event, _Q)
         self.runtime.start()
 
         self.main_window = MainWindow()
@@ -773,6 +782,12 @@ class GUIAgentApp(QObject):
             self._set_waiting_status("整理結果中...")
         self._request_display_update()
         self._reset_idle_timer()
+
+    def handle_compaction_event(self, started: bool) -> None:
+        try:
+            self.main_window.set_compact_indicator(started)
+        except Exception:
+            pass
 
     def _set_waiting_status(self, status: str) -> None:
         self._waiting_status = status
