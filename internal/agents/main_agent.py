@@ -643,7 +643,19 @@ class MainAgent:
             phase: str,
             items: list[dict[str, Any]],
         ) -> str:
-            """Update the current session todo list with strict validation for phase, id, title, and status."""
+            """Update the current session todo list with strict validation for phase, id, title, and status.
+
+            IMPORTANT: `items` must always contain the COMPLETE current todo list (all items with
+            their current statuses). Never call with an empty `items` list — that would erase all
+            progress. To mark a task complete, re-send all items with the relevant item's status
+            changed to 'completed'.
+            """
+            if not items:
+                # Calling with empty items would wipe the list — return current snapshot unchanged
+                current = self._todo_tool_snapshot
+                if current:
+                    return f"(no-op: items was empty — current list preserved)\n{current}"
+                return "(todo list is currently empty)"
             normalized_phase, normalized_items = self._normalize_todo_payload(
                 phase,
                 items,
@@ -654,7 +666,7 @@ class MainAgent:
         @self.agent.tool_plain
         def AskUserQuestion(
             question: str,
-            options: list[str] | None = None,
+            options: list | None = None,
         ) -> str:
             """Ask the user a clarifying question before proceeding.
 

@@ -427,6 +427,16 @@ class GUIAgentApp:
         self._typewriter_timer = QTimer()
         self._typewriter_timer.setSingleShot(True)
         self._typewriter_timer.timeout.connect(self._typewriter_tick)
+        # Watchdog: restart typewriter if it stalls with pending chars
+        self._typewriter_watchdog = QTimer()
+        self._typewriter_watchdog.setInterval(500)
+        self._typewriter_watchdog.timeout.connect(self._watchdog_kick_typewriter)
+        self._typewriter_watchdog.start()
+        # Tool HTML cache (avoid recomputing on every typewriter tick)
+        self._tool_events_html_cache: str = ""
+        self._tool_events_cache_dirty: bool = False
+        # Partial result saved when interrupted mid-stream
+        self._interrupted_partial: str = ""
         self._tags = (
             "<tool-execution>",
             "</tool-execution>",
@@ -466,6 +476,7 @@ class GUIAgentApp:
 
         self.main_window = MainWindow()
         self.main_window.set_input_callback(self.process_input)
+        self.main_window.set_stop_callback(self.stop_current_request)
         self.main_window.collapse_state_changed.connect(self._on_collapse_state_changed)
         # 當使用者在輸入框輸入時，重置閒置計時
         try:
@@ -493,6 +504,8 @@ class GUIAgentApp:
 
     def _reset_tool_log(self) -> None:
         self._tool_log_lines = []
+        self._tool_events_html_cache = ""
+        self._tool_events_cache_dirty = False
 
     def _reset_todo_snapshot(self) -> None:
         self._todo_snapshot_text = ""
@@ -568,10 +581,20 @@ class GUIAgentApp:
             )
         return ""
 
+    def _watchdog_kick_typewriter(self) -> None:
+        """Restart typewriter if it stalled with pending characters."""
+        if self._pending and not self._typewriter_active:
+            self._typewriter_active = True
+            self._typewriter_tick()
+
     def _render_tool_events_html(self) -> str:
-        """Render tool log lines as compact Claude Code-style HTML rows."""
+        """Render tool log lines as compact Claude Code-style HTML rows (cached)."""
         if not self._tool_log_lines:
+            self._tool_events_html_cache = ""
+            self._tool_events_cache_dirty = False
             return ""
+        if not self._tool_events_cache_dirty and self._tool_events_html_cache:
+            return self._tool_events_html_cache
         # Pair [>] start and [OK]/[ERR] together into single rows
         rows: list[str] = []
         pending_start: str = ""
@@ -616,15 +639,20 @@ class GUIAgentApp:
             )
 
         if not rows:
+            self._tool_events_html_cache = ""
+            self._tool_events_cache_dirty = False
             return ""
         inner = "\n".join(rows)
-        return (
+        result = (
             f'<div style="margin:0 0 6px 0;padding:4px 6px;'
             f'background:rgba(20,20,28,0.7);border-left:2px solid rgba(100,160,255,0.4);'
             f'border-radius:4px;">'
             f'{inner}'
             f'</div>'
         )
+        self._tool_events_html_cache = result
+        self._tool_events_cache_dirty = False
+        return result
 
     # ── Display composition ────────────────────────────────────────────────
 
@@ -672,6 +700,7 @@ class GUIAgentApp:
         self._tool_log_lines.append(line_text)
         if len(self._tool_log_lines) > 200:
             self._tool_log_lines = self._tool_log_lines[-200:]
+        self._tool_events_cache_dirty = True
         if line_text.startswith("[>] "):
             if "runAgentTask" in line_text:
                 self._set_waiting_status("委派子代理中...")
@@ -799,13 +828,24 @@ class GUIAgentApp:
             # 更新 GUI 歷史
             if self._last_user_input:
                 self._gui_history.append((self._last_user_input, output or ""))
+            # Update context meter
+            try:
+                from internal.compaction import MAX_CONTEXT_TOKENS
+                used = getattr(self.runtime._conversation_state, "totalTokens", 0) or 0
+                self.main_window.update_context_meter(used, MAX_CONTEXT_TOKENS)
+            except Exception:
+                pass
 
         self._waiting_response = False
         self._waiting_status = ""
+        self._interrupted_partial = ""
+        try:
+            self.main_window.set_running(False)
+        except Exception:
+            pass
         if self._auto_expand_on_result:
             self._expand_ui()
         self._reset_idle_timer()
-
 
     def handle_chunk(self, request_id, chunk):
         if request_id != self._active_request_id:
@@ -1037,9 +1077,31 @@ class GUIAgentApp:
             self._last_user_input = user_input
             if self.command_handler:
                 self.command_handler.update_last_prompt(user_input)
-            
-            logger.info(f"Processing input: {user_input}")
-            self.main_window.update_speech_bubble(f"You: {user_input}")
+
+            # ── Interrupt-with-progress ────────────────────────────────────
+            # If agent is mid-stream, save partial result and inject context
+            if self._waiting_response:
+                partial = (self._display_text or "").strip()
+                if partial:
+                    # Keep only a brief excerpt to avoid bloating context
+                    excerpt = partial[:400] + ("…" if len(partial) > 400 else "")
+                    self._interrupted_partial = partial
+                    user_input = (
+                        f"[Interrupt] User sent a new message while you were responding.\n"
+                        f"Your partial response so far (do not repeat it):\n"
+                        f"---\n{excerpt}\n---\n\n"
+                        f"New message from user: {user_input}\n\n"
+                        f"Decide: should you continue the original task (incorporating the new message), "
+                        f"pivot entirely, or address the new message first? Act accordingly."
+                    )
+                else:
+                    self._interrupted_partial = ""
+            else:
+                self._interrupted_partial = ""
+            # ──────────────────────────────────────────────────────────────
+
+            logger.info(f"Processing input: {user_input[:80]}...")
+            self.main_window.update_speech_bubble(f"You: {self._last_user_input}")
 
             # 啟動動畫並顯示等待狀態
             def start_waiting():
@@ -1059,9 +1121,36 @@ class GUIAgentApp:
             self._waiting_response = True
             self._waiting_status = "分析需求中..."
             self._idle_timer.stop()
+            # Update stop button state
+            try:
+                self.main_window.set_running(True)
+            except Exception:
+                pass
             request_id = self.runtime.submit(user_input, self.chat_history)
             if request_id:
                 self._active_request_id = request_id
+
+    def stop_current_request(self) -> None:
+        """Cancel the current agent request (stop button handler)."""
+        if not self._waiting_response:
+            return
+        try:
+            if self.runtime._current_future and not self.runtime._current_future.done():
+                self.runtime._current_future.cancel()
+        except Exception:
+            pass
+        self._waiting_response = False
+        self._waiting_status = ""
+        partial = (self._display_text or "").strip()
+        if partial:
+            self.main_window.update_speech_bubble(self._compose_display_text())
+        else:
+            self.main_window.update_speech_bubble("(stopped)")
+        self.main_window.stop_agent_animation()
+        try:
+            self.main_window.set_running(False)
+        except Exception:
+            pass
 
     def run(self):
         """Run GUI application."""
