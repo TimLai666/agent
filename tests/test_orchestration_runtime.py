@@ -2,30 +2,16 @@ import asyncio
 from types import SimpleNamespace
 
 from internal.agents.main_agent import MainAgent
-from internal.core.agents.agent_types import SpawnWorkerInput
 from internal.core.protocol.task_notification import parse_task_notification_xml
 from internal.core.tasks.completion_gate import decide_completion, needs_verification
 from internal.core.tasks.task_types import VerificationResult, WorkerResult
 from internal.services.subagent_tasks import AgentToolInput, BaseTask, SubagentTaskManager
 
 
-def _bind_main_coordinator_methods(fake_main: object) -> None:
+def _bind_main_methods(fake_main: object) -> None:
     method_names = [
-        "_build_planning_instruction",
         "coordinator_handle_user_turn",
         "coordinator_handle_user_turn_stream",
-        "_coordinator_make_or_update_plan",
-        "_coordinator_should_decompose_todos",
-        "_coordinator_extract_todo_steps",
-        "_coordinator_make_worker_title",
-        "_coordinator_build_worker_specs",
-        "_coordinator_spawn_worker",
-        "_coordinator_spawn_verification",
-        "_coordinator_find_task_notification",
-        "_coordinator_augment_context_with_failure",
-        "_coordinator_infer_task_kind",
-        "_coordinator_looks_like_direct_question",
-        "_coordinator_should_run_background",
     ]
     for method_name in method_names:
         method = getattr(MainAgent, method_name)
@@ -171,64 +157,26 @@ def test_retry_loop_has_max_attempts_and_fails():
     assert calls["verifier"] == 4
 
 
-def test_spawn_worker_falls_back_to_task_state_when_notification_missing():
-    async def fake_worker(task: BaseTask, prompt: str) -> str:
-        if task.subagentType == "verification":
-            return "VERDICT: PASS\n$ pytest -q\nall passed"
-        return "Implemented change\nEdited a.py\n$ pytest -q"
-
-    manager = SubagentTaskManager(fake_worker, lambda _xml: None)
-    main_agent = SimpleNamespace(
-        _task_manager=manager,
-        _session_id="s1",
-        _task_notifications=[],
-    )
-    _bind_main_coordinator_methods(main_agent)
-
-    worker_result = asyncio.run(
-        main_agent._coordinator_spawn_worker(
-            SpawnWorkerInput(
-                agentType="implementation",
-                title="impl-task",
-                instruction="implement the change",
-                runInBackground=False,
-                originalUserRequest="implement the change",
-            )
-        )
-    )
-
-    assert worker_result.status == "completed"
-    assert worker_result.taskId
-
-
-def test_coordinator_can_respond_immediately_with_background_worker():
+def test_coordinator_handle_user_turn_uses_execute_turn_core():
     async def scenario() -> None:
-        notifications: list[str] = []
+        main_agent = SimpleNamespace()
+        _bind_main_methods(main_agent)
 
-        async def fake_worker(task: BaseTask, prompt: str) -> str:
-            await asyncio.sleep(0.05)
-            if task.subagentType == "verification":
-                return "VERDICT: PASS\n$ pytest -q\nall passed"
-            return "Background work completed\nEdited a.py\n$ pytest -q"
+        async def fake_execute_turn_core(
+            prompt: str,
+            message_history=None,
+            skip_plan_execution=True,
+        ):
+            _ = message_history
+            _ = skip_plan_execution
+            return f"handled:{prompt}"
 
-        manager = SubagentTaskManager(fake_worker, notifications.append)
-        main_agent = SimpleNamespace(
-            _task_manager=manager,
-            _session_id="s1",
-            _task_notifications=[],
-            _execute_turn_core=None,
+        main_agent._execute_turn_core = fake_execute_turn_core
+
+        text = await main_agent.coordinator_handle_user_turn(
+            "please handle this in the background"
         )
-        _bind_main_coordinator_methods(main_agent)
-
-        text = await main_agent.coordinator_handle_user_turn("please handle this in the background")
-        assert "task_id:" in text
-        tasks = manager.listTasks("s1")
-        assert tasks
-        assert tasks[0]["status"] in {"pending", "running", "completed"}
-
-        await asyncio.sleep(0.12)
-        tasks_after = manager.listTasks("s1")
-        assert tasks_after[0]["status"] == "completed"
+        assert text == "handled:please handle this in the background"
 
     asyncio.run(scenario())
 
@@ -236,9 +184,13 @@ def test_coordinator_can_respond_immediately_with_background_worker():
 def test_coordinator_stream_has_no_progress_labels():
     async def scenario() -> None:
         main_agent = SimpleNamespace()
-        _bind_main_coordinator_methods(main_agent)
+        _bind_main_methods(main_agent)
 
-        async def fake_handle_user_turn(_prompt, message_history=None, on_todo_update=None):
+        async def fake_handle_user_turn(
+            _prompt,
+            message_history=None,
+            on_todo_update=None,
+        ):
             _ = message_history
             _ = on_todo_update
             return "final output"
@@ -255,80 +207,5 @@ def test_coordinator_stream_has_no_progress_labels():
         text = "".join(chunks)
         assert "[TODO]" not in text
         assert "final output" in text
-
-    asyncio.run(scenario())
-
-
-def test_planning_instruction_prioritizes_skills_and_tools():
-    main_agent = SimpleNamespace()
-    _bind_main_coordinator_methods(main_agent)
-    instruction = main_agent._build_planning_instruction("implement the feature")
-
-    assert "skills" in instruction.lower()
-    assert "tools" in instruction.lower()
-    assert "User request" in instruction
-
-
-def test_coordinator_plan_builds_single_worker_without_planner():
-    async def scenario() -> None:
-        main_agent = SimpleNamespace()
-        _bind_main_coordinator_methods(main_agent)
-        main_agent._build_planning_instruction = lambda user_request: f"plan:{user_request}"
-        main_agent._coordinator_should_run_background = lambda _prompt: False
-
-        plan = await main_agent._coordinator_make_or_update_plan(
-            SimpleNamespace(userRequest="fix bug", taskKind="bugfix")
-        )
-
-        assert plan.type == "spawn-worker"
-        assert plan.workerSpec is not None
-        assert plan.workerSpec.title == "fix bug"
-        assert plan.workerSpec.instruction == "plan:fix bug"
-        assert len(plan.workerSpecs) == 1
-
-    asyncio.run(scenario())
-
-
-def test_coordinator_plan_can_decompose_into_multiple_todos():
-    async def scenario() -> None:
-        main_agent = SimpleNamespace()
-        _bind_main_coordinator_methods(main_agent)
-        main_agent._build_planning_instruction = lambda user_request: f"plan:{user_request}"
-        main_agent._coordinator_should_run_background = lambda _prompt: False
-
-        plan = await main_agent._coordinator_make_or_update_plan(
-            SimpleNamespace(
-                userRequest="first inspect the logs, then fix the bug, finally add tests",
-                taskKind="research",
-            )
-        )
-
-        assert plan.type == "spawn-worker"
-        assert len(plan.workerSpecs) == 3
-        assert plan.workerSpecs[0].title == "inspect the logs"
-        assert "[Main agent todo list]" in plan.workerSpecs[0].instruction
-        assert "[Current todo]" in plan.workerSpecs[0].instruction
-
-    asyncio.run(scenario())
-
-
-def test_question_task_kind_always_answers_directly():
-    async def scenario() -> None:
-        main_agent = SimpleNamespace()
-        _bind_main_coordinator_methods(main_agent)
-
-        async def fake_execute_turn_core(prompt: str, message_history=None, skip_plan_execution=True):
-            _ = message_history
-            _ = skip_plan_execution
-            return f"direct:{prompt}"
-
-        main_agent._execute_turn_core = fake_execute_turn_core
-
-        plan = await main_agent._coordinator_make_or_update_plan(
-            SimpleNamespace(userRequest="what is this architecture?", taskKind="question")
-        )
-
-        assert plan.type == "answer-directly"
-        assert plan.finalAnswer.startswith("direct:")
 
     asyncio.run(scenario())

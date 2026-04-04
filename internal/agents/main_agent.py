@@ -46,13 +46,6 @@ from internal.skills_loader import SkillRegistry, load_skill_registry
 
 from internal.mcp_server_list import get_all_mcp_servers
 from internal.compaction import estimate_tokens, get_message_text, serialize_compaction_input
-from internal.core.agents.agent_types import SpawnVerificationInput, SpawnWorkerInput
-from internal.core.coordinator.coordinator_loop import (
-    CoordinatorPlan,
-    CoordinatorTurnContext,
-    run_coordinator_turn,
-)
-from internal.core.coordinator.result_synthesizer import synthesize_final_answer
 from internal.core.orchestration.runtime import OrchestrationRuntime
 from internal.core.orchestration.store import OrchestrationStore
 from internal.core.orchestration.types import (
@@ -64,13 +57,11 @@ from internal.core.orchestration.types import (
     VerificationEvidenceItem,
     VerificationReport,
 )
-from internal.core.protocol.task_notification import parse_task_notification_xml
 from internal.core.protocol.image_output_paths import (
     ImagePathStreamNormalizer,
     enforce_absolute_image_paths,
 )
 from internal.core.protocol.verdict_parser import parse_verification_verdict
-from internal.core.tasks.task_types import TaskUsage, VerificationResult, WorkerResult
 
 PROMPT_KEY = "MAIN_AGENT_PROMPT"
 ENV_PREFIX = "MAIN"
@@ -523,7 +514,26 @@ class MainAgent:
                 isolation=cast(Any, isolation or "none"),
                 model=model or None,
             )
-            return cast(dict[str, str], await self._task_manager.spawnAgentTask(payload, self._session_id))
+            created = await self._task_manager.spawnAgentTask(payload, self._session_id)
+            if run_in_background:
+                return cast(dict[str, str], created)
+
+            task_id = created.get("task_id", "")
+            task = self._task_manager.registry.getTask(task_id) if task_id else None
+            if task is None:
+                return cast(dict[str, str], created)
+
+            return {
+                "task_id": task.id,
+                "status": task.status,
+                "name": task.name or "",
+                "summary": task.summary or "",
+                "result": task.result or "",
+                "files_changed": "\n".join(task.filesChanged),
+                "commands_executed": "\n".join(task.commandsExecuted),
+                "evidence": "\n".join(task.evidence),
+                "unresolved_issues": "\n".join(task.unresolvedIssues),
+            }
 
         @self.agent.tool_plain
         def SendMessageTool(to: str, message: str) -> dict[str, str | bool]:
@@ -619,9 +629,12 @@ class MainAgent:
     def _inject_todo_snapshot(self, prompt: str) -> str:
         guidance = (
             "<active-session-todos>\n"
-            "Use the `todo` tool only when the request needs multiple steps or when blockers/progress change.\n"
+            "For multi-step work, you must manage the todo list yourself with the `todo` tool.\n"
             "Skip it for direct one-shot answers.\n"
+            "Do not copy the whole user request into a single todo item.\n"
+            "Each todo must be a concrete step you can actually execute.\n"
             "Keep the todo list short: usually 2-4 items.\n"
+            "Use `AgentTool` to delegate a specific todo step when subagent execution helps.\n"
         )
         if self._todo_tool_snapshot:
             return (
@@ -1009,16 +1022,6 @@ class MainAgent:
             "Do not provide only future-plan wording.\n"
         )
 
-    def _build_planning_instruction(self, user_request: str) -> str:
-        return (
-            "Planning policy:\n"
-            "1. 優先使用現有 skills 與已可用 tools 完成任務。\n"
-            "2. 只有在現有 skills/tools 無法滿足需求時，才改用替代方法。\n"
-            "3. 執行時請在結果中清楚說明使用了哪些 skills/tools。\n\n"
-            "User request:\n"
-            f"{user_request}"
-        )
-
     @staticmethod
     def _orchestration_default_contract(goal: str) -> OrchestrationStepContract:
         return OrchestrationStepContract(
@@ -1160,28 +1163,13 @@ class MainAgent:
 
         self._active_todo_update_callback = todo_callback
         try:
-            task_kind = self._coordinator_infer_task_kind(user_prompt)
             execute_turn = getattr(self, "_execute_turn_core", None)
-            if task_kind == "question" and callable(execute_turn):
-                return await execute_turn(
-                    user_prompt,
-                    message_history=message_history,
-                    skip_plan_execution=True,
-                )
-            ctx = CoordinatorTurnContext(
-                userRequest=user_prompt,
-                taskKind=task_kind,
-            )
-            return await run_coordinator_turn(
-                ctx,
-                make_or_update_plan=self._coordinator_make_or_update_plan,
-                spawn_worker=self._coordinator_spawn_worker,
-                spawn_verification_worker=self._coordinator_spawn_verification,
-                synthesize_final_answer=lambda context, worker, verification: synthesize_final_answer(
-                    worker, verification
-                ),
-                augment_context_with_failure=self._coordinator_augment_context_with_failure,
-                on_todo_update=todo_callback,
+            if not callable(execute_turn):
+                raise RuntimeError("Main agent execution core is unavailable")
+            return await execute_turn(
+                user_prompt,
+                message_history=message_history,
+                skip_plan_execution=True,
             )
         finally:
             self._active_todo_update_callback = None
@@ -1302,357 +1290,6 @@ class MainAgent:
             confidence=1.0 if verdict.verdict == "PASS" else 0.5,
             requiresUserInput=False,
         )
-
-    async def _coordinator_make_or_update_plan(self, ctx: CoordinatorTurnContext) -> CoordinatorPlan:
-        worker_type = "implementation" if ctx.taskKind in {"implementation", "bugfix", "infra"} else "research"
-
-        if self._coordinator_should_run_background(ctx.userRequest):
-            payload = AgentToolInput(
-                prompt=ctx.userRequest,
-                name=f"{worker_type}-task",
-                subagent_type=worker_type,
-                run_in_background=True,
-            )
-            created = await self._task_manager.spawnAgentTask(payload, self._session_id)
-            task_id = created.get("task_id", "")
-            return CoordinatorPlan(
-                type="answer-directly",
-                finalAnswer=(
-                    "已建立背景 subagent 任務，主流程先回覆你目前進度。\n"
-                    f"- task_id: {task_id}\n"
-                    f"- worker: {worker_type}\n"
-                    "可用 ListSubagentTasks 查狀態；完成後結果會在下一輪自動帶入。"
-                ),
-            )
-
-        execute_turn = getattr(self, "_execute_turn_core", None)
-        if ctx.taskKind == "question" and callable(execute_turn):
-            answer = await execute_turn(ctx.userRequest)
-            return CoordinatorPlan(type="answer-directly", finalAnswer=answer)
-
-        if (
-            ctx.taskKind == "research"
-            and self._coordinator_looks_like_direct_question(ctx.userRequest)
-            and callable(execute_turn)
-        ):
-            answer = await execute_turn(ctx.userRequest)
-            return CoordinatorPlan(type="answer-directly", finalAnswer=answer)
-
-        worker_specs = self._coordinator_build_worker_specs(
-            user_request=ctx.userRequest,
-            task_kind=ctx.taskKind,
-            worker_type=worker_type,
-        )
-
-        return CoordinatorPlan(
-            type="spawn-worker",
-            workerSpec=worker_specs[0],
-            workerSpecs=worker_specs,
-        )
-
-    def _coordinator_should_decompose_todos(
-        self,
-        *,
-        user_request: str,
-        task_kind: str,
-    ) -> bool:
-        lowered = user_request.lower().strip()
-        if task_kind == "question":
-            return False
-        if "[validation remediation]" in lowered:
-            return False
-        if self._coordinator_should_run_background(user_request):
-            return True
-        if len(user_request) >= 220:
-            return True
-        multi_step_markers = (
-            "\n-",
-            "\n*",
-            "\n1.",
-            "\n1)",
-            "step by step",
-            "first",
-            "then",
-            "finally",
-            "after that",
-            "before",
-            "multi-file",
-            "multiple files",
-            "refactor",
-            "rewrite",
-            "migration",
-            "先",
-            "再",
-            "然後",
-            "最後",
-            "逐步",
-            "重構",
-            "多檔",
-            "多個檔案",
-        )
-        return any(marker in lowered for marker in multi_step_markers)
-
-    def _coordinator_extract_todo_steps(self, user_request: str) -> list[str]:
-        bullet_steps: list[str] = []
-        for raw_line in user_request.splitlines():
-            line = raw_line.strip()
-            if not line:
-                continue
-            if re.match(r"^([-*]|\d+[.)])\s+", line):
-                bullet_steps.append(re.sub(r"^([-*]|\d+[.)])\s+", "", line).strip())
-        if bullet_steps:
-            return bullet_steps[:4]
-
-        parts = [
-            part.strip()
-            for part in re.split(r"[，,；;。]\s*", user_request)
-            if part.strip()
-        ]
-        sequenced = [
-            re.sub(
-                r"^(先|再|然後|最後|first|then|finally|after that|next)\s+",
-                "",
-                part,
-                flags=re.IGNORECASE,
-            ).strip()
-            for part in parts
-            if re.match(
-                r"^(先|再|然後|最後|first|then|finally|after that|next)",
-                part,
-                flags=re.IGNORECASE,
-            )
-        ]
-        if len(sequenced) >= 2:
-            return sequenced[:4]
-
-        return []
-
-    def _coordinator_make_worker_title(self, user_request: str, worker_type: str) -> str:
-        title = user_request.strip()
-        title = re.sub(r"\s+", " ", title)
-        title = re.sub(
-            r"^(please|can you|could you|help me|let'?s|pls)\s+",
-            "",
-            title,
-            flags=re.IGNORECASE,
-        )
-        title = re.sub(
-            r"^(請|幫我|幫忙|請你|麻煩你|我想要)\s*",
-            "",
-            title,
-        )
-        parts = [part.strip() for part in re.split(r"[\n，,；;。!?！？]", title) if part.strip()]
-        if parts:
-            title = parts[0]
-        title = title[:64].strip(" -:：")
-        return title or f"{worker_type}-task"
-
-    def _coordinator_build_worker_specs(
-        self,
-        *,
-        user_request: str,
-        task_kind: str,
-        worker_type: str,
-    ) -> list[SpawnWorkerInput]:
-        base_instruction = self._build_planning_instruction(user_request)
-        if not self._coordinator_should_decompose_todos(
-            user_request=user_request,
-            task_kind=task_kind,
-        ):
-            return [
-                SpawnWorkerInput(
-                    agentType=worker_type,
-                    title=self._coordinator_make_worker_title(user_request, worker_type),
-                    originalUserRequest=user_request,
-                    instruction=base_instruction,
-                    runInBackground=False,
-                )
-            ]
-
-        todo_steps = self._coordinator_extract_todo_steps(user_request)
-        if len(todo_steps) < 2:
-            return [
-                SpawnWorkerInput(
-                    agentType=worker_type,
-                    title=self._coordinator_make_worker_title(user_request, worker_type),
-                    originalUserRequest=user_request,
-                    instruction=base_instruction,
-                    runInBackground=False,
-                )
-            ]
-
-        todo_list = "\n".join(f"{index + 1}. {step}" for index, step in enumerate(todo_steps))
-        specs: list[SpawnWorkerInput] = []
-        for index, step in enumerate(todo_steps[:4], start=1):
-            title = step[:64].strip() or f"{worker_type}-task-{index}"
-            specs.append(
-                SpawnWorkerInput(
-                    agentType=worker_type,
-                    title=title,
-                    originalUserRequest=user_request,
-                    instruction=(
-                        f"{base_instruction}\n\n"
-                        "[Main agent todo list]\n"
-                        f"{todo_list}\n\n"
-                        "[Current todo]\n"
-                        f"{step}"
-                    ),
-                    runInBackground=False,
-                )
-            )
-        return specs
-
-    async def _coordinator_spawn_worker(self, spec: SpawnWorkerInput) -> WorkerResult:
-        subagent_type = spec.agentType if spec.agentType != "general-purpose" else ""
-        payload = AgentToolInput(
-            prompt=spec.instruction,
-            name=spec.title,
-            subagent_type=subagent_type,
-            run_in_background=False,
-            model=spec.model,
-        )
-        created = await self._task_manager.spawnAgentTask(payload, self._session_id)
-        task = self._task_manager.registry.getTask(created["task_id"])
-        if task is None:
-            raise RuntimeError("Task not found after worker completion")
-
-        notification = self._coordinator_find_task_notification(task.id)
-        if notification:
-            parsed = parse_task_notification_xml(notification)
-            parsed.evidence = list(task.evidence)
-            parsed.unresolvedIssues = list(task.unresolvedIssues)
-            return parsed
-
-        status = task.status if task.status in {"completed", "failed", "killed"} else "failed"
-        return WorkerResult(
-            taskId=task.id,
-            status=status,
-            summary=task.summary or "",
-            result=task.result or "",
-            filesChanged=list(task.filesChanged),
-            commandsExecuted=list(task.commandsExecuted),
-            evidence=list(task.evidence),
-            unresolvedIssues=list(task.unresolvedIssues),
-            usage=TaskUsage(durationMs=task.durationMs),
-        )
-
-    def _coordinator_find_task_notification(self, task_id: str) -> str | None:
-        notifications = getattr(self, "_task_notifications", []) or []
-        for notification in reversed(notifications):
-            try:
-                parsed = parse_task_notification_xml(notification)
-            except Exception:
-                continue
-            if parsed.taskId == task_id:
-                return notification
-        return None
-
-    async def _coordinator_spawn_verification(self, input_data: SpawnVerificationInput) -> VerificationResult:
-        verification_task = SimpleNamespace(subagentType="verification", mode="spawn")
-        prompt = (
-            "ORIGINAL USER REQUEST:\n"
-            f"{input_data.originalUserRequest}\n\n"
-            "WORKER SUMMARY:\n"
-            f"{input_data.workerResult.summary}\n\n"
-            "FILES CHANGED:\n"
-            + "\n".join(input_data.filesChanged)
-            + "\n\n"
-            "COMMANDS ALREADY RUN:\n"
-            + "\n".join(input_data.workerResult.commandsExecuted)
-            + "\n\n"
-            "CLAIMS TO VERIFY:\n"
-            + input_data.workerResult.result
-        )
-        output = await self._run_subagent_task(verification_task, prompt)
-        return parse_verification_verdict(output, task_id=input_data.workerResult.taskId)
-
-    def _coordinator_augment_context_with_failure(
-        self,
-        ctx: CoordinatorTurnContext,
-        worker: WorkerResult,
-        verification: VerificationResult | None,
-    ) -> CoordinatorTurnContext:
-        details = [ctx.userRequest, worker.summary]
-        if verification:
-            details.append(f"verification={verification.verdict}")
-            if verification.suspectedProblems:
-                details.extend(verification.suspectedProblems)
-        return CoordinatorTurnContext(
-            userRequest="\n".join(details),
-            taskKind="implementation",
-        )
-
-    def _coordinator_infer_task_kind(self, prompt: str) -> str:
-        lowered = prompt.lower().strip()
-        greeting_prefixes = (
-            "hello",
-            "hi",
-            "hey",
-            "hello there",
-            "good morning",
-            "good afternoon",
-            "good evening",
-            "yo",
-            "嗨",
-            "哈囉",
-            "你好",
-            "早安",
-            "午安",
-            "晚安",
-        )
-        if any(lowered.startswith(token) for token in greeting_prefixes):
-            return "question"
-        if any(token in lowered for token in ["fix", "bug", "修", "錯誤"]):
-            return "bugfix"
-        if any(token in lowered for token in ["implement", "build", "新增", "實作", "重構"]):
-            return "implementation"
-        if any(token in lowered for token in ["infra", "deploy", "ci", "cd", "k8s"]):
-            return "infra"
-        if any(token in lowered for token in ["research", "investigate", "分析", "找"]):
-            return "research"
-        return "question"
-
-    def _coordinator_looks_like_direct_question(self, prompt: str) -> bool:
-        lowered = prompt.lower().strip()
-        greeting_prefixes = (
-            "hello",
-            "hi",
-            "hey",
-            "hello there",
-            "good morning",
-            "good afternoon",
-            "good evening",
-            "yo",
-            "嗨",
-            "哈囉",
-            "你好",
-            "早安",
-            "午安",
-            "晚安",
-        )
-        if any(lowered.startswith(token) for token in greeting_prefixes):
-            return True
-        if "can you explain" in lowered or "tell me about" in lowered:
-            return True
-        if lowered.endswith("?") or lowered.endswith("？"):
-            return True
-        direct_tokens = ["是什麼", "what is", "how does", "怎麼"]
-        return any(token in lowered for token in direct_tokens)
-
-    def _coordinator_should_run_background(self, prompt: str) -> bool:
-        lowered = prompt.lower()
-        hints = [
-            "背景",
-            "background",
-            "先回覆",
-            "先回答",
-            "稍後給我",
-            "不要等",
-            "不用等",
-            "asynchronous",
-            "async",
-        ]
-        return any(hint in lowered for hint in hints)
 
     async def run(
         self,

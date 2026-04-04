@@ -79,6 +79,6 @@ def test_todo_snapshot_is_injected_into_prompt():
     prompt = main._inject_todo_snapshot("User request here")
 
     assert "<active-session-todos>" in prompt
-    assert "Use the `todo` tool" in prompt
+    assert "manage the todo list yourself with the `todo` tool" in prompt
     assert "Inspect logs" in prompt
     assert prompt.endswith("User request here")

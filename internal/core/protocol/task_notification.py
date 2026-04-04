@@ -27,16 +27,10 @@ def to_task_notification_xml(
     worktree: str | None = None,
     worktree_branch: str | None = None,
 ) -> str:
-    files_xml = "\n".join(f"    <file>{escape(path)}</file>" for path in worker.filesChanged)
-    commands_xml = "\n".join(
-        f"    <command>{escape(command)}</command>" for command in worker.commandsExecuted
-    )
-    tool_use_xml = f"  <tool-use-id>{escape(tool_use_id)}</tool-use-id>\n" if tool_use_id else ""
-    output_file_xml = f"  <output_file>{escape(output_file)}</output_file>\n" if output_file else ""
-    worktree_xml = f"  <worktree>{escape(worktree)}</worktree>\n" if worktree else ""
-    worktree_branch_xml = (
-        f"  <worktree-branch>{escape(worktree_branch)}</worktree-branch>\n" if worktree_branch else ""
-    )
+    _ = tool_use_id
+    _ = output_file
+    _ = worktree
+    _ = worktree_branch
 
     return (
         "<task-notification>\n"
@@ -44,17 +38,7 @@ def to_task_notification_xml(
         f"  <status>{escape(worker.status)}</status>\n"
         f"  <summary>{escape(worker.summary)}</summary>\n"
         f"  <result>{escape(worker.result)}</result>\n"
-        f"{output_file_xml}"
-        f"{worktree_xml}"
-        f"{worktree_branch_xml}"
-        "  <files-changed>\n"
-        f"{files_xml}\n"
-        "  </files-changed>\n"
-        "  <commands-executed>\n"
-        f"{commands_xml}\n"
-        "  </commands-executed>\n"
         f"{_usage_xml(worker.usage, total_tokens, tool_uses)}\n"
-        f"{tool_use_xml}"
         "</task-notification>"
     )
 
