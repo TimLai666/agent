@@ -690,16 +690,21 @@ class MainAgent:
             question: str,
             options: str = "",
         ) -> str:
-            """Ask the user a clarifying question before proceeding.
+            """向使用者提問，等待回答後再繼續執行。
 
-            Use this tool when you need the user's input to resolve ambiguity, choose a direction,
-            or confirm an approach — especially when the right answer cannot be inferred from context.
+            **何時使用**：任何需要使用者輸入才能繼續的情況都應使用此工具，包括：
+            - 目標或範圍不明確（例如找到多個候選檔案、路徑不確定）
+            - 有多種有效做法，選擇取決於使用者偏好
+            - 即將執行不可逆操作（刪除、覆寫、發送）
+            - 需要使用者提供具體資訊（名稱、格式、路徑等）
 
-            `options`: comma-separated list of concise choice labels (e.g. "Option A, Option B, Cancel").
-            The GUI renders each option as a clickable button. Leave empty for open-ended text input.
+            **`options`**：逗號分隔的選項文字（例如 "Word, PDF, Markdown"）。
+            GUI 會將每個選項渲染成可點擊按鈕；留空則顯示自由輸入框。
 
-            Do NOT use this tool for routine confirmations already handled by the permission system.
-            Do NOT use it to ask questions you could answer yourself by reading the codebase.
+            **多個問題**：若需要多項資訊且問題彼此獨立，請在單一 `question` 中以編號列出所有問題，
+            減少對使用者的打擾。只有當第二個問題的答案依賴第一個問題時，才分成多次呼叫。
+
+            **不要**用此工具做已由權限系統處理的例行確認，也不要問你自己查一下就能回答的問題。
             """
             try:
                 opts = [o.strip() for o in options.split(",") if o.strip()] if options else []
