@@ -666,10 +666,10 @@ class GUIAgentApp(QObject):
         logger.info(f"_gui_confirm_handler returning: {result}")
         return result
 
-    def _gui_question_handler(self, question: str, options: list[str]) -> str:
+    def _gui_question_handler(self, question: str, options: list[str], multi: bool = False) -> str:
         """GUI 模式下的問題選單處理器（線程安全）"""
         logger.info(f"_gui_question_handler called: {question[:50]}...")
-        result = self._active_ui.show_question_dialog(question, options)
+        result = self._active_ui.show_question_dialog(question, options, multi)
         logger.info(f"_gui_question_handler returning: {result!r}")
         if result and result != "(no answer — user dismissed the dialog)":
             if self._current_mode != "chat":

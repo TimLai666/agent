@@ -689,6 +689,7 @@ class MainAgent:
         def AskUserQuestion(
             question: str,
             options: str = "",
+            multi: bool = False,
         ) -> str:
             """向使用者提問，等待回答後再繼續執行。
 
@@ -699,7 +700,11 @@ class MainAgent:
             - 需要使用者提供具體資訊（名稱、格式、路徑等）
 
             **`options`**：逗號分隔的選項文字（例如 "Word, PDF, Markdown"）。
-            GUI 會將每個選項渲染成可點擊按鈕；留空則顯示自由輸入框。
+            GUI 會將每個選項渲染成可點擊按鈕或勾選框；留空則顯示自由輸入框。
+            無論單選或多選，GUI 都會額外提供「自訂輸入」讓使用者填寫任意答案。
+
+            **`multi`**：設為 true 時顯示多選勾選框（允許同時選多項），
+            回傳值為以逗號分隔的所有已選項目。預設為 false（單選）。
 
             **多個問題**：若需要多項資訊且問題彼此獨立，請在單一 `question` 中以編號列出所有問題，
             減少對使用者的打擾。只有當第二個問題的答案依賴第一個問題時，才分成多次呼叫。
@@ -709,7 +714,7 @@ class MainAgent:
             try:
                 opts = [o.strip() for o in options.split(",") if o.strip()] if options else []
                 from internal.cli import ask_user_question
-                result = ask_user_question(question, opts)
+                result = ask_user_question(question, opts, multi=multi)
                 return result if result else "(no answer — user dismissed the dialog)"
             except Exception as exc:
                 logger.warning("AskUserQuestion encountered an error: %s", exc)

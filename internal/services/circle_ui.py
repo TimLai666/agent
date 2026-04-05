@@ -268,6 +268,7 @@ def _make_stop_icon(size: int = 28) -> QIcon:
     return QIcon(px)
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QCompleter,
     QDialog,
     QDialogButtonBox,
@@ -2556,7 +2557,7 @@ class MainWindow(QMainWindow):
     # 信号：请求显示确认对话框
     confirm_requested = Signal(str, str, object)  # message, default_choice, result_container
     # 信号：请求显示问题选单对话框
-    question_requested = Signal(str, list, object)  # question, options, result_container
+    question_requested = Signal(str, list, bool, object)  # question, options, multi, result_container
     # 切換到聊天模式
     switch_to_chat = Signal()
     collapse_state_changed = Signal(bool)
@@ -2944,12 +2945,12 @@ class MainWindow(QMainWindow):
         logger.info(f"[工作线程] Dialog closed, returning: {result_container.result}")
         return result_container.result
 
-    @Slot(str, list, object)
-    def _handle_question_request(self, question: str, options: list, result_container: object):
+    @Slot(str, list, bool, object)
+    def _handle_question_request(self, question: str, options: list, multi: bool, result_container: object):
         """槽函數：在主線程中處理問題選單請求"""
         try:
             logger.info(f"[主线程] Creating ChoiceDialog for: {question[:50]}...")
-            dialog = ChoiceDialog(question, options, parent=self)
+            dialog = ChoiceDialog(question, options, multi=multi, parent=self)
             result_container.result = dialog.get_result()
             logger.info(f"[主线程] ChoiceDialog result: {result_container.result!r}")
         except Exception as e:
@@ -2957,7 +2958,7 @@ class MainWindow(QMainWindow):
         finally:
             result_container.done.set()
 
-    def show_question_dialog(self, question: str, options: list[str]) -> str:
+    def show_question_dialog(self, question: str, options: list[str], multi: bool = False) -> str:
         """顯示問題選單對話框（線程安全）— 使用 threading.Event 等待，相容 asyncio 線程"""
         import threading
         logger.info(f"[工作线程] show_question_dialog called: {question[:50]}...")
@@ -2968,7 +2969,7 @@ class MainWindow(QMainWindow):
                 self.done = threading.Event()
 
         result_container = ResultContainer()
-        self.question_requested.emit(question, options, result_container)
+        self.question_requested.emit(question, options, multi, result_container)
         result_container.done.wait(timeout=300)
         logger.info(f"[工作线程] ChoiceDialog closed, returning: {result_container.result!r}")
         return result_container.result
@@ -3630,15 +3631,51 @@ class MainWindow(QMainWindow):
 class _InlineQuestionBubble(QFrame):
     """Left-aligned inline question bubble shown in chat mode for AskUserQuestion.
 
-    The bubble remains in the chat log after the user answers, showing the
-    selected option as a permanent record.
+    Supports single-choice (default) and multi-choice modes.
+    Both modes include a custom free-text input option.
+    The bubble remains in the chat log after the user answers.
     """
-    answered = Signal(str)  # emitted (in main thread) when user picks an option
+    answered = Signal(str)  # emitted (in main thread) when user picks/submits
 
-    def __init__(self, question: str, options: list[str], parent=None):
+    _BTN_STYLE = (
+        "QPushButton {"
+        "background: rgba(50,80,160,180); color: #c0d8ff;"
+        "border: 1px solid rgba(100,150,255,100); border-radius: 8px;"
+        "padding: 6px 14px; font-size: 12px; text-align: left;"
+        "}"
+        "QPushButton:hover { background: rgba(70,110,200,210); color: #d8eaff; }"
+        "QPushButton:disabled {"
+        "background: rgba(30,40,60,100); color: rgba(120,140,180,100);"
+        "border-color: rgba(60,80,120,50);"
+        "}"
+    )
+    _CONFIRM_BTN_STYLE = (
+        "QPushButton {"
+        "background: rgba(0,100,200,200); color: #fff;"
+        "border: none; border-radius: 8px;"
+        "padding: 6px 18px; font-size: 12px;"
+        "}"
+        "QPushButton:hover { background: rgba(0,120,240,220); }"
+        "QPushButton:disabled { background: rgba(30,40,60,100); color: rgba(120,140,180,100); }"
+    )
+    _CB_STYLE = (
+        "QCheckBox { color: #c0d8ff; font-size: 12px; background: transparent; spacing: 6px; }"
+        "QCheckBox::indicator { width: 16px; height: 16px; border-radius: 4px;"
+        "border: 1px solid rgba(100,150,255,100); background: rgba(30,50,100,180); }"
+        "QCheckBox::indicator:checked { background: rgba(0,120,220,200);"
+        "border-color: rgba(80,160,255,180); }"
+        "QCheckBox:disabled { color: rgba(120,140,180,100); }"
+    )
+
+    def __init__(self, question: str, options: list[str], multi: bool = False, parent=None):
         super().__init__(parent)
         self._done = False
+        self._multi = multi
         self._option_btns: list[QPushButton] = []
+        self._checkboxes: list[QCheckBox] = []
+        self._custom_input: QLineEdit | None = None
+        self._custom_cb: QCheckBox | None = None
+        self._confirm_btn: QPushButton | None = None
 
         outer = QHBoxLayout(self)
         outer.setContentsMargins(8, 4, 60, 4)
@@ -3659,11 +3696,12 @@ class _InlineQuestionBubble(QFrame):
         card_vbox.setSpacing(8)
 
         # Question label
+        header_text = "☑️ 請選擇（可多選）" if multi else "❓ 請選擇"
         q_lbl = QLabel()
         q_lbl.setTextFormat(Qt.TextFormat.RichText)
         q_lbl.setWordWrap(True)
         q_lbl.setText(
-            '<span style="color:#38c8d8;font-size:11px;">❓ 請選擇</span><br>'
+            f'<span style="color:#38c8d8;font-size:11px;">{header_text}</span><br>'
             + html.escape(question).replace("\n", "<br>")
         )
         q_lbl.setStyleSheet(
@@ -3671,25 +3709,74 @@ class _InlineQuestionBubble(QFrame):
         )
         card_vbox.addWidget(q_lbl)
 
-        # Option buttons
-        _btn_style = (
-            "QPushButton {"
-            "background: rgba(50,80,160,180); color: #c0d8ff;"
-            "border: 1px solid rgba(100,150,255,100); border-radius: 8px;"
-            "padding: 6px 14px; font-size: 12px; text-align: left;"
-            "}"
-            "QPushButton:hover { background: rgba(70,110,200,210); color: #d8eaff; }"
-            "QPushButton:disabled {"
-            "background: rgba(30,40,60,100); color: rgba(120,140,180,100);"
-            "border-color: rgba(60,80,120,50);"
-            "}"
-        )
-        for opt in options:
-            btn = QPushButton(opt)
-            btn.setStyleSheet(_btn_style)
-            btn.clicked.connect(lambda _checked, o=opt: self._select(o))
-            card_vbox.addWidget(btn)
-            self._option_btns.append(btn)
+        if multi:
+            # ── Multi-select: checkboxes ───────────────────────────────
+            for opt in options:
+                cb = QCheckBox(opt)
+                cb.setStyleSheet(self._CB_STYLE)
+                card_vbox.addWidget(cb)
+                self._checkboxes.append(cb)
+
+            # Custom input checkbox + line edit
+            self._custom_cb = QCheckBox("✏️ 自訂輸入…")
+            self._custom_cb.setStyleSheet(self._CB_STYLE)
+            card_vbox.addWidget(self._custom_cb)
+
+            self._custom_input = QLineEdit()
+            self._custom_input.setPlaceholderText("請輸入自訂答案…")
+            self._custom_input.setStyleSheet(
+                "QLineEdit { background: rgba(30,45,90,200); color: #d8e8ff;"
+                "border: 1px solid rgba(100,150,255,80); border-radius: 6px;"
+                "padding: 4px 8px; font-size: 12px; }"
+                "QLineEdit:focus { border-color: rgba(80,160,255,180); }"
+                "QLineEdit:disabled { background: rgba(20,28,55,100); color: rgba(120,140,180,100); }"
+            )
+            self._custom_input.setEnabled(False)
+            self._custom_input.hide()
+            card_vbox.addWidget(self._custom_input)
+            self._custom_cb.toggled.connect(self._on_custom_cb_toggled)
+
+            # Confirm button
+            self._confirm_btn = QPushButton("✓ 確認")
+            self._confirm_btn.setStyleSheet(self._CONFIRM_BTN_STYLE)
+            self._confirm_btn.clicked.connect(self._submit_multi)
+            card_vbox.addWidget(self._confirm_btn, 0, Qt.AlignmentFlag.AlignRight)
+
+        else:
+            # ── Single-select: buttons ─────────────────────────────────
+            for opt in options:
+                btn = QPushButton(opt)
+                btn.setStyleSheet(self._BTN_STYLE)
+                btn.clicked.connect(lambda _checked, o=opt: self._select(o))
+                card_vbox.addWidget(btn)
+                self._option_btns.append(btn)
+
+            # Custom input button
+            custom_btn = QPushButton("✏️ 自訂輸入…")
+            custom_btn.setStyleSheet(self._BTN_STYLE)
+            custom_btn.clicked.connect(self._show_custom_input)
+            card_vbox.addWidget(custom_btn)
+            self._option_btns.append(custom_btn)
+
+            # Hidden custom input row
+            self._custom_input = QLineEdit()
+            self._custom_input.setPlaceholderText("請輸入自訂答案…")
+            self._custom_input.setStyleSheet(
+                "QLineEdit { background: rgba(30,45,90,200); color: #d8e8ff;"
+                "border: 1px solid rgba(100,150,255,80); border-radius: 6px;"
+                "padding: 4px 8px; font-size: 12px; }"
+                "QLineEdit:focus { border-color: rgba(80,160,255,180); }"
+            )
+            self._custom_input.returnPressed.connect(self._submit_custom)
+            self._custom_input.hide()
+
+            self._confirm_btn = QPushButton("✓ 確認")
+            self._confirm_btn.setStyleSheet(self._CONFIRM_BTN_STYLE)
+            self._confirm_btn.clicked.connect(self._submit_custom)
+            self._confirm_btn.hide()
+
+            card_vbox.addWidget(self._custom_input)
+            card_vbox.addWidget(self._confirm_btn, 0, Qt.AlignmentFlag.AlignRight)
 
         # Answer label (hidden until answered)
         self._answer_lbl = QLabel()
@@ -3701,10 +3788,26 @@ class _InlineQuestionBubble(QFrame):
 
         outer.addWidget(card, 1)
 
+    # ── single-select helpers ──────────────────────────────────────────────
+
+    def _show_custom_input(self) -> None:
+        if self._done:
+            return
+        for btn in self._option_btns:
+            btn.hide()
+        self._custom_input.show()
+        self._confirm_btn.show()
+        self._custom_input.setFocus()
+
+    def _submit_custom(self) -> None:
+        text = (self._custom_input.text() or "").strip()
+        if not text:
+            return
+        self._finish(text)
+
     def _select(self, option: str) -> None:
         if self._done:
             return
-        self._done = True
         for btn in self._option_btns:
             btn.setEnabled(False)
             if btn.text() == option:
@@ -3715,9 +3818,46 @@ class _InlineQuestionBubble(QFrame):
                     "border-color: rgba(80,200,120,120);"
                     "}"
                 )
-        self._answer_lbl.setText(f"✓ 已選擇：{option}")
+        self._finish(option)
+
+    # ── multi-select helpers ───────────────────────────────────────────────
+
+    def _on_custom_cb_toggled(self, checked: bool) -> None:
+        self._custom_input.setEnabled(checked)
+        if checked:
+            self._custom_input.show()
+            self._custom_input.setFocus()
+        else:
+            self._custom_input.hide()
+
+    def _submit_multi(self) -> None:
+        if self._done:
+            return
+        selected = [cb.text() for cb in self._checkboxes if cb.isChecked()]
+        if self._custom_cb and self._custom_cb.isChecked():
+            custom_text = (self._custom_input.text() or "").strip() if self._custom_input else ""
+            if custom_text:
+                selected.append(custom_text)
+        if not selected:
+            return
+        # Disable all controls
+        for cb in self._checkboxes:
+            cb.setEnabled(False)
+        if self._custom_cb:
+            self._custom_cb.setEnabled(False)
+        if self._custom_input:
+            self._custom_input.setEnabled(False)
+        if self._confirm_btn:
+            self._confirm_btn.setEnabled(False)
+        self._finish(", ".join(selected))
+
+    # ── common ────────────────────────────────────────────────────────────
+
+    def _finish(self, result: str) -> None:
+        self._done = True
+        self._answer_lbl.setText(f"✓ 已選擇：{result}")
         self._answer_lbl.show()
-        self.answered.emit(option)
+        self.answered.emit(result)
 
 
 class _InlineConfirmBubble(QFrame):
@@ -4170,7 +4310,7 @@ class _MemoryViewerDialog(QDialog):
     def __init__(self, fname: str, label: str, content: str, parent=None):
         super().__init__(parent)
         self.setWindowTitle(f"記憶檔案 — {label}")
-        self.resize(560, 420)
+        self.resize(720, 380)
         self.setStyleSheet(
             "QDialog { background: rgb(18,20,30); }"
             "QTextBrowser { background: rgb(22,24,36); border: 1px solid rgba(255,255,255,18); "
@@ -4217,7 +4357,7 @@ class ChatWindow(QMainWindow):
 
     # Thread-safe dialog signals (same pattern as MainWindow)
     confirm_requested = Signal(str, str, object)
-    question_requested = Signal(str, list, object)
+    question_requested = Signal(str, list, bool, object)  # question, options, multi, result_container
 
     _CHIP_STYLE = (
         "QLabel { background: rgba(45,55,80,200); color: #a8d4ff; "
@@ -4446,6 +4586,7 @@ class ChatWindow(QMainWindow):
             label = _FILE_LABELS.get(fname, fname)
             dlg = _MemoryViewerDialog(fname, label, content, parent=self)
             dlg.exec()
+            self._mem_list.clearSelection()
         except Exception as exc:
             logger.warning(f"Open memory file failed: {exc}")
 
@@ -5173,8 +5314,8 @@ class ChatWindow(QMainWindow):
         rc.done.wait(timeout=300)
         return rc.result
 
-    @Slot(str, list, object)
-    def _handle_question_request(self, question: str, options: list, result_container: object) -> None:
+    @Slot(str, list, bool, object)
+    def _handle_question_request(self, question: str, options: list, multi: bool, result_container: object) -> None:
         """In chat mode: insert an inline question bubble instead of a popup dialog.
 
         We do NOT call result_container.done.set() here — the bubble's `answered`
@@ -5182,7 +5323,7 @@ class ChatWindow(QMainWindow):
         until a choice is made.
         """
         try:
-            bubble = _InlineQuestionBubble(question, list(options))
+            bubble = _InlineQuestionBubble(question, list(options), multi=multi)
 
             def _on_answered(option: str) -> None:
                 result_container.result = option
@@ -5202,7 +5343,7 @@ class ChatWindow(QMainWindow):
             logger.error(f"ChatWindow inline question error: {exc}", exc_info=True)
             result_container.done.set()  # unblock on error
 
-    def show_question_dialog(self, question: str, options: list[str]) -> str:
+    def show_question_dialog(self, question: str, options: list[str], multi: bool = False) -> str:
         import threading
 
         class ResultContainer:
@@ -5211,7 +5352,7 @@ class ChatWindow(QMainWindow):
                 self.done = threading.Event()
 
         rc = ResultContainer()
-        self.question_requested.emit(question, options, rc)
+        self.question_requested.emit(question, options, multi, rc)
         rc.done.wait(timeout=300)
         return rc.result
 
@@ -5277,13 +5418,37 @@ class ChoiceDialog(QDialog):
         }
     """
 
-    def __init__(self, question: str, options: list[str], parent=None):
+    _INPUT_STYLE = (
+        "QLineEdit { "
+        "background: rgba(50,52,65,220); color: #e8eaf0; "
+        "border: 1px solid rgba(255,255,255,50); border-radius: 8px; "
+        "padding: 8px 12px; font-size: 13px; "
+        "}"
+        "QLineEdit:focus { border-color: rgba(80,150,255,180); }"
+        "QLineEdit:disabled { background: rgba(30,35,48,180); color: rgba(140,150,170,120); }"
+    )
+    _CB_STYLE = (
+        "QCheckBox { color: #dde8f8; font-size: 13px; spacing: 8px; }"
+        "QCheckBox::indicator { width: 18px; height: 18px; border-radius: 5px;"
+        "border: 1px solid rgba(255,255,255,40); background: rgba(58,58,68,220); }"
+        "QCheckBox::indicator:checked { background: rgba(0,112,240,200);"
+        "border-color: rgba(80,160,255,180); }"
+        "QCheckBox:disabled { color: rgba(140,150,170,120); }"
+    )
+
+    def __init__(self, question: str, options: list[str], multi: bool = False, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Agent 問題")
         self.setModal(True)
         self.setMinimumWidth(440)
         self.setStyleSheet(self._STYLE)
         self._selected: str = ""
+        self._multi = multi
+        self._checkboxes: list[QCheckBox] = []
+        self._custom_cb: QCheckBox | None = None
+        self._text_input: QLineEdit | None = None
+        self._option_btns: list[QPushButton] = []
+        self._custom_input: QLineEdit | None = None
 
         layout = QVBoxLayout(self)
         layout.setSpacing(10)
@@ -5292,7 +5457,8 @@ class ChoiceDialog(QDialog):
         # Header: icon + question text
         header = QHBoxLayout()
         header.setSpacing(10)
-        icon = QLabel("❓")
+        icon_char = "☑️" if multi else "❓"
+        icon = QLabel(icon_char)
         icon.setObjectName("icon")
         icon.setFixedWidth(30)
         icon.setAlignment(Qt.AlignmentFlag.AlignTop)
@@ -5311,55 +5477,143 @@ class ChoiceDialog(QDialog):
         layout.addWidget(sep)
         layout.addSpacing(2)
 
-        # Option buttons OR free-text input
-        if options:
-            for opt in options:
-                btn = QPushButton(f"  {opt}")
-                btn.setObjectName("option")
-                btn.setCursor(Qt.CursorShape.PointingHandCursor)
-                btn.clicked.connect(lambda _checked, o=opt: self._select(o))
-                layout.addWidget(btn)
-        else:
-            # Open-ended: show a text input field + confirm button
+        if not options:
+            # Open-ended: free-text input + confirm
             self._text_input = QLineEdit()
             self._text_input.setPlaceholderText("請輸入回覆…")
-            self._text_input.setStyleSheet(
-                "QLineEdit { "
-                "background: rgba(50,52,65,220); "
-                "color: #e8eaf0; "
-                "border: 1px solid rgba(255,255,255,50); "
-                "border-radius: 8px; "
-                "padding: 8px 12px; "
-                "font-size: 13px; "
-                "}"
-                "QLineEdit:focus { border-color: rgba(80,150,255,180); }"
-            )
+            self._text_input.setStyleSheet(self._INPUT_STYLE)
             self._text_input.returnPressed.connect(self._submit_text)
             layout.addWidget(self._text_input)
             layout.addSpacing(4)
-
             confirm_btn = QPushButton("確認")
             confirm_btn.setObjectName("option")
             confirm_btn.setCursor(Qt.CursorShape.PointingHandCursor)
             confirm_btn.setStyleSheet(
-                "QPushButton { "
-                "background: rgba(0,100,220,200); color: #fff; "
-                "border: none; border-radius: 9px; "
-                "padding: 10px 16px; font-size: 13px; "
-                "}"
+                "QPushButton { background: rgba(0,100,220,200); color: #fff; "
+                "border: none; border-radius: 9px; padding: 10px 16px; font-size: 13px; }"
                 "QPushButton:hover { background: rgba(0,120,255,220); }"
             )
             confirm_btn.clicked.connect(self._submit_text)
             layout.addWidget(confirm_btn)
             QTimer.singleShot(0, self._text_input.setFocus)
 
-    def _submit_text(self) -> None:
-        text = self._text_input.text().strip() if hasattr(self, "_text_input") else ""
+        elif multi:
+            # ── Multi-select: checkboxes ──────────────────────────────
+            for opt in options:
+                cb = QCheckBox(f"  {opt}")
+                cb.setStyleSheet(self._CB_STYLE)
+                cb.setCursor(Qt.CursorShape.PointingHandCursor)
+                layout.addWidget(cb)
+                self._checkboxes.append(cb)
+
+            # Custom input checkbox
+            self._custom_cb = QCheckBox("  ✏️ 自訂輸入…")
+            self._custom_cb.setStyleSheet(self._CB_STYLE)
+            self._custom_cb.setCursor(Qt.CursorShape.PointingHandCursor)
+            layout.addWidget(self._custom_cb)
+
+            self._custom_input = QLineEdit()
+            self._custom_input.setPlaceholderText("請輸入自訂答案…")
+            self._custom_input.setStyleSheet(self._INPUT_STYLE)
+            self._custom_input.setEnabled(False)
+            layout.addWidget(self._custom_input)
+            self._custom_cb.toggled.connect(
+                lambda checked: (
+                    self._custom_input.setEnabled(checked),
+                    self._custom_input.setFocus() if checked else None,
+                )
+            )
+
+            layout.addSpacing(4)
+            confirm_btn = QPushButton("✓ 確認選擇")
+            confirm_btn.setObjectName("option")
+            confirm_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            confirm_btn.setStyleSheet(
+                "QPushButton { background: rgba(0,100,220,200); color: #fff; "
+                "border: none; border-radius: 9px; padding: 10px 16px; font-size: 13px; }"
+                "QPushButton:hover { background: rgba(0,120,255,220); }"
+            )
+            confirm_btn.clicked.connect(self._submit_multi)
+            layout.addWidget(confirm_btn)
+
+        else:
+            # ── Single-select: option buttons ─────────────────────────
+            for opt in options:
+                btn = QPushButton(f"  {opt}")
+                btn.setObjectName("option")
+                btn.setCursor(Qt.CursorShape.PointingHandCursor)
+                btn.clicked.connect(lambda _checked, o=opt: self._select(o))
+                layout.addWidget(btn)
+                self._option_btns.append(btn)
+
+            # Custom input button (expands inline)
+            custom_btn = QPushButton("  ✏️ 自訂輸入…")
+            custom_btn.setObjectName("option")
+            custom_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            custom_btn.clicked.connect(self._show_custom_input)
+            layout.addWidget(custom_btn)
+            self._option_btns.append(custom_btn)
+
+            self._custom_input = QLineEdit()
+            self._custom_input.setPlaceholderText("請輸入自訂答案…")
+            self._custom_input.setStyleSheet(self._INPUT_STYLE)
+            self._custom_input.returnPressed.connect(self._submit_custom)
+            self._custom_input.hide()
+            layout.addWidget(self._custom_input)
+
+            confirm_custom_btn = QPushButton("✓ 確認")
+            confirm_custom_btn.setObjectName("option")
+            confirm_custom_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            confirm_custom_btn.setStyleSheet(
+                "QPushButton { background: rgba(0,100,220,200); color: #fff; "
+                "border: none; border-radius: 9px; padding: 10px 16px; font-size: 13px; }"
+                "QPushButton:hover { background: rgba(0,120,255,220); }"
+            )
+            confirm_custom_btn.clicked.connect(self._submit_custom)
+            confirm_custom_btn.hide()
+            layout.addWidget(confirm_custom_btn)
+            self._confirm_custom_btn = confirm_custom_btn
+
+    # ── single-select helpers ──────────────────────────────────────────────
+
+    def _show_custom_input(self) -> None:
+        for btn in self._option_btns:
+            btn.hide()
+        if self._custom_input:
+            self._custom_input.show()
+            self._custom_input.setFocus()
+        if hasattr(self, "_confirm_custom_btn"):
+            self._confirm_custom_btn.show()
+
+    def _submit_custom(self) -> None:
+        text = (self._custom_input.text() or "").strip() if self._custom_input else ""
+        if not text:
+            return
         self._selected = text
         self.accept()
 
     def _select(self, option: str) -> None:
         self._selected = option
+        self.accept()
+
+    # ── multi-select helpers ───────────────────────────────────────────────
+
+    def _submit_multi(self) -> None:
+        selected = [cb.text().lstrip() for cb in self._checkboxes if cb.isChecked()]
+        if self._custom_cb and self._custom_cb.isChecked() and self._custom_input:
+            custom_text = self._custom_input.text().strip()
+            if custom_text:
+                selected.append(custom_text)
+        if not selected:
+            return
+        self._selected = ", ".join(selected)
+        self.accept()
+
+    # ── open-ended helpers ─────────────────────────────────────────────────
+
+    def _submit_text(self) -> None:
+        text = self._text_input.text().strip() if self._text_input else ""
+        self._selected = text
         self.accept()
 
     def get_result(self) -> str:
