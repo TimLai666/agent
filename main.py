@@ -1103,6 +1103,11 @@ class GUIAgentApp(QObject):
             else:
                 final_text = self._compose_display_text()
             self._active_ui.update_speech_bubble(final_text)
+            # Cancel any pending throttled updates so the timer can't fire
+            # after set_running(False) clears _live_agent_bubble, which would
+            # create a duplicate bubble.
+            self._pending_display_update = False
+            self._update_throttle_timer.stop()
             # 停止動畫，表示 agent 已完成
             self._active_ui.stop_agent_animation()
         logger.info(f"AI Response: {output[:100]}...")
@@ -1489,6 +1494,8 @@ class GUIAgentApp(QObject):
             )
         self._waiting_response = False
         self._waiting_status = ""
+        self._pending_display_update = False
+        self._update_throttle_timer.stop()
         if partial:
             if self._current_mode == "chat":
                 self._active_ui.update_speech_bubble(partial)

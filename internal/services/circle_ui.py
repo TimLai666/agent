@@ -4112,7 +4112,7 @@ class _AgentBubble(QFrame):
         self._stream_browser.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self._stack.addWidget(self._stream_browser)
 
-        # ── Phase 2: full SiriResponseBubble (hidden until finalized) ──
+        # ── Phase 2a: full SiriResponseBubble (hidden until finalized) ──
         self._full_bubble = SiriResponseBubble()
         self._full_bubble.setStyleSheet(
             "SiriResponseBubble { background: transparent; border: none; }"
@@ -4123,6 +4123,9 @@ class _AgentBubble(QFrame):
         self._full_bubble.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self._full_bubble.hide()
         self._stack.addWidget(self._full_bubble)
+
+        # ── Phase 2b: WebView for rich content (math / charts) ────────
+        self._rich_view: QWebEngineView | None = None  # created lazily
 
         # ── Tool log (compact, shown above text, hidden until events arrive) ──
         self._tool_lines: list[str] = []
@@ -4260,12 +4263,60 @@ class _AgentBubble(QFrame):
     # ── Final render phase ─────────────────────────────────────────────
 
     def set_content(self, text: str) -> None:
-        """Full render — switch to SiriResponseBubble. Called once on completion."""
+        """Full render — switch to SiriResponseBubble or rich WebView. Called once on completion."""
         self._finalized = True
         self._stream_browser.hide()
+
+        try:
+            from internal.services.rich_render import has_rich_content, build_rich_html
+            if HAS_WEBENGINE and has_rich_content(text):
+                self._render_rich(text)
+                return
+        except Exception:
+            pass  # fall through to normal rendering
+
         self._full_bubble.set_content(text)
         self._full_bubble.show()
         QTimer.singleShot(80, self._resize_full)
+
+    def _render_rich(self, text: str) -> None:
+        """Render math/chart content via QWebEngineView."""
+        from internal.services.rich_render import build_rich_html
+
+        if self._rich_view is None:
+            self._rich_view = QWebEngineView()
+            self._rich_view.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+            self._rich_view.setMinimumHeight(100)
+            self._rich_view.page().setBackgroundColor(QColor(0, 0, 0, 0))
+            self._rich_view.setStyleSheet("background: transparent;")
+            self._stack.addWidget(self._rich_view)
+
+        html_content = build_rich_html(text)
+        self._rich_view.setHtml(html_content)
+        self._rich_view.show()
+
+        # Resize after page loads by polling page content height
+        self._rich_view.loadFinished.connect(self._resize_rich)
+
+    def _resize_rich(self) -> None:
+        """Adjust WebView height to fit content after page load."""
+        if self._rich_view is None:
+            return
+
+        def _apply_height(h):
+            try:
+                target = max(80, int(h) + 20)
+                self._rich_view.setMinimumHeight(target)
+                self._rich_view.setMaximumHeight(target)
+            except Exception:
+                pass
+
+        try:
+            self._rich_view.page().runJavaScript(
+                "document.body.scrollHeight", _apply_height
+            )
+        except Exception:
+            pass
 
     def _resize_full(self) -> None:
         try:
