@@ -2553,6 +2553,8 @@ class MainWindow(QMainWindow):
     confirm_requested = Signal(str, str, object)  # message, default_choice, result_container
     # 信号：请求显示问题选单对话框
     question_requested = Signal(str, list, object)  # question, options, result_container
+    # 切換到聊天模式
+    switch_to_chat = Signal()
     collapse_state_changed = Signal(bool)
     # 當使用者正在編輯輸入框（鍵入文字）時發出
     typing = Signal()
@@ -2770,6 +2772,14 @@ class MainWindow(QMainWindow):
         self._bypass_btn.setStyleSheet(_tbtn)
         self._bypass_btn.clicked.connect(self._on_bypass_toggled)
         toolbar_layout.addWidget(self._bypass_btn)
+
+        # Chat mode switch button
+        self._chat_switch_btn = QPushButton("💬")
+        self._chat_switch_btn.setToolTip("切換到聊天介面")
+        self._chat_switch_btn.setFixedSize(22, 20)
+        self._chat_switch_btn.setStyleSheet(_tbtn)
+        self._chat_switch_btn.clicked.connect(self.switch_to_chat.emit)
+        toolbar_layout.addWidget(self._chat_switch_btn)
 
         card_vbox.addWidget(toolbar_row)
         outer_vbox.addWidget(self._input_card)
@@ -3607,6 +3617,892 @@ class MainWindow(QMainWindow):
             self._update_window_mask()
         except Exception as e:
             logger.error(f"Bubble geometry update error: {e}")
+
+
+# ─────────────────────���───────────────────────────────────────────────────────
+# ChatWindow — chat-style interface that can switch with the circle mode
+# ─────────────────────────────────────────────────────────────────────────────
+
+class _UserBubble(QFrame):
+    """Right-aligned user message bubble."""
+    def __init__(self, text: str, parent=None):
+        super().__init__(parent)
+        row = QHBoxLayout(self)
+        row.setContentsMargins(60, 2, 8, 2)
+        row.setSpacing(0)
+        row.addStretch(1)
+        label = QLabel()
+        label.setTextFormat(Qt.TextFormat.RichText)
+        label.setWordWrap(True)
+        label.setText(html.escape(text).replace("\n", "<br>"))
+        label.setStyleSheet(
+            "QLabel {"
+            "background: rgba(40,78,160,220);"
+            "color: #e8f0ff;"
+            "border-radius: 14px;"
+            "padding: 8px 12px;"
+            "font-size: 13px;"
+            "}"
+        )
+        label.setMaximumWidth(460)
+        row.addWidget(label)
+
+
+class _AgentBubble(QFrame):
+    """Left-aligned agent message bubble (uses SiriResponseBubble for rendering)."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        row = QHBoxLayout(self)
+        row.setContentsMargins(8, 2, 60, 2)
+        row.setSpacing(0)
+        self._bubble = SiriResponseBubble()
+        self._bubble.setStyleSheet(
+            "SiriResponseBubble {"
+            "background-color: rgba(26,30,46,210);"
+            "border: 1px solid rgba(255,255,255,20);"
+            "border-radius: 14px;"
+            "}"
+            "QTextBrowser { background: transparent; border: none; }"
+            "QTextBrowser::viewport { padding: 0px; margin: 0px; border: none; }"
+        )
+        # Disable internal scrollbar; bubble expands to full content height
+        self._bubble.scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._bubble.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self._bubble.setMinimumWidth(180)
+        # stretch=1 so the bubble claims all available width, not the spacer
+        row.addWidget(self._bubble, 1)
+        # Deferred resize so Qt has laid out children before we measure
+        QTimer.singleShot(0, self._resize_to_content)
+
+    def set_content(self, text: str) -> None:
+        self._bubble.set_content(text)
+        QTimer.singleShot(60, self._resize_to_content)
+
+    def _resize_to_content(self) -> None:
+        try:
+            QApplication.processEvents()
+            h = self._bubble.content_height()
+            target = max(54, h + 28)
+            self._bubble.setMinimumHeight(target)
+            self._bubble.setMaximumHeight(target)
+        except Exception:
+            pass
+
+    def start_animation(self) -> None:
+        self._bubble.start_animation()
+
+    def stop_animation(self) -> None:
+        self._bubble.stop_animation()
+
+
+class ChatWindow(QMainWindow):
+    """Chat-style interface — full conversation history, same features as circle mode."""
+
+    switch_to_circle = Signal()   # emitted when user clicks "切換圓圈"
+    typing = Signal()             # API compat with MainWindow
+    collapse_state_changed = Signal(bool)  # API compat (always emits False)
+
+    # Thread-safe dialog signals (same pattern as MainWindow)
+    confirm_requested = Signal(str, str, object)
+    question_requested = Signal(str, list, object)
+
+    _CHIP_STYLE = (
+        "QLabel { background: rgba(45,55,80,200); color: #a8d4ff; "
+        "border: 1px solid rgba(90,140,220,100); border-radius: 8px; "
+        "padding: 2px 8px; font-size: 11px; }"
+    )
+    _CHIP_CLOSE_STYLE = (
+        "QPushButton { background: transparent; color: rgba(160,170,200,160); "
+        "border: none; font-size: 9px; padding: 0; } "
+        "QPushButton:hover { color: #ff6b6b; }"
+    )
+
+    def __init__(self):
+        super().__init__(None)
+        self.setWindowTitle("AI Assistant — Chat")
+        self.resize(680, 860)
+        self.setWindowFlags(Qt.WindowType.Window)
+        self.setStyleSheet("QMainWindow { background: rgb(16,18,26); }")
+
+        # ── Internal state ─────────────────���──────────────────────────────
+        self._bypass_mode: bool = False
+        self._bypass_callback = None
+        self._stop_callback = None
+        self._voice_callback = None
+        self._input_callback = None
+        self._is_running: bool = False
+        self._attached_file_path: str = ""
+        self._attached_images: list[bytes] = []
+        self._voice_active: bool = False
+        self.config_webview_window = None
+
+        # Live exchange tracking
+        self._live_user_bubble: _UserBubble | None = None
+        self._live_agent_bubble: _AgentBubble | None = None
+        self._live_user_text: str = ""
+        self._live_agent_text: str = ""
+
+        # Build UI
+        self._build_ui()
+
+        # Thread-safe dialogs
+        self.confirm_requested.connect(self._handle_confirm_request)
+        self.question_requested.connect(self._handle_question_request)
+
+    # ── UI construction ───────────────────────────────────────────────────
+
+    def _build_ui(self) -> None:
+        central = QWidget()
+        central.setStyleSheet("background: rgb(16,18,26);")
+        self.setCentralWidget(central)
+        vbox = QVBoxLayout(central)
+        vbox.setContentsMargins(0, 0, 0, 0)
+        vbox.setSpacing(0)
+
+        # Top bar
+        top_bar = self._build_top_bar()
+        vbox.addWidget(top_bar)
+
+        # Separator
+        sep = QWidget()
+        sep.setFixedHeight(1)
+        sep.setStyleSheet("background: rgba(255,255,255,12);")
+        vbox.addWidget(sep)
+
+        # Chat scroll area
+        self._scroll = QScrollArea()
+        self._scroll.setWidgetResizable(True)
+        self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._scroll.setStyleSheet(
+            "QScrollArea { background: rgb(16,18,26); border: none; }"
+            "QScrollBar:vertical { width: 6px; background: transparent; }"
+            "QScrollBar::handle:vertical { background: rgba(100,120,180,90); border-radius: 3px; }"
+            "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; }"
+        )
+        self._chat_container = QWidget()
+        self._chat_container.setStyleSheet("background: transparent;")
+        self._chat_layout = QVBoxLayout(self._chat_container)
+        self._chat_layout.setContentsMargins(12, 16, 12, 16)
+        self._chat_layout.setSpacing(12)
+        self._chat_layout.addStretch(1)   # keeps messages pushed to top
+        self._scroll.setWidget(self._chat_container)
+        vbox.addWidget(self._scroll, 1)
+
+        # Input area
+        sep2 = QWidget()
+        sep2.setFixedHeight(1)
+        sep2.setStyleSheet("background: rgba(255,255,255,12);")
+        vbox.addWidget(sep2)
+        self._build_input_area(vbox)
+
+    def _build_top_bar(self) -> QWidget:
+        bar = QWidget()
+        bar.setFixedHeight(42)
+        bar.setStyleSheet("background: rgb(20,22,32);")
+        h = QHBoxLayout(bar)
+        h.setContentsMargins(14, 0, 10, 0)
+        h.setSpacing(8)
+
+        title = QLabel("AI Assistant")
+        title.setStyleSheet("color: #c0d0f0; font-size: 14px; font-weight: bold;")
+        h.addWidget(title)
+        h.addStretch(1)
+
+        # Compact indicator
+        self._compact_label = QLabel("✂ 壓縮記憶中…")
+        self._compact_label.setFixedHeight(22)
+        self._compact_label.setStyleSheet(
+            "QLabel { background: rgba(90,60,160,210); color: #ddc8ff; "
+            "border: 1px solid rgba(180,140,255,120); border-radius: 11px; "
+            "font-size: 10px; padding: 0 10px; }"
+        )
+        self._compact_label.hide()
+        self._compact_pulse_timer = QTimer(self)
+        self._compact_pulse_timer.setInterval(500)
+        self._compact_pulse_timer.timeout.connect(self._pulse_compact_label)
+        self._compact_pulse_phase = 0
+        h.addWidget(self._compact_label)
+
+        switch_btn = QPushButton("⭕ 切換圓圈")
+        switch_btn.setFixedHeight(28)
+        switch_btn.setStyleSheet(
+            "QPushButton { background: rgba(40,55,85,200); color: #90b0e0; "
+            "border: 1px solid rgba(90,130,200,80); border-radius: 8px; "
+            "font-size: 11px; padding: 0 12px; }"
+            "QPushButton:hover { background: rgba(55,75,115,230); color: #b0d0f8; }"
+        )
+        switch_btn.clicked.connect(self.switch_to_circle.emit)
+        h.addWidget(switch_btn)
+        return bar
+
+    def _build_input_area(self, parent_layout: QVBoxLayout) -> None:
+        wrapper = QWidget()
+        wrapper.setStyleSheet("background: rgb(20,22,32);")
+        wrapper_vbox = QVBoxLayout(wrapper)
+        wrapper_vbox.setContentsMargins(10, 8, 10, 10)
+        wrapper_vbox.setSpacing(0)
+
+        # Unified card
+        card = QWidget()
+        card.setObjectName("ChatInputCard")
+        card.setStyleSheet(
+            "#ChatInputCard {"
+            "background: rgba(28,30,38,230);"
+            "border: 1px solid rgba(255,255,255,35);"
+            "border-radius: 18px;"
+            "}"
+        )
+        card_vbox = QVBoxLayout(card)
+        card_vbox.setContentsMargins(8, 6, 8, 6)
+        card_vbox.setSpacing(4)
+
+        # Chip row
+        self._attach_row = QWidget()
+        self._attach_row.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self._attach_chips_layout = QHBoxLayout(self._attach_row)
+        self._attach_chips_layout.setContentsMargins(2, 0, 2, 0)
+        self._attach_chips_layout.setSpacing(5)
+        self._attach_chips_layout.addStretch(1)
+        self._attach_row.setFixedHeight(26)
+        self._attach_row.hide()
+        card_vbox.addWidget(self._attach_row)
+
+        # Input row
+        input_row_w = QWidget()
+        input_row_w.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        input_row = QHBoxLayout(input_row_w)
+        input_row.setContentsMargins(0, 0, 0, 0)
+        input_row.setSpacing(4)
+
+        self._voice_btn_idle_style = (
+            "QPushButton { background: transparent; color: rgba(200,200,220,190); "
+            "border: none; font-size: 14px; border-radius: 14px; }"
+            "QPushButton:hover { background: rgba(255,255,255,12); }"
+        )
+        self._voice_btn_cancel_style = (
+            "QPushButton { background: rgba(180,40,40,200); color: #fff; "
+            "border: none; font-size: 13px; border-radius: 14px; }"
+            "QPushButton:hover { background: rgba(210,55,55,230); }"
+        )
+
+        self.voice_button = QPushButton("🎤")
+        self.voice_button.setFixedSize(28, 28)
+        self.voice_button.setStyleSheet(self._voice_btn_idle_style)
+        self.voice_button.clicked.connect(self.on_voice_requested)
+
+        self.input_field = CommandLineEdit()
+        self.input_field.setPlaceholderText("輸入文字、指令或按🎤啟動語音...")
+        self.input_field.setStyleSheet(
+            "QLineEdit { background: transparent; color: #e8eaf0; "
+            "border: none; padding: 2px 4px; font-size: 12px; }"
+        )
+        self.input_field.returnPressed.connect(self.on_input_submitted)
+        try:
+            self.input_field.textEdited.connect(self._handle_user_typing)
+        except Exception:
+            self.input_field.textChanged.connect(self._handle_user_typing)
+
+        self._waveform = WaveformWidget()
+        self._waveform.hide()
+
+        self._send_btn_send_style = (
+            "QPushButton { background: #2FBF71; color: #fff; border: none; "
+            "border-radius: 12px; font-weight: bold; font-size: 12px; }"
+            "QPushButton:hover { background: #28A862; }"
+        )
+        self._send_btn_stop_style = (
+            "QPushButton { background: rgba(210,55,55,220); color: #fff; border: none; "
+            "border-radius: 12px; font-size: 11px; padding: 0 0 1px 0; }"
+            "QPushButton:hover { background: rgba(230,70,70,240); }"
+        )
+
+        self.send_button = QPushButton("發送")
+        self.send_button.setFixedSize(52, 28)
+        self.send_button.setStyleSheet(self._send_btn_send_style)
+        self.send_button.clicked.connect(self.on_input_submitted)
+
+        input_row.addWidget(self.voice_button)
+        input_row.addWidget(self.input_field, 1)
+        input_row.addWidget(self._waveform, 1)
+        input_row.addWidget(self.send_button)
+        card_vbox.addWidget(input_row_w)
+
+        # Separator
+        sep = QWidget()
+        sep.setFixedHeight(1)
+        sep.setStyleSheet("QWidget { background: rgba(255,255,255,18); border: none; }")
+        card_vbox.addWidget(sep)
+
+        # Toolbar row
+        _tbtn = (
+            "QPushButton { background: transparent; color: rgba(150,165,185,160); "
+            "border: none; font-size: 12px; padding: 0 4px; border-radius: 4px; } "
+            "QPushButton:hover { color: rgba(210,225,255,220); background: rgba(255,255,255,8); }"
+        )
+        _tlbl = "QLabel { color: rgba(140,158,180,150); font-size: 10px; background: transparent; }"
+
+        toolbar_row = QWidget()
+        toolbar_row.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        toolbar_layout = QHBoxLayout(toolbar_row)
+        toolbar_layout.setContentsMargins(2, 0, 2, 0)
+        toolbar_layout.setSpacing(2)
+
+        attach_btn = QPushButton("＋")
+        attach_btn.setToolTip("附加檔案")
+        attach_btn.setFixedSize(22, 20)
+        attach_btn.setStyleSheet(_tbtn)
+        attach_btn.clicked.connect(self._on_attach_file)
+        toolbar_layout.addWidget(attach_btn)
+
+        slash_btn = QPushButton("／")
+        slash_btn.setToolTip("插入 /指令")
+        slash_btn.setFixedSize(22, 20)
+        slash_btn.setStyleSheet(_tbtn)
+        slash_btn.clicked.connect(self._on_slash_shortcut)
+        toolbar_layout.addWidget(slash_btn)
+
+        self._total_tok_label = QLabel("Σ —")
+        self._total_tok_label.setStyleSheet(_tlbl)
+        self._total_tok_label.setToolTip("本次對話累計消耗 token 數")
+        toolbar_layout.addWidget(self._total_tok_label)
+
+        self._ctx_label = QLabel("ctx —")
+        self._ctx_label.setStyleSheet(_tlbl)
+        self._ctx_label.setToolTip("目前 context 窗口用量 / 最大值")
+        toolbar_layout.addWidget(self._ctx_label)
+
+        toolbar_layout.addStretch(1)
+
+        self._bypass_btn = QPushButton("🔒")
+        self._bypass_btn.setToolTip("全開模式：自動允許所有工具執行（再按恢復）")
+        self._bypass_btn.setFixedSize(22, 20)
+        self._bypass_btn.setCheckable(True)
+        self._bypass_btn.setStyleSheet(_tbtn)
+        self._bypass_btn.clicked.connect(self._on_bypass_toggled)
+        toolbar_layout.addWidget(self._bypass_btn)
+
+        card_vbox.addWidget(toolbar_row)
+        wrapper_vbox.addWidget(card)
+        parent_layout.addWidget(wrapper)
+
+    # ── Public API (same interface as MainWindow) ─────────────────────────
+
+    def set_input_callback(self, callback) -> None:
+        self._input_callback = callback
+
+    def set_stop_callback(self, callback) -> None:
+        self._stop_callback = callback
+
+    def set_bypass_callback(self, callback) -> None:
+        self._bypass_callback = callback
+
+    def set_voice_callback(self, cb) -> None:
+        self._voice_callback = cb
+
+    def show_input_container(self) -> None:
+        pass  # input is always visible in chat mode
+
+    def is_bypass_mode(self) -> bool:
+        return self._bypass_mode
+
+    def collapse_to_edge(self) -> None:
+        pass  # no-op for chat window
+
+    def expand_from_edge(self) -> None:
+        pass  # no-op for chat window
+
+    # ── update_speech_bubble: maps circle-mode text to chat bubbles ───────
+
+    def update_speech_bubble(self, text: str) -> None:
+        """Route circle-mode text updates to chat bubbles.
+
+        "You: xxx"        → create/update user bubble (user echo line)
+        "You: xxx\\n\\nyyy" → user bubble + status hint
+        anything else     → update/create live agent bubble
+        """
+        if not isinstance(text, str):
+            return
+
+        if text.startswith("You: "):
+            # Extract user message part (may have "\n\nstatus" appended)
+            body = text[5:]
+            if "\n\n" in body:
+                user_msg = body[: body.index("\n\n")]
+            else:
+                user_msg = body
+            if user_msg and user_msg != self._live_user_text:
+                self._live_user_text = user_msg
+                self._ensure_live_user_bubble(user_msg)
+        else:
+            # Agent response content (streaming or final)
+            if text and text != self._live_agent_text:
+                self._live_agent_text = text
+                self._ensure_live_agent_bubble()
+                if self._live_agent_bubble:
+                    self._live_agent_bubble.set_content(text)
+                    self._scroll_to_bottom()
+
+    def _ensure_live_user_bubble(self, user_msg: str) -> None:
+        """Create or update the live user bubble at the bottom of the chat."""
+        if self._live_user_bubble is None:
+            self._live_user_bubble = _UserBubble(user_msg)
+            # Insert before the last stretch item
+            count = self._chat_layout.count()
+            self._chat_layout.insertWidget(count - 1, self._live_user_bubble)
+            self._scroll_to_bottom()
+        else:
+            # Update text inside existing bubble
+            label = self._live_user_bubble.findChild(QLabel)
+            if label:
+                label.setText(html.escape(user_msg).replace("\n", "<br>"))
+
+    def _ensure_live_agent_bubble(self) -> None:
+        """Create the live agent bubble if it doesn't exist yet."""
+        if self._live_agent_bubble is None:
+            self._live_agent_bubble = _AgentBubble()
+            count = self._chat_layout.count()
+            self._chat_layout.insertWidget(count - 1, self._live_agent_bubble)
+
+    def start_agent_animation(self) -> None:
+        self._ensure_live_agent_bubble()
+        if self._live_agent_bubble:
+            self._live_agent_bubble.start_animation()
+
+    def stop_agent_animation(self) -> None:
+        if self._live_agent_bubble:
+            self._live_agent_bubble.stop_animation()
+
+    def set_running(self, running: bool) -> None:
+        self._is_running = running
+        if running:
+            self.send_button.setText("")
+            self.send_button.setIcon(_make_stop_icon(20))
+            self.send_button.setIconSize(QSize(20, 20))
+            self.send_button.setStyleSheet(self._send_btn_stop_style)
+            try:
+                self.send_button.clicked.disconnect()
+            except Exception:
+                pass
+            self.send_button.clicked.connect(self._on_stop_requested)
+        else:
+            self.send_button.setIcon(QIcon())
+            self.send_button.setText("發送")
+            self.send_button.setStyleSheet(self._send_btn_send_style)
+            try:
+                self.send_button.clicked.disconnect()
+            except Exception:
+                pass
+            self.send_button.clicked.connect(self.on_input_submitted)
+            # Finalize live exchange (detach tracking refs so next turn is fresh)
+            self._live_user_bubble = None
+            self._live_agent_bubble = None
+            self._live_user_text = ""
+            self._live_agent_text = ""
+
+    def set_compact_indicator(self, active: bool) -> None:
+        if active:
+            self._compact_label.show()
+            self._compact_pulse_phase = 0
+            self._compact_pulse_timer.start()
+        else:
+            self._compact_pulse_timer.stop()
+            self._compact_label.hide()
+
+    def _pulse_compact_label(self) -> None:
+        self._compact_pulse_phase = 1 - self._compact_pulse_phase
+        if self._compact_pulse_phase:
+            self._compact_label.setStyleSheet(
+                "QLabel { background: rgba(110,75,190,230); color: #eedeff; "
+                "border: 1px solid rgba(200,160,255,160); border-radius: 11px; "
+                "font-size: 10px; padding: 0 10px; }"
+            )
+        else:
+            self._compact_label.setStyleSheet(
+                "QLabel { background: rgba(70,45,130,180); color: #c8aaee; "
+                "border: 1px solid rgba(160,120,220,90); border-radius: 11px; "
+                "font-size: 10px; padding: 0 10px; }"
+            )
+
+    def update_context_meter(self, used_tokens: int, max_tokens: int, total_tokens: int = 0) -> None:
+        def _fmt(n: int) -> str:
+            if n >= 1_000_000:
+                return f"{n / 1_000_000:.1f}M"
+            if n >= 1_000:
+                return f"{n / 1_000:.1f}k"
+            return str(n)
+
+        if max_tokens > 0:
+            pct = min(100, round(used_tokens * 100 / max_tokens))
+            ctx_color = "#f06b6b" if pct >= 80 else "#f0c060" if pct >= 50 else "rgba(160,180,200,160)"
+            self._ctx_label.setText(f"ctx {_fmt(used_tokens)}/{_fmt(max_tokens)} ({pct}%)")
+            self._ctx_label.setStyleSheet(f"QLabel {{ color: {ctx_color}; font-size: 10px; }}")
+        if total_tokens > 0:
+            self._total_tok_label.setText(f"Σ {_fmt(total_tokens)}")
+        else:
+            self._total_tok_label.setText("Σ —")
+
+    def update_todo_drawer(self, text: str) -> None:
+        pass  # todo panel not present in chat mode (could be added later)
+
+    def voice_result_ready(self, text: str | None) -> None:
+        if not self._voice_active:
+            return
+        self._exit_voice_mode()
+        if text:
+            existing = self.input_field.text().strip()
+            sep = " " if existing else ""
+            self.input_field.setText(existing + sep + text)
+            self.input_field.setFocus()
+            self.input_field.setCursorPosition(len(self.input_field.text()))
+
+    def get_attached_file_path(self) -> str:
+        path = self._attached_file_path
+        if path:
+            self._attached_file_path = ""
+            self._clear_attachment()
+        return path
+
+    def pop_attached_images_as_tempfiles(self) -> list[str]:
+        if not self._attached_images:
+            return []
+        import tempfile, os
+        paths = []
+        for data in self._attached_images:
+            fd, path = tempfile.mkstemp(suffix=".png", prefix="agent_clip_")
+            try:
+                os.write(fd, data)
+            finally:
+                os.close(fd)
+            paths.append(path)
+        self._attached_images = []
+        self._clear_attachment()
+        return paths
+
+    def open_config_webview(self) -> None:
+        try:
+            if not HAS_WEBENGINE:
+                return
+            from internal.services import config_webui
+            url = config_webui.ensure_webui_running()
+            if self.config_webview_window is not None:
+                try:
+                    self.config_webview_window.show()
+                    self.config_webview_window.activateWindow()
+                    self.config_webview_window.raise_()
+                    return
+                except RuntimeError:
+                    self.config_webview_window = None
+            self.config_webview_window = ConfigWebViewWindow(url, parent=None)
+            self.config_webview_window.show()
+        except Exception as exc:
+            logger.error(f"ChatWindow: open_config_webview failed: {exc}")
+
+    # ── Chat history ──────────────────────────────────────────────────────
+
+    def load_history(self, history: list[tuple[str, str]]) -> None:
+        """Populate chat from a list of (user_input, agent_output) pairs.
+
+        Clears existing completed history widgets first, then re-renders.
+        Live widgets (if any) are preserved.
+        """
+        # Remove all non-stretch widgets that are NOT the current live bubbles
+        live_set = {
+            id(self._live_user_bubble),
+            id(self._live_agent_bubble),
+        }
+        for i in reversed(range(self._chat_layout.count())):
+            item = self._chat_layout.itemAt(i)
+            if item is None:
+                continue
+            w = item.widget()
+            if w is not None and id(w) not in live_set:
+                self._chat_layout.removeWidget(w)
+                w.deleteLater()
+
+        # Re-add history pairs (insert before live bubbles / stretch)
+        insert_pos = 0
+        for user_text, agent_text in history:
+            ub = _UserBubble(user_text)
+            ab = _AgentBubble()
+            if agent_text:
+                ab.set_content(agent_text)
+            self._chat_layout.insertWidget(insert_pos, ub)
+            self._chat_layout.insertWidget(insert_pos + 1, ab)
+            insert_pos += 2
+
+        QTimer.singleShot(100, self._scroll_to_bottom)
+
+    def sync_live_state(self, user_text: str, agent_text: str, is_running: bool) -> None:
+        """Sync the live (current) exchange state when switching from circle mode.
+
+        Call this after load_history() so the current in-progress turn is shown.
+        """
+        if user_text:
+            self._live_user_text = user_text
+            self._ensure_live_user_bubble(user_text)
+        if agent_text:
+            self._live_agent_text = agent_text
+            self._ensure_live_agent_bubble()
+            if self._live_agent_bubble:
+                self._live_agent_bubble.set_content(agent_text)
+        if is_running and self._live_agent_bubble:
+            self._live_agent_bubble.start_animation()
+        self.set_running(is_running)
+        QTimer.singleShot(150, self._scroll_to_bottom)
+
+    def _scroll_to_bottom(self) -> None:
+        sb = self._scroll.verticalScrollBar()
+        sb.setValue(sb.maximum())
+
+    # ── Bypass mode ──────────────────────────────���────────────────────────
+
+    def _on_bypass_toggled(self, checked: bool) -> None:
+        self._bypass_mode = checked
+        _on = (
+            "QPushButton { background: rgba(220,120,0,180); color: #ffe0a0; "
+            "border: none; font-size: 12px; padding: 0 4px; border-radius: 4px; } "
+            "QPushButton:hover { background: rgba(240,140,0,210); }"
+        )
+        _off = (
+            "QPushButton { background: transparent; color: rgba(150,165,185,160); "
+            "border: none; font-size: 12px; padding: 0 4px; border-radius: 4px; } "
+            "QPushButton:hover { color: rgba(210,225,255,220); background: rgba(255,255,255,8); }"
+        )
+        if checked:
+            self._bypass_btn.setText("🔓")
+            self._bypass_btn.setToolTip("全開模式已開啟 — 自動允許所有工具（點擊關閉）")
+            self._bypass_btn.setStyleSheet(_on)
+        else:
+            self._bypass_btn.setText("🔒")
+            self._bypass_btn.setToolTip("全開模式：自動允許所有工具執行（再按恢復）")
+            self._bypass_btn.setStyleSheet(_off)
+        cb = getattr(self, "_bypass_callback", None)
+        if cb:
+            cb(checked)
+
+    def sync_bypass_state(self, enabled: bool) -> None:
+        """Called when switching from circle mode to sync bypass toggle state."""
+        if enabled != self._bypass_mode:
+            self._bypass_btn.setChecked(enabled)
+            self._on_bypass_toggled(enabled)
+
+    # ── Stop button ───────────────────────────────────────────────────────
+
+    def _on_stop_requested(self) -> None:
+        if self._stop_callback:
+            self._stop_callback()
+
+    # ── Voice mode ─────────────────────────────────��──────────────────────
+
+    def on_voice_requested(self) -> None:
+        if self._voice_active:
+            self._cancel_voice()
+        else:
+            self._enter_voice_mode()
+
+    def _enter_voice_mode(self) -> None:
+        self._voice_active = True
+        self.input_field.hide()
+        self._waveform.show()
+        self._waveform.start()
+        self.voice_button.setText("✕")
+        self.voice_button.setStyleSheet(self._voice_btn_cancel_style)
+        try:
+            self.send_button.clicked.disconnect()
+        except Exception:
+            pass
+        self.send_button.clicked.connect(self._submit_voice_now)
+        if self._voice_callback:
+            self._voice_callback("__start__")
+
+    def _exit_voice_mode(self) -> None:
+        self._voice_active = False
+        self._waveform.stop()
+        self._waveform.hide()
+        self.input_field.show()
+        self.input_field.setFocus()
+        self.voice_button.setText("🎤")
+        self.voice_button.setStyleSheet(self._voice_btn_idle_style)
+        try:
+            self.send_button.clicked.disconnect()
+        except Exception:
+            pass
+        if self._is_running:
+            self.send_button.clicked.connect(self._on_stop_requested)
+        else:
+            self.send_button.clicked.connect(self.on_input_submitted)
+
+    def _cancel_voice(self) -> None:
+        self._exit_voice_mode()
+        if self._voice_callback:
+            self._voice_callback("__cancel__")
+
+    def _submit_voice_now(self) -> None:
+        self._exit_voice_mode()
+        if self._voice_callback:
+            self._voice_callback("__submit__")
+
+    def set_voice_level(self, level: float) -> None:
+        if self._voice_active:
+            self._waveform.set_level(level)
+
+    # ── Input submission ─────────────────────────────────���────────────────
+
+    def on_input_submitted(self) -> None:
+        text = self.input_field.text().strip()
+        if text and self._input_callback:
+            if isinstance(self.input_field, CommandLineEdit):
+                self.input_field.add_to_history(text)
+            self.input_field.clear()
+            self.input_field.setPlaceholderText("輸入文字、指令或按🎤啟動語音...")
+            self._input_callback(text)
+
+    def _handle_user_typing(self, *_args) -> None:
+        try:
+            self.typing.emit()
+        except Exception:
+            pass
+
+    # ── File attachment ───────────────────────────────────────────────────
+
+    def _on_attach_file(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, "附加檔案", "", "All Files (*.*)")
+        if path:
+            self._attached_file_path = path
+            name = path.split("/")[-1].split("\\")[-1]
+            short = name if len(name) <= 20 else name[:17] + "…"
+
+            def on_remove():
+                self._attached_file_path = ""
+
+            self._add_chip(f"📎 {short}", on_remove)
+
+    def _on_slash_shortcut(self) -> None:
+        if not self.input_field.text():
+            self.input_field.setText("/")
+            self.input_field.setFocus()
+            self.input_field.setCursorPosition(1)
+
+    def _add_chip(self, label: str, on_remove) -> None:
+        chip = QLabel(label)
+        chip.setStyleSheet(self._CHIP_STYLE)
+        chip.setMaximumWidth(200)
+        close_btn = QPushButton("✕")
+        close_btn.setFixedSize(14, 14)
+        close_btn.setStyleSheet(self._CHIP_CLOSE_STYLE)
+
+        def _remove():
+            on_remove()
+            for w in (chip, close_btn):
+                self._attach_chips_layout.removeWidget(w)
+                w.deleteLater()
+            self._refresh_chip_row()
+
+        close_btn.clicked.connect(_remove)
+        insert_pos = max(0, self._attach_chips_layout.count() - 1)
+        self._attach_chips_layout.insertWidget(insert_pos, chip)
+        self._attach_chips_layout.insertWidget(insert_pos + 1, close_btn)
+        self._refresh_chip_row()
+
+    def _refresh_chip_row(self) -> None:
+        has_chips = self._attach_chips_layout.count() > 1
+        if has_chips:
+            self._attach_row.show()
+        else:
+            self._attach_row.hide()
+
+    def _clear_attachment(self) -> None:
+        self._attached_file_path = ""
+        self._attached_images = []
+        while self._attach_chips_layout.count() > 1:
+            item = self._attach_chips_layout.takeAt(0)
+            if item and item.widget():
+                item.widget().deleteLater()
+        self._refresh_chip_row()
+
+    def _show_attach_chip(self, label: str) -> None:
+        idx = len(self._attached_images) - 1
+
+        def on_remove():
+            try:
+                if 0 <= idx < len(self._attached_images):
+                    self._attached_images.pop(idx)
+            except Exception:
+                pass
+
+        self._add_chip(label, on_remove)
+
+    # ── Clipboard paste (images) ───────────��─────────────────────────────
+
+    def keyPressEvent(self, event: QKeyEvent) -> None:
+        if event.key() == Qt.Key.Key_V and (event.modifiers() & Qt.KeyboardModifier.ControlModifier):
+            clipboard = QApplication.clipboard()
+            mime = clipboard.mimeData()
+            if mime and mime.hasImage():
+                image = clipboard.image()
+                if not image.isNull():
+                    ba = QImage.toBytes(image.convertToFormat(QImage.Format.Format_RGBA8888))
+                    # Save as PNG bytes
+                    buf = io.BytesIO()
+                    # Use PIL if available, else raw
+                    if Image is not None:
+                        pil_img = Image.frombytes("RGBA", (image.width(), image.height()), bytes(ba))
+                        pil_img.save(buf, format="PNG")
+                    else:
+                        buf.write(bytes(ba))
+                    self._attached_images.append(buf.getvalue())
+                    self._show_attach_chip(f"🖼 剪貼板圖片 {len(self._attached_images)}")
+                    event.accept()
+                    return
+        super().keyPressEvent(event)
+
+    # ── Thread-safe confirm/question dialogs (same as MainWindow) ─────────
+
+    @Slot(str, str, object)
+    def _handle_confirm_request(self, message: str, default_choice: str, result_container: object) -> None:
+        try:
+            dialog = ConfirmDialog(message, default_choice, parent=self)
+            result_container.result = dialog.get_result()
+        except Exception as exc:
+            logger.error(f"ChatWindow confirm dialog error: {exc}", exc_info=True)
+        finally:
+            result_container.done.set()
+
+    def show_confirm_dialog(self, message: str, default_choice: str = '') -> bool:
+        import threading
+
+        class ResultContainer:
+            def __init__(self):
+                self.result = False
+                self.done = threading.Event()
+
+        rc = ResultContainer()
+        self.confirm_requested.emit(message, default_choice, rc)
+        rc.done.wait(timeout=300)
+        return rc.result
+
+    @Slot(str, list, object)
+    def _handle_question_request(self, question: str, options: list, result_container: object) -> None:
+        try:
+            dialog = ChoiceDialog(question, options, parent=self)
+            result_container.result = dialog.get_result()
+        except Exception as exc:
+            logger.error(f"ChatWindow question dialog error: {exc}", exc_info=True)
+        finally:
+            result_container.done.set()
+
+    def show_question_dialog(self, question: str, options: list[str]) -> str:
+        import threading
+
+        class ResultContainer:
+            def __init__(self):
+                self.result: str = ""
+                self.done = threading.Event()
+
+        rc = ResultContainer()
+        self.question_requested.emit(question, options, rc)
+        rc.done.wait(timeout=300)
+        return rc.result
 
 
 class ConfigWebViewWindow(QMainWindow):
