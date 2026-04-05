@@ -3623,6 +3623,98 @@ class MainWindow(QMainWindow):
 # ChatWindow — chat-style interface that can switch with the circle mode
 # ─────────────────────────────────────────────────────────────────────────────
 
+class _InlineQuestionBubble(QFrame):
+    """Left-aligned inline question bubble shown in chat mode for AskUserQuestion.
+
+    The bubble remains in the chat log after the user answers, showing the
+    selected option as a permanent record.
+    """
+    answered = Signal(str)  # emitted (in main thread) when user picks an option
+
+    def __init__(self, question: str, options: list[str], parent=None):
+        super().__init__(parent)
+        self._done = False
+        self._option_btns: list[QPushButton] = []
+
+        outer = QHBoxLayout(self)
+        outer.setContentsMargins(8, 4, 60, 4)
+        outer.setSpacing(0)
+
+        card = QWidget()
+        card.setObjectName("IQCard")
+        card.setStyleSheet(
+            "#IQCard {"
+            "background: rgba(28,38,68,230);"
+            "border: 1px solid rgba(100,150,255,90);"
+            "border-radius: 14px;"
+            "}"
+        )
+        card_vbox = QVBoxLayout(card)
+        card_vbox.setContentsMargins(14, 12, 14, 12)
+        card_vbox.setSpacing(8)
+
+        # Question label
+        q_lbl = QLabel()
+        q_lbl.setTextFormat(Qt.TextFormat.RichText)
+        q_lbl.setWordWrap(True)
+        q_lbl.setText(
+            '<span style="color:#7ab4ff;font-size:11px;">❓ AskUserQuestion</span><br>'
+            + html.escape(question).replace("\n", "<br>")
+        )
+        q_lbl.setStyleSheet(
+            "QLabel { color: #d8e8ff; font-size: 13px; background: transparent; }"
+        )
+        card_vbox.addWidget(q_lbl)
+
+        # Option buttons
+        _btn_style = (
+            "QPushButton {"
+            "background: rgba(50,80,160,180); color: #c0d8ff;"
+            "border: 1px solid rgba(100,150,255,100); border-radius: 8px;"
+            "padding: 6px 14px; font-size: 12px; text-align: left;"
+            "}"
+            "QPushButton:hover { background: rgba(70,110,200,210); color: #d8eaff; }"
+            "QPushButton:disabled {"
+            "background: rgba(30,40,60,100); color: rgba(120,140,180,100);"
+            "border-color: rgba(60,80,120,50);"
+            "}"
+        )
+        for opt in options:
+            btn = QPushButton(opt)
+            btn.setStyleSheet(_btn_style)
+            btn.clicked.connect(lambda _checked, o=opt: self._select(o))
+            card_vbox.addWidget(btn)
+            self._option_btns.append(btn)
+
+        # Answer label (hidden until answered)
+        self._answer_lbl = QLabel()
+        self._answer_lbl.setStyleSheet(
+            "QLabel { color: #7ddfb0; font-size: 12px; background: transparent; }"
+        )
+        self._answer_lbl.hide()
+        card_vbox.addWidget(self._answer_lbl)
+
+        outer.addWidget(card, 1)
+
+    def _select(self, option: str) -> None:
+        if self._done:
+            return
+        self._done = True
+        for btn in self._option_btns:
+            btn.setEnabled(False)
+            if btn.text() == option:
+                btn.setStyleSheet(
+                    btn.styleSheet()
+                    + "QPushButton:disabled {"
+                    "background: rgba(40,90,60,160); color: #90e8b8;"
+                    "border-color: rgba(80,200,120,120);"
+                    "}"
+                )
+        self._answer_lbl.setText(f"✓ 已選擇：{option}")
+        self._answer_lbl.show()
+        self.answered.emit(option)
+
+
 class _UserBubble(QFrame):
     """Right-aligned user message bubble."""
     def __init__(self, text: str, parent=None):
@@ -4483,13 +4575,29 @@ class ChatWindow(QMainWindow):
 
     @Slot(str, list, object)
     def _handle_question_request(self, question: str, options: list, result_container: object) -> None:
+        """In chat mode: insert an inline question bubble instead of a popup dialog.
+
+        We do NOT call result_container.done.set() here — the bubble's `answered`
+        signal does that once the user clicks, keeping the background thread blocked
+        until a choice is made.
+        """
         try:
-            dialog = ChoiceDialog(question, options, parent=self)
-            result_container.result = dialog.get_result()
+            bubble = _InlineQuestionBubble(question, list(options))
+
+            def _on_answered(option: str) -> None:
+                result_container.result = option
+                result_container.done.set()
+                logger.info(f"[ChatWindow inline] question answered: {option!r}")
+
+            bubble.answered.connect(_on_answered)
+
+            # Insert before the trailing stretch item
+            count = self._chat_layout.count()
+            self._chat_layout.insertWidget(count - 1, bubble)
+            self._scroll_to_bottom()
         except Exception as exc:
-            logger.error(f"ChatWindow question dialog error: {exc}", exc_info=True)
-        finally:
-            result_container.done.set()
+            logger.error(f"ChatWindow inline question error: {exc}", exc_info=True)
+            result_container.done.set()  # unblock on error
 
     def show_question_dialog(self, question: str, options: list[str]) -> str:
         import threading

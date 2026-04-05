@@ -661,8 +661,11 @@ class GUIAgentApp(QObject):
         result = self._active_ui.show_question_dialog(question, options)
         logger.info(f"_gui_question_handler returning: {result!r}")
         if result and result != "(no answer — user dismissed the dialog)":
-            self._discussion_text = f"**Q:** {question}\n\n**A:** {result}"
-            self._request_display_update()
+            if self._current_mode != "chat":
+                # In circle mode update the speech bubble with Q&A context.
+                # In chat mode the inline bubble already shows the exchange.
+                self._discussion_text = f"**Q:** {question}\n\n**A:** {result}"
+                self._request_display_update()
         return result
 
     def _reset_tool_log(self) -> None:
