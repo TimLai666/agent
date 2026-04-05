@@ -1041,6 +1041,21 @@
             }
         }
 
+        function updateProviderSecretPlaceholders(provider = null) {
+            const apiKeyInput = document.getElementById('api_key');
+            const githubTokenInput = document.getElementById('github_token');
+
+            apiKeyInput.value = '';
+            githubTokenInput.value = '';
+
+            apiKeyInput.placeholder = provider && provider.has_api_key
+                ? '已設定；留空則保持不變'
+                : 'sk-...';
+            githubTokenInput.placeholder = provider && provider.has_github_token
+                ? '已設定；留空則保持不變'
+                : 'ghp_...';
+        }
+
         // Tab switching
         function switchTab(e, tab) {
             document.querySelectorAll('.tab-button').forEach(btn => btn.classList.remove('active'));
@@ -1071,6 +1086,7 @@
             editingProviderId = null;
             const form = document.getElementById('add-provider-form');
             form.reset();
+            updateProviderSecretPlaceholders();
 
             const title = document.querySelector('#add-provider-modal .modal-title');
             if (title) title.textContent = '新增提供者';
@@ -1111,8 +1127,7 @@
                 providerIdInput.disabled = true;
                 document.getElementById('provider_name').value = provider.name || '';
                 document.getElementById('base_url').value = provider.base_url || '';
-                document.getElementById('api_key').value = provider.api_key || '';
-                document.getElementById('github_token').value = provider.github_token || '';
+                updateProviderSecretPlaceholders(provider);
 
                 document.getElementById('add-provider-modal').classList.add('active');
             } catch (error) {
@@ -1365,6 +1380,7 @@
         document.getElementById('add-provider-form').addEventListener('submit', async (e) => {
             e.preventDefault();
 
+            const wasEditing = Boolean(editingProviderId);
             const type = document.querySelector('input[name="provider_type"]:checked').value;
             const data = {
                 provider_id: document.getElementById('provider_id').value,
@@ -1374,13 +1390,18 @@
 
             if (type === 'openai-compatible') {
                 data.base_url = document.getElementById('base_url').value || null;
-                data.api_key = document.getElementById('api_key').value || null;
+                const apiKey = document.getElementById('api_key').value.trim();
+                if (apiKey || !wasEditing) {
+                    data.api_key = apiKey || null;
+                }
             } else {
-                data.github_token = document.getElementById('github_token').value || null;
+                const githubToken = document.getElementById('github_token').value.trim();
+                if (githubToken || !wasEditing) {
+                    data.github_token = githubToken || null;
+                }
             }
 
             try {
-                const wasEditing = Boolean(editingProviderId);
                 const response = await fetch('/api/providers', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },

@@ -8,9 +8,9 @@ from pydantic_ai.messages import ModelRequest, ModelResponse
 from internal.runtime.stream_printer import stream_print
 
 from internal.agents import MainAgent
-from internal.app.handle_user_turn import create_runtime
 from internal.cli import confirm
 from internal.logger import logger
+from internal.memory import MemoryManager
 from internal.services.agent_factory import load_base_config
 from internal.services import config_webui
 from internal.services import config_cli
@@ -144,7 +144,7 @@ def _format_tool_line(event: dict) -> str:
     if stage == "start":
         return f"[>] {label}"
     if stage == "end":
-        return f"[OK] {label}"
+        return "[OK]"
     if stage == "error":
         error = str(event.get("error") or "")
         suffix = f": {error}" if error else ""
@@ -170,8 +170,8 @@ async def run_cli(
             base_config,
             http_client,
             skill_root_dirs=skill_root_dirs,
+            memory_manager=MemoryManager(),
         )
-        orchestration_runtime = create_runtime(main_agent)
 
         def reload_skills_from_webui() -> dict[str, object]:
             from internal.skills_loader import load_skill_registry
@@ -249,7 +249,7 @@ async def run_cli(
                 if not user_input:
                     return
                 await stream_print(
-                    orchestration_runtime.handle_user_turn_stream(
+                    main_agent.coordinator_handle_user_turn_stream(
                         user_input,
                         message_history=chat_history,
                     )
@@ -321,7 +321,7 @@ async def run_cli(
                 if not user_input:
                     return
                 if user_input.startswith(COMMAND_PREFIX):
-                    action = command_handler.handle(user_input)
+                    action = await command_handler.handle(user_input)
                     if action == "__exit__":
                         return
                     if action == "__clear_context__":
@@ -343,7 +343,7 @@ async def run_cli(
                     return
                 command_handler.update_last_prompt(user_input)
                 await stream_print(
-                    orchestration_runtime.handle_user_turn_stream(
+                    main_agent.coordinator_handle_user_turn_stream(
                         user_input,
                         message_history=chat_history,
                     )
@@ -360,7 +360,7 @@ async def run_cli(
                     if not user_input:
                         continue
                     if user_input.startswith(COMMAND_PREFIX):
-                        action = command_handler.handle(user_input)
+                        action = await command_handler.handle(user_input)
                         if action == "__exit__":
                             break
                         if action == "__clear_context__":
@@ -382,7 +382,7 @@ async def run_cli(
                         break
                     command_handler.update_last_prompt(user_input)
                     await stream_print(
-                        orchestration_runtime.handle_user_turn_stream(
+                        main_agent.coordinator_handle_user_turn_stream(
                             user_input,
                             message_history=chat_history,
                         )

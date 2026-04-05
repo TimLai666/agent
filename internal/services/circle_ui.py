@@ -219,9 +219,9 @@ def _prepare_markdown(text: str) -> str:
     return _autolink_markdown(text)
 
 from PySide6.QtCore import (
-    QEventLoop,
     QMetaObject,
     Property,
+    QRect,
     QSize,
     Signal,
     QTimer,
@@ -237,7 +237,9 @@ from PySide6.QtGui import (
     QConicalGradient,
     QCursor,
     QDesktopServices,
+    QFont,
     QGuiApplication,
+    QIcon,
     QImage,
     QKeyEvent,
     QLinearGradient,
@@ -249,6 +251,21 @@ from PySide6.QtGui import (
     QTextDocument,
     QTextImageFormat,
 )
+
+
+def _make_stop_icon(size: int = 28) -> QIcon:
+    """Draw a white rounded-square stop icon perfectly centred on a transparent pixmap."""
+    px = QPixmap(size, size)
+    px.fill(QColor(0, 0, 0, 0))
+    p = QPainter(px)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    sq = int(size * 0.38)
+    x = (size - sq) // 2
+    p.setBrush(QColor(255, 255, 255, 240))
+    p.setPen(Qt.PenStyle.NoPen)
+    p.drawRoundedRect(x, x, sq, sq, 2, 2)
+    p.end()
+    return QIcon(px)
 from PySide6.QtWidgets import (
     QApplication,
     QCompleter,
@@ -279,11 +296,55 @@ except Exception:
 from internal.logger import logger
 
 
+def _compute_todo_window_position(
+    frame: QRect,
+    button_rect: QRect,
+    panel_size: QSize,
+    screen_rect: QRect,
+) -> tuple[int, int]:
+    x = frame.right() + 12
+    min_x = screen_rect.left() + 8
+    max_x = screen_rect.right() - panel_size.width() - 8
+    if max_x < min_x:
+        max_x = min_x
+    x = max(min_x, min(x, max_x))
+
+    if button_rect.width() <= 0 or button_rect.height() <= 0:
+        anchor_y = frame.top() + 20
+    else:
+        anchor_y = frame.top() + button_rect.center().y() - (panel_size.height() // 2)
+
+    min_y = screen_rect.top() + 8
+    max_y = screen_rect.bottom() - panel_size.height() - 8
+    if max_y < min_y:
+        max_y = min_y
+    y = max(min_y, min(anchor_y, max_y))
+    return x, y
+
+
 class AutoWrapTextBrowser(QTextBrowser):
     """QTextBrowser that keeps document width aligned to viewport width."""
 
+    @staticmethod
+    def _sanitize_font(font: QFont) -> QFont:
+        safe_font = QFont(font)
+        # Qt rich text may internally call setPointSize(font.pointSize()).
+        # If pointSize is -1 (even when pixelSize is set), warnings will spam logs.
+        if safe_font.pointSize() <= 0 and safe_font.pointSizeF() <= 0:
+            safe_font.setPointSize(11)
+        return safe_font
+
+    def _ensure_valid_font(self) -> None:
+        safe_font = self._sanitize_font(self.font())
+        self.setFont(safe_font)
+        try:
+            self.document().setDefaultFont(safe_font)
+        except Exception:
+            pass
+
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._ensure_valid_font()
         self._raw_markdown = None
         self._last_rendered_markdown = None
         self._markdown_refresh_pending = False
@@ -304,6 +365,7 @@ class AutoWrapTextBrowser(QTextBrowser):
             pass
 
     def setMarkdown(self, text: str) -> None:
+        self._ensure_valid_font()
         self._raw_markdown = text or ""
         self._last_rendered_markdown = None
         self._apply_markdown_with_images()
@@ -862,10 +924,50 @@ class CommandLineEdit(QLineEdit):
             event.accept()
             return
         
+        # Ctrl+V with image in clipboard → attach to parent MainWindow
+        if (event.key() == Qt.Key_V and
+                event.modifiers() & Qt.KeyboardModifier.ControlModifier):
+            clipboard = QApplication.clipboard()
+            mime = clipboard.mimeData()
+            if mime and mime.hasImage():
+                img = clipboard.image()
+                if not img.isNull():
+                    try:
+                        buf = io.BytesIO()
+                        from PIL import Image as _PIL
+                        pil_img = _PIL.fromqimage(img) if hasattr(_PIL, "fromqimage") else None
+                        if pil_img is None:
+                            # Fallback: save QImage to bytes via PNG
+                            import tempfile, os
+                            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+                                tmp_path = tmp.name
+                            img.save(tmp_path)
+                            with open(tmp_path, "rb") as f:
+                                img_bytes = f.read()
+                            os.unlink(tmp_path)
+                        else:
+                            pil_img.save(buf, format="PNG")
+                            img_bytes = buf.getvalue()
+                        # Walk up to find MainWindow and append image
+                        iw = img.width()
+                        ih = img.height()
+                        parent = self.parent()
+                        while parent is not None:
+                            if hasattr(parent, "_attached_images"):
+                                parent._attached_images.append(img_bytes)
+                                if hasattr(parent, "_show_attach_chip"):
+                                    parent._show_attach_chip(f"📷 image.png  {iw}×{ih}")
+                                break
+                            parent = parent.parent() if hasattr(parent, "parent") else None
+                    except Exception as e:
+                        logger.debug(f"Clipboard image paste failed: {e}")
+                    event.accept()
+                    return
+
         # 其他按鍵：重置歷史索引
         if event.key() not in (Qt.Key_Up, Qt.Key_Down, Qt.Key_Tab):
             self.history_index = -1
-        
+
         # 調用父類處理
         super().keyPressEvent(event)
     
@@ -995,6 +1097,74 @@ class SpinnerLabel(QLabel):
             self._timer.stop()
         self.setVisible(False)
         self.setText(self.base_text)
+
+
+class WaveformWidget(QWidget):
+    """Animated audio waveform bars — self-animating, no external mic access needed."""
+
+    BAR_COUNT = 7
+    BAR_W = 4
+    BAR_GAP = 4
+    MIN_H = 3
+    MAX_H = 22
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        total_w = self.BAR_COUNT * (self.BAR_W + self.BAR_GAP) - self.BAR_GAP
+        self.setFixedWidth(total_w + 16)
+        self.setMinimumHeight(self.MAX_H + 8)
+        self._heights = [float(self.MIN_H)] * self.BAR_COUNT
+        self._timer = QTimer(self)
+        self._timer.setInterval(70)
+        self._timer.timeout.connect(self._animate)
+        self._tick = 0
+
+    def start(self):
+        self._tick = 0
+        self._timer.start()
+
+    def stop(self):
+        self._timer.stop()
+        self._heights = [float(self.MIN_H)] * self.BAR_COUNT
+        self.update()
+
+    def set_level(self, _level: float):
+        pass  # level sampling removed to avoid mic conflict; animation is autonomous
+
+    def _animate(self):
+        import math, random
+        self._tick += 1
+        t = self._tick * 0.18
+        for i in range(self.BAR_COUNT):
+            # Sine wave across bars with per-bar phase offset + random noise
+            phase = i * (math.pi / (self.BAR_COUNT - 1))
+            wave = (math.sin(t + phase) + 1) / 2          # 0..1
+            envelope = math.sin(i * math.pi / (self.BAR_COUNT - 1))  # bell shape
+            base_h = self.MIN_H + (self.MAX_H - self.MIN_H) * wave * envelope
+            noise = random.uniform(-1.5, 1.5)
+            target = max(self.MIN_H, min(self.MAX_H, base_h + noise))
+            self._heights[i] += (target - self._heights[i]) * 0.35
+        self.update()
+
+    def paintEvent(self, _event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        w = self.width()
+        h = self.height()
+        cx = w // 2
+        total_w = self.BAR_COUNT * (self.BAR_W + self.BAR_GAP) - self.BAR_GAP
+        x0 = cx - total_w // 2
+        for i, bar_h in enumerate(self._heights):
+            x = x0 + i * (self.BAR_W + self.BAR_GAP)
+            bar_h = max(self.MIN_H, bar_h)
+            y = (h - bar_h) // 2
+            alpha = int(160 + 90 * (bar_h / self.MAX_H))
+            color = QColor(100, 180, 255, alpha)
+            p.setBrush(color)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.drawRoundedRect(int(x), int(y), self.BAR_W, int(bar_h), 2, 2)
+        p.end()
 
 
 class CollapsibleSection(QWidget):
@@ -1386,7 +1556,7 @@ class OutputBubble(QWidget):
                 QTimer.singleShot(0, update_browser_height)
                 self.layout.addWidget(browser)
             else:
-                title = "Tool execution" if kind == "tool" else "Discussion"
+                title = "Tool execution" if kind == "tool" else "選項結果"
                 section = CollapsibleSection(title, content)
                 self.layout.addWidget(section)
 
@@ -1448,7 +1618,7 @@ class OutputBubble(QWidget):
 
 class SiriResponseBubble(QWidget):
     SPINNER_PATTERN = re.compile(
-        r"^\s*(?:[-*>]\s*)?(?:still\s+|currently\s+)?(?P<status>thinking|listening)(?:\s*(?:\.{3,}|\?\?)?\s*)$",
+        r"^\s*(?:[-*>]\s*)?(?:still\s+|currently\s+)?(?P<status>thinking|listening|分析需求中|規劃回覆中|執行步驟中|生成回覆中|執行工具中|載入技能中|委派子代理中|整理結果中)(?:\s*(?:\.{3,}|\?\?)?\s*)$",
         re.IGNORECASE,
     )
 
@@ -1835,7 +2005,7 @@ class SiriResponseBubble(QWidget):
                                 QTimer.singleShot(0, update_browser_height)
                                 self.layout.addWidget(browser)
             elif kind in ("tool", "discussion"):
-                title = "Tool execution" if kind == "tool" else "Discussion"
+                title = "Tool execution" if kind == "tool" else "選項結果"
                 seen_sections.add(title)
 
                 if title in existing_sections:
@@ -2121,7 +2291,6 @@ class EdgeHandle(QWidget):
         self._dragging = False
         self._drag_start_global = None
         self._drag_offset = None
-        self._last_y = None
         self.setFixedSize(self._collapsed_width, self._height)
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint
@@ -2168,7 +2337,6 @@ class EdgeHandle(QWidget):
         y = self.y()
         y = max(geo.top(), min(y, geo.bottom() - self._height))
         self.setGeometry(x, y, width, self._height)
-        self._last_y = y
 
     def show_at_edge(self, reference=None):
         geo = self._resolve_screen_geometry(reference)
@@ -2176,10 +2344,28 @@ class EdgeHandle(QWidget):
             return
         self._screen_geo = geo
         self._hovered = False
-        if self._last_y is None:
-            y = geo.bottom() - self._height
+
+        # Auto-snap to the nearest horizontal edge based on the reference window position.
+        if reference is not None:
+            try:
+                ref_center_x = reference.geometry().center().x()
+                if abs(ref_center_x - geo.left()) <= abs(geo.right() - ref_center_x):
+                    self._side = "left"
+                else:
+                    self._side = "right"
+            except Exception:
+                pass
+
+        # Always derive vertical position from current window location;
+        # do not persist collapsed handle height across cycles.
+        if reference is not None:
+            try:
+                ref_geo = reference.frameGeometry()
+                y = ref_geo.center().y() - (self._height // 2)
+            except Exception:
+                y = geo.bottom() - self._height
         else:
-            y = self._last_y
+            y = geo.bottom() - self._height
         y = max(geo.top(), min(y, geo.bottom() - self._height))
         self.move(self.x(), y)
         self._snap_to_edge(geo)
@@ -2253,7 +2439,6 @@ class EdgeHandle(QWidget):
                 self._side = "right"
             self._hovered = False
             self._snap_to_edge(geo)
-            self._last_y = self.y()
         if moved < 4 and self._on_activate:
             self._on_activate()
         super().mouseReleaseEvent(event)
@@ -2307,9 +2492,67 @@ class EdgeHandle(QWidget):
         painter.drawRoundedRect(rect, 9, 9)
 
 
+class TodoPanelWindow(QWidget):
+    """Floating todo panel window shown separately from the main orb UI."""
+
+    def __init__(self, parent=None):
+        super().__init__(None)
+        self.setWindowTitle("Todo List")
+        self.setMinimumSize(280, 360)
+        self.resize(320, 460)
+        self.setWindowFlags(
+            Qt.WindowType.Window
+            | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.Tool
+        )
+        self.setStyleSheet(
+            "QWidget { background-color: rgba(18, 22, 32, 238); color: #EAF3FF; }"
+            "QLabel#todoPanelTitle { font-size: 13px; font-weight: bold; color: #F1F7FF; }"
+            "QTextBrowser {"
+            "background-color: rgba(11, 15, 22, 196);"
+            "color: #EAF3FF;"
+            "border: 1px solid rgba(120, 170, 230, 80);"
+            "border-radius: 8px;"
+            "padding: 6px;"
+            "font-size: 12px;"
+            "}"
+        )
+
+        self.layout = QVBoxLayout(self)
+        self.layout.setContentsMargins(10, 8, 10, 10)
+        self.layout.setSpacing(6)
+
+        header = QWidget(self)
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(0, 0, 0, 0)
+        header_layout.setSpacing(6)
+
+        self.title_label = QLabel("Todo List", header)
+        self.title_label.setObjectName("todoPanelTitle")
+
+        header_layout.addWidget(self.title_label)
+        header_layout.addStretch(1)
+
+        self.content = AutoWrapTextBrowser(self)
+        self.content.setOpenExternalLinks(True)
+        self.content.setMarkdown("_尚無 todo 資訊_")
+
+        self.layout.addWidget(header)
+        self.layout.addWidget(self.content, 1)
+
+    def set_todo_text(self, text: str) -> None:
+        data = (text or "").strip()
+        if data:
+            self.content.setMarkdown(f"```text\n{data}\n```")
+        else:
+            self.content.setMarkdown("_尚無 todo 資訊_")
+
+
 class MainWindow(QMainWindow):
     # 信号：请求显示确认对话框
     confirm_requested = Signal(str, str, object)  # message, default_choice, result_container
+    # 信号：请求显示问题选单对话框
+    question_requested = Signal(str, list, object)  # question, options, result_container
     collapse_state_changed = Signal(bool)
     # 當使用者正在編輯輸入框（鍵入文字）時發出
     typing = Signal()
@@ -2330,12 +2573,16 @@ class MainWindow(QMainWindow):
 
         self.old_pos = None  # 初始化拖拽位置
         self.input_callback = None  # 回調函數，用於處理用戶輸入
+        self._stop_callback = None   # 停止 agent 的回調
+        self._bypass_callback = None # bypass 模式切換回調
         
         # 固定球的位置參數（球心在底部往上130px，縮小與輸入框的距離）
         self.BALL_CENTER_FROM_BOTTOM = 130
         # 固定輸入框的位置（距離底部40px，使輸入框上移，與球更接近）
         self.INPUT_FROM_BOTTOM = 40
-        self.INPUT_HEIGHT = 45
+        self.INPUT_HEIGHT_BASE = 72    # input card (38) + separator (1) + toolbar (20) + margins
+        self.INPUT_HEIGHT_CHIPS = 100  # + chip row (26) + spacing
+        self.INPUT_HEIGHT = self.INPUT_HEIGHT_BASE
 
         # 移除右上角關閉按鈕以簡化 UI（由視窗系統或快捷鍵關閉）
 
@@ -2345,61 +2592,207 @@ class MainWindow(QMainWindow):
         self.speech_bubble.setFixedSize(140, 160)
         self.speech_bubble.show()  # 初始顯示
 
-        # 創建輸入區域
+        # Debounce speech bubble refresh to avoid flicker when streaming many chunks.
+        self._pending_bubble_text = ""
+        self._bubble_update_timer = QTimer(self)
+        self._bubble_update_timer.setSingleShot(True)
+        self._bubble_update_timer.timeout.connect(self._flush_bubble_update)
+        self._mask_update_timer = QTimer(self)
+        self._mask_update_timer.setSingleShot(True)
+        self._mask_update_timer.timeout.connect(self._update_window_mask)
+
+        # ── Input container (single card: [attach chips] / [input row] / [toolbar row]) ──
+        self._attached_file_path: str = ""
+        self._attached_images: list[bytes] = []   # multiple pasted images
+        self._is_running = False
+        self._bypass_mode = False  # auto-approve all permissions
+
         self.input_container = QWidget(self)
         self.input_container.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
 
-        self.input_layout = QHBoxLayout(self.input_container)
-        self.input_layout.setContentsMargins(0, 0, 0, 0)
-        self.input_layout.setSpacing(5)
+        # Outer vertical layout — no margins, contents sit inside the card
+        outer_vbox = QVBoxLayout(self.input_container)
+        outer_vbox.setContentsMargins(0, 0, 0, 0)
+        outer_vbox.setSpacing(0)
 
-        # 使用自定義的 CommandLineEdit 替代 QLineEdit
+        # ── Unified card widget (single rounded dark panel) ───────────────
+        self._input_card = QWidget()
+        self._input_card.setObjectName("InputCard")
+        self._input_card.setStyleSheet(
+            "#InputCard { "
+            "background: rgba(28, 30, 38, 230); "
+            "border: 1px solid rgba(255,255,255,35); "
+            "border-radius: 18px; "
+            "}"
+        )
+        card_vbox = QVBoxLayout(self._input_card)
+        card_vbox.setContentsMargins(8, 6, 8, 6)
+        card_vbox.setSpacing(4)
+
+        # ── Attachment chip row (hidden until something is attached) ──────
+        self._attach_row = QWidget()
+        self._attach_row.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self._attach_chips_layout = QHBoxLayout(self._attach_row)
+        self._attach_chips_layout.setContentsMargins(2, 0, 2, 0)
+        self._attach_chips_layout.setSpacing(5)
+        self._attach_chips_layout.addStretch(1)
+        self._attach_row.setFixedHeight(26)
+        self._attach_row.hide()
+        card_vbox.addWidget(self._attach_row)
+
+        # ── Main input row ────────────────────────────────────────────────
+        input_row_widget = QWidget()
+        input_row_widget.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        input_row = QHBoxLayout(input_row_widget)
+        input_row.setContentsMargins(0, 0, 0, 0)
+        input_row.setSpacing(4)
+
+        self._voice_active = False
+        self._voice_callback = None  # set by main.py: fn(text|None)
+
+        self.voice_button = QPushButton("🎤")
+        self.voice_button.setFixedSize(28, 28)
+        self._voice_btn_idle_style = (
+            "QPushButton { "
+            "background: transparent; color: rgba(200,200,220,190); "
+            "border: none; font-size: 14px; border-radius: 14px; "
+            "}"
+            "QPushButton:hover { background: rgba(255,255,255,12); }"
+        )
+        self._voice_btn_cancel_style = (
+            "QPushButton { "
+            "background: rgba(180,40,40,200); color: #fff; "
+            "border: none; font-size: 13px; border-radius: 14px; "
+            "}"
+            "QPushButton:hover { background: rgba(210,55,55,230); }"
+        )
+        self.voice_button.setStyleSheet(self._voice_btn_idle_style)
+        self.voice_button.clicked.connect(self.on_voice_requested)
+
         self.input_field = CommandLineEdit()
         self.input_field.setPlaceholderText("輸入文字、指令或按🎤啟動語音...")
         self.input_field.setStyleSheet(
             "QLineEdit { "
-            "background-color: rgba(50, 50, 50, 220); "
-            "color: white; "
-            "border: 1px solid rgba(255, 255, 255, 60); "
-            "border-radius: 15px; "
-            "padding: 8px 12px; "
+            "background: transparent; "
+            "color: #e8eaf0; "
+            "border: none; "
+            "padding: 2px 4px; "
+            "font-size: 12px; "
             "}"
         )
         self.input_field.returnPressed.connect(self.on_input_submitted)
-        # 當使用者正在輸入時，發出 typing 信號（用於重置閒置計時）
         try:
             self.input_field.textEdited.connect(self._handle_user_typing)
         except Exception:
-            # fallback to textChanged if textEdited not available
             self.input_field.textChanged.connect(self._handle_user_typing)
 
-        self.voice_button = QPushButton("🎤")
-        self.voice_button.setFixedSize(35, 35)
-        self.voice_button.setStyleSheet(
-            "QPushButton { "
-            "background-color: rgba(70, 70, 70, 180); "
-            "color: white; "
-            "border: 1px solid rgba(255, 255, 255, 40); "
-            "border-radius: 17px; "
-            "font-size: 16px; "
-            "}"
-            "QPushButton:hover { background-color: rgba(100, 100, 100, 220); }"
-        )
-        self.voice_button.clicked.connect(self.on_voice_requested)
+        # Waveform widget — hidden until voice mode is active
+        self._waveform = WaveformWidget()
+        self._waveform.hide()
 
         self.send_button = QPushButton("發送")
-        self.send_button.setFixedSize(60, 35)
-        self.send_button.setStyleSheet(
+        self.send_button.setFixedSize(52, 28)
+        self._send_btn_send_style = (
             "QPushButton { "
-            "background-color: #2FBF71; "
-            "color: #FFFFFF; "
-            "border: none; "
-            "border-radius: 15px; "
-            "font-weight: bold; "
+            "background: #2FBF71; color: #fff; border: none; "
+            "border-radius: 12px; font-weight: bold; font-size: 12px; "
             "}"
-            "QPushButton:hover { background-color: #28A862; }"
+            "QPushButton:hover { background: #28A862; }"
         )
+        self._send_btn_stop_style = (
+            "QPushButton { "
+            "background: rgba(210,55,55,220); color: #fff; border: none; "
+            "border-radius: 12px; font-size: 11px; "
+            "padding: 0 0 1px 0; "
+            "}"
+            "QPushButton:hover { background: rgba(230,70,70,240); }"
+        )
+        self.send_button.setStyleSheet(self._send_btn_send_style)
         self.send_button.clicked.connect(self.on_input_submitted)
+
+        input_row.addWidget(self.voice_button)
+        input_row.addWidget(self.input_field, 1)
+        input_row.addWidget(self._waveform, 1)
+        input_row.addWidget(self.send_button)
+        card_vbox.addWidget(input_row_widget)
+
+        # ── Separator line ────────────────────────────────────────────────
+        sep = QWidget()
+        sep.setFixedHeight(1)
+        sep.setStyleSheet("QWidget { background: rgba(255,255,255,18); border: none; }")
+        card_vbox.addWidget(sep)
+
+        # ── Toolbar row (inside card, has the card background) ────────────
+        _tbtn = (
+            "QPushButton { background: transparent; color: rgba(150,165,185,160); "
+            "border: none; font-size: 12px; padding: 0 4px; border-radius: 4px; } "
+            "QPushButton:hover { color: rgba(210,225,255,220); background: rgba(255,255,255,8); }"
+        )
+        _tlbl = "QLabel { color: rgba(140,158,180,150); font-size: 10px; background: transparent; }"
+
+        toolbar_row = QWidget()
+        toolbar_row.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        toolbar_layout = QHBoxLayout(toolbar_row)
+        toolbar_layout.setContentsMargins(2, 0, 2, 0)
+        toolbar_layout.setSpacing(2)
+
+        self._attach_btn = QPushButton("＋")
+        self._attach_btn.setToolTip("附加檔案")
+        self._attach_btn.setFixedSize(22, 20)
+        self._attach_btn.setStyleSheet(_tbtn)
+        self._attach_btn.clicked.connect(self._on_attach_file)
+        toolbar_layout.addWidget(self._attach_btn)
+
+        self._slash_btn = QPushButton("／")
+        self._slash_btn.setToolTip("插入 /指令")
+        self._slash_btn.setFixedSize(22, 20)
+        self._slash_btn.setStyleSheet(_tbtn)
+        self._slash_btn.clicked.connect(self._on_slash_shortcut)
+        toolbar_layout.addWidget(self._slash_btn)
+
+        self._total_tok_label = QLabel("Σ —")
+        self._total_tok_label.setStyleSheet(_tlbl)
+        self._total_tok_label.setToolTip("本次對話累計消耗 token 數（全部）")
+        toolbar_layout.addWidget(self._total_tok_label)
+
+        self._ctx_label = QLabel("ctx —")
+        self._ctx_label.setStyleSheet(_tlbl)
+        self._ctx_label.setToolTip("目前 context 窗口用量 / 最大值")
+        toolbar_layout.addWidget(self._ctx_label)
+
+        toolbar_layout.addStretch(1)
+
+        # Bypass toggle button (right side of toolbar)
+        self._bypass_btn = QPushButton("🔒")
+        self._bypass_btn.setToolTip("全開模式：自動允許所有工具執行（再按恢復）")
+        self._bypass_btn.setFixedSize(22, 20)
+        self._bypass_btn.setCheckable(True)
+        self._bypass_btn.setStyleSheet(_tbtn)
+        self._bypass_btn.clicked.connect(self._on_bypass_toggled)
+        toolbar_layout.addWidget(self._bypass_btn)
+
+        card_vbox.addWidget(toolbar_row)
+        outer_vbox.addWidget(self._input_card)
+
+        # keep reference so existing code that calls toolbar_widget.show/hide still works
+        self.toolbar_widget = toolbar_row
+
+        # ── Compaction indicator (floating pill, hidden until compaction runs) ─
+        self._compact_label = QLabel("✂ 壓縮記憶中…", self)
+        self._compact_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._compact_label.setFixedHeight(22)
+        self._compact_label.setStyleSheet(
+            "QLabel { background: rgba(90, 60, 160, 210); color: #ddc8ff; "
+            "border: 1px solid rgba(180,140,255,120); border-radius: 11px; "
+            "font-size: 10px; padding: 0 10px; }"
+        )
+        self._compact_label.hide()
+        self._compact_pulse_timer = QTimer(self)
+        self._compact_pulse_timer.setInterval(500)
+        self._compact_pulse_timer.timeout.connect(self._pulse_compact_label)
+        self._compact_pulse_phase = 0
+
+        # ── Collapse / Todo buttons (floating on parent) ──────────────────
         self.collapse_button = QPushButton("收合", self)
         self.collapse_button.setFixedSize(60, 22)
         self.collapse_button.setStyleSheet(
@@ -2415,10 +2808,24 @@ class MainWindow(QMainWindow):
         self.collapse_button.clicked.connect(self.collapse_to_edge)
         self.collapse_button.hide()
 
-
-        self.input_layout.addWidget(self.voice_button)
-        self.input_layout.addWidget(self.input_field)
-        self.input_layout.addWidget(self.send_button)
+        self.todo_toggle_button = QPushButton("Todo", self)
+        self.todo_toggle_button.setFixedSize(54, 22)
+        self.todo_toggle_button.setStyleSheet(
+            "QPushButton { "
+            "background-color: rgba(24, 52, 82, 210); "
+            "color: #DCEFFF; "
+            "border: 1px solid rgba(170, 210, 255, 120); "
+            "border-radius: 11px; "
+            "font-size: 11px; "
+            "font-weight: bold; "
+            "}"
+            "QPushButton:hover { background-color: rgba(36, 72, 112, 230); }"
+        )
+        self.todo_toggle_button.clicked.connect(self.toggle_todo_drawer)
+        self.todo_toggle_button.hide()
+        self.todo_panel_window = TodoPanelWindow(self)
+        self._todo_window_position_initialized = False
+        self._todo_snapshot_text = ""
 
         self.input_container.hide()  # 初始隱藏
 
@@ -2433,6 +2840,7 @@ class MainWindow(QMainWindow):
 
         # 连接确认信号到槽
         self.confirm_requested.connect(self._handle_confirm_request)
+        self.question_requested.connect(self._handle_question_request)
 
         # 初始化窗口遮罩（點擊穿透）- 多次延遲更新確保完全渲染
         QTimer.singleShot(0, self._update_window_mask)
@@ -2442,6 +2850,10 @@ class MainWindow(QMainWindow):
     def set_input_callback(self, callback):
         """設置輸入回調函數"""
         self.input_callback = callback
+
+    def set_stop_callback(self, callback):
+        """設置停止 agent 的回調函數"""
+        self._stop_callback = callback
     
     def open_config_webview(self):
         """打開配置頁面 WebView"""
@@ -2491,9 +2903,7 @@ class MainWindow(QMainWindow):
 
     @Slot(str, str, object)
     def _handle_confirm_request(self, message: str, default_choice: str, result_container: object):
-        """
-        槽函数：在主线程中处理确认请求
-        """
+        """槽函数：在主线程中处理确认请求"""
         try:
             logger.info(f"[主线程] Creating ConfirmDialog for: {message[:50]}...")
             dialog = ConfirmDialog(message, default_choice, parent=self)
@@ -2502,37 +2912,51 @@ class MainWindow(QMainWindow):
         except Exception as e:
             logger.error(f"[主线程] Error in _handle_confirm_request: {e}", exc_info=True)
         finally:
-            # 退出事件循环
-            if hasattr(result_container, 'loop'):
-                result_container.loop.quit()
-    
+            result_container.done.set()
+
     def show_confirm_dialog(self, message: str, default_choice: str = '') -> bool:
-        """
-        顯示確認對話框（線程安全）
-        使用信号-槽机制和 QEventLoop 确保对话框在主线程中创建和显示
-        """
+        """顯示確認對話框（線程安全）— 使用 threading.Event 等待，相容 asyncio 線程"""
+        import threading
         logger.info(f"[工作线程] show_confirm_dialog called: {message[:50]}...")
-        
-        # 使用简单的对象来存储结果和事件循环
+
         class ResultContainer:
             def __init__(self):
                 self.result = False
-                self.loop = None
-        
+                self.done = threading.Event()
+
         result_container = ResultContainer()
-        
-        # 创建事件循环用于等待
-        result_container.loop = QEventLoop()
-        
-        # 发送信号（Qt 会自动调度到主线程）
-        logger.info("[工作线程] Emitting confirm_requested signal...")
         self.confirm_requested.emit(message, default_choice, result_container)
-        
-        # 运行事件循环，直到槽函数调用 loop.quit()
-        logger.info("[工作线程] Starting event loop...")
-        result_container.loop.exec()
-        
+        result_container.done.wait(timeout=300)  # 5-minute timeout
         logger.info(f"[工作线程] Dialog closed, returning: {result_container.result}")
+        return result_container.result
+
+    @Slot(str, list, object)
+    def _handle_question_request(self, question: str, options: list, result_container: object):
+        """槽函數：在主線程中處理問題選單請求"""
+        try:
+            logger.info(f"[主线程] Creating ChoiceDialog for: {question[:50]}...")
+            dialog = ChoiceDialog(question, options, parent=self)
+            result_container.result = dialog.get_result()
+            logger.info(f"[主线程] ChoiceDialog result: {result_container.result!r}")
+        except Exception as e:
+            logger.error(f"[主线程] Error in _handle_question_request: {e}", exc_info=True)
+        finally:
+            result_container.done.set()
+
+    def show_question_dialog(self, question: str, options: list[str]) -> str:
+        """顯示問題選單對話框（線程安全）— 使用 threading.Event 等待，相容 asyncio 線程"""
+        import threading
+        logger.info(f"[工作线程] show_question_dialog called: {question[:50]}...")
+
+        class ResultContainer:
+            def __init__(self):
+                self.result: str = ""
+                self.done = threading.Event()
+
+        result_container = ResultContainer()
+        self.question_requested.emit(question, options, result_container)
+        result_container.done.wait(timeout=300)
+        logger.info(f"[工作线程] ChoiceDialog closed, returning: {result_container.result!r}")
         return result_container.result
 
     def _position_input_container(self) -> None:
@@ -2541,13 +2965,78 @@ class MainWindow(QMainWindow):
             input_width = min(bubble_width, self.FIXED_WIDTH - 40)
         else:
             input_width = min(self.FIXED_WIDTH - 40, 500)
+        x = (self.FIXED_WIDTH - input_width) // 2
         self.input_container.setGeometry(
-            (self.FIXED_WIDTH - input_width) // 2,
+            x,
             self.FIXED_HEIGHT - self.INPUT_HEIGHT - self.INPUT_FROM_BOTTOM,
             input_width,
             self.INPUT_HEIGHT,
         )
         self._position_collapse_button()
+        self._position_todo_toggle_button()
+        self._position_compact_label()
+
+    def _position_compact_label(self) -> None:
+        lbl_w = max(140, self._compact_label.sizeHint().width() + 20)
+        lbl_h = 22
+        input_rect = self.input_container.geometry()
+        x = (self.FIXED_WIDTH - lbl_w) // 2
+        y = input_rect.y() - lbl_h - 6
+        self._compact_label.setGeometry(x, y, lbl_w, lbl_h)
+
+    def _position_todo_toggle_button(self) -> None:
+        btn_w = self.todo_toggle_button.width()
+        btn_h = self.todo_toggle_button.height()
+        input_rect = self.input_container.geometry()
+        x = input_rect.center().x() - (btn_w // 2) - 66
+        y = max(10, input_rect.y() - btn_h - 6)
+        x = max(8, min(x, self.FIXED_WIDTH - btn_w - 8))
+        self.todo_toggle_button.setGeometry(x, y, btn_w, btn_h)
+
+    def _position_todo_window(self, *, force: bool = False) -> None:
+        if self.todo_panel_window is None:
+            return
+        if self._todo_window_position_initialized and not force:
+            return
+        frame = self.frameGeometry()
+        screen = self.screen() or QGuiApplication.screenAt(frame.center()) or QGuiApplication.primaryScreen()
+        if screen is not None:
+            screen_rect = screen.availableGeometry()
+        else:
+            screen_rect = QRect(frame.left(), frame.top(), frame.width(), frame.height())
+        x, y = _compute_todo_window_position(
+            frame,
+            self.todo_toggle_button.geometry(),
+            self.todo_panel_window.size(),
+            screen_rect,
+        )
+        self.todo_panel_window.move(x, y)
+        self._todo_window_position_initialized = True
+
+    def toggle_todo_drawer(self) -> None:
+        if self.todo_panel_window.isVisible():
+            self.close_todo_drawer()
+        else:
+            self.open_todo_drawer()
+
+    def open_todo_drawer(self) -> None:
+        if self.todo_panel_window.isVisible():
+            return
+        self._position_todo_window()
+        self.todo_panel_window.show()
+        self.todo_panel_window.raise_()
+        self.todo_panel_window.activateWindow()
+        self._update_window_mask()
+
+    def close_todo_drawer(self) -> None:
+        if not self.todo_panel_window.isVisible():
+            return
+        self.todo_panel_window.hide()
+        self._update_window_mask()
+
+    def update_todo_drawer(self, text: str) -> None:
+        self._todo_snapshot_text = (text or "").strip()
+        self.todo_panel_window.set_todo_text(self._todo_snapshot_text)
 
     def _position_collapse_button(self) -> None:
         btn_w = self.collapse_button.width()
@@ -2561,7 +3050,231 @@ class MainWindow(QMainWindow):
         self._position_input_container()
         self.input_container.show()
         self.collapse_button.show()
+        self.todo_toggle_button.show()
         self._update_window_mask()
+
+    # ── Toolbar actions ───────────────────────────────────────────────────
+
+    def set_running(self, running: bool) -> None:
+        """Toggle send/stop button between run mode and stop mode."""
+        self._is_running = running
+        if running:
+            self.send_button.setText("")
+            self.send_button.setIcon(_make_stop_icon(20))
+            self.send_button.setIconSize(QSize(20, 20))
+            self.send_button.setStyleSheet(self._send_btn_stop_style)
+            self.send_button.clicked.disconnect()
+            self.send_button.clicked.connect(self._on_stop_requested)
+        else:
+            self.send_button.setIcon(QIcon())  # clear icon
+            self.send_button.setText("發送")
+            self.send_button.setStyleSheet(self._send_btn_send_style)
+            self.send_button.clicked.disconnect()
+            self.send_button.clicked.connect(self.on_input_submitted)
+
+    def _on_stop_requested(self) -> None:
+        if self._stop_callback:
+            self._stop_callback()
+
+    def set_bypass_callback(self, callback) -> None:
+        """Set callback invoked when bypass mode is toggled. callback(enabled: bool)"""
+        self._bypass_callback = callback
+
+    def _on_bypass_toggled(self, checked: bool) -> None:
+        self._bypass_mode = checked
+        _bypass_on = (
+            "QPushButton { background: rgba(220,120,0,180); color: #ffe0a0; "
+            "border: none; font-size: 12px; padding: 0 4px; border-radius: 4px; } "
+            "QPushButton:hover { background: rgba(240,140,0,210); }"
+        )
+        _bypass_off = (
+            "QPushButton { background: transparent; color: rgba(150,165,185,160); "
+            "border: none; font-size: 12px; padding: 0 4px; border-radius: 4px; } "
+            "QPushButton:hover { color: rgba(210,225,255,220); background: rgba(255,255,255,8); }"
+        )
+        if checked:
+            self._bypass_btn.setText("🔓")
+            self._bypass_btn.setToolTip("全開模式已開啟 — 自動允許所有工具（點擊關閉）")
+            self._bypass_btn.setStyleSheet(_bypass_on)
+        else:
+            self._bypass_btn.setText("🔒")
+            self._bypass_btn.setToolTip("全開模式：自動允許所有工具執行（再按恢復）")
+            self._bypass_btn.setStyleSheet(
+                "QPushButton { background: transparent; color: rgba(150,165,185,160); "
+                "border: none; font-size: 12px; padding: 0 4px; border-radius: 4px; } "
+                "QPushButton:hover { color: rgba(210,225,255,220); background: rgba(255,255,255,8); }"
+            )
+        cb = getattr(self, "_bypass_callback", None)
+        if cb:
+            cb(checked)
+
+    def is_bypass_mode(self) -> bool:
+        return self._bypass_mode
+
+    def update_context_meter(self, used_tokens: int, max_tokens: int, total_tokens: int = 0) -> None:
+        """Update the token usage labels in the toolbar.
+
+        Args:
+            used_tokens:  tokens currently in the context window
+            max_tokens:   maximum context window size
+            total_tokens: cumulative tokens consumed across the whole session
+        """
+        def _fmt(n: int) -> str:
+            if n >= 1_000_000:
+                return f"{n / 1_000_000:.1f}M"
+            if n >= 1_000:
+                return f"{n / 1_000:.1f}k"
+            return str(n)
+
+        if max_tokens > 0:
+            pct = min(100, round(used_tokens * 100 / max_tokens))
+            ctx_color = "#f06b6b" if pct >= 80 else "#f0c060" if pct >= 50 else "rgba(160,180,200,160)"
+            self._ctx_label.setText(f"ctx {_fmt(used_tokens)}/{_fmt(max_tokens)} ({pct}%)")
+            self._ctx_label.setStyleSheet(f"QLabel {{ color: {ctx_color}; font-size: 10px; }}")
+
+        if total_tokens > 0:
+            self._total_tok_label.setText(f"Σ {_fmt(total_tokens)}")
+        else:
+            self._total_tok_label.setText("Σ —")
+
+    # ── Chip style helpers ────────────────────────────────────────────────
+    _CHIP_STYLE = (
+        "QLabel { background: rgba(45,55,80,200); color: #a8d4ff; "
+        "border: 1px solid rgba(90,140,220,100); border-radius: 8px; "
+        "padding: 2px 8px; font-size: 11px; }"
+    )
+    _CHIP_CLOSE_STYLE = (
+        "QPushButton { background: transparent; color: rgba(160,170,200,160); "
+        "border: none; font-size: 9px; padding: 0; } "
+        "QPushButton:hover { color: #ff6b6b; }"
+    )
+
+    def _add_chip(self, label: str, on_remove) -> None:
+        """Insert a chip + ✕ button pair into the attach row (before the stretch)."""
+        chip = QLabel(label)
+        chip.setStyleSheet(self._CHIP_STYLE)
+        chip.setMaximumWidth(200)
+
+        close_btn = QPushButton("✕")
+        close_btn.setFixedSize(14, 14)
+        close_btn.setStyleSheet(self._CHIP_CLOSE_STYLE)
+
+        # Store refs on buttons for cleanup
+        chip._close_btn = close_btn
+
+        def _remove():
+            on_remove()
+            # Remove chip + close_btn from layout
+            for w in (chip, close_btn):
+                self._attach_chips_layout.removeWidget(w)
+                w.deleteLater()
+            self._refresh_chip_row()
+
+        close_btn.clicked.connect(_remove)
+
+        # Insert before the trailing stretch (last item)
+        insert_pos = max(0, self._attach_chips_layout.count() - 1)
+        self._attach_chips_layout.insertWidget(insert_pos, chip)
+        self._attach_chips_layout.insertWidget(insert_pos + 1, close_btn)
+        self._refresh_chip_row()
+
+    def _refresh_chip_row(self) -> None:
+        """Show/hide the chip row and reposition the container accordingly."""
+        has_chips = self._attach_chips_layout.count() > 1  # >1 means chips present (not just stretch)
+        if has_chips:
+            self._attach_row.show()
+            self.INPUT_HEIGHT = self.INPUT_HEIGHT_CHIPS
+        else:
+            self._attach_row.hide()
+            self.INPUT_HEIGHT = self.INPUT_HEIGHT_BASE
+        if self.input_container.isVisible():
+            self._position_input_container()
+
+    def _show_attach_chip(self, label: str) -> None:
+        """Add an image chip (called for clipboard paste)."""
+        idx = len(self._attached_images) - 1  # index of the image just appended
+
+        def on_remove():
+            # Remove this specific image by index (find by closure)
+            try:
+                if 0 <= idx < len(self._attached_images):
+                    self._attached_images.pop(idx)
+            except Exception:
+                pass
+
+        self._add_chip(label, on_remove)
+
+    def _clear_attachment(self) -> None:
+        """Clear ALL attachments and remove all chips."""
+        self._attached_file_path = ""
+        self._attached_images = []
+        # Remove all chip widgets (everything except the trailing stretch)
+        while self._attach_chips_layout.count() > 1:
+            item = self._attach_chips_layout.takeAt(0)
+            if item and item.widget():
+                item.widget().deleteLater()
+        self._refresh_chip_row()
+
+    def _on_attach_file(self) -> None:
+        """Open file dialog and attach a file to the next message."""
+        path, _ = QFileDialog.getOpenFileName(
+            self, "附加檔案", "", "All Files (*.*)"
+        )
+        if path:
+            self._attached_file_path = path
+            name = path.split("/")[-1].split("\\")[-1]
+            short = name if len(name) <= 20 else name[:17] + "…"
+
+            def on_remove():
+                self._attached_file_path = ""
+
+            self._add_chip(f"📎 {short}", on_remove)
+
+    def _on_slash_shortcut(self) -> None:
+        """Insert '/' into the input field to trigger command completion."""
+        if not self.input_field.text():
+            self.input_field.setText("/")
+            self.input_field.setFocus()
+            self.input_field.setCursorPosition(1)
+
+    def get_attached_file_path(self) -> str:
+        """Return path of attached file (cleared after retrieval)."""
+        path = self._attached_file_path
+        if path:
+            self._attached_file_path = ""
+            self._clear_attachment()
+        return path
+
+    def get_attached_image_data(self) -> bytes:
+        """Return first pasted image bytes (legacy; use pop_attached_images_as_tempfiles for multi)."""
+        if self._attached_images:
+            return self._attached_images[0]
+        return b""
+
+    def pop_attached_images_as_tempfiles(self) -> list[str]:
+        """Save all pasted images to temp PNG files and return their paths.
+        Clears the image list. Caller is responsible for deleting the files."""
+        if not self._attached_images:
+            return []
+        import tempfile, os
+        paths = []
+        for data in self._attached_images:
+            fd, path = tempfile.mkstemp(suffix=".png", prefix="agent_clip_")
+            try:
+                os.write(fd, data)
+            finally:
+                os.close(fd)
+            paths.append(path)
+        self._attached_images = []
+        self._clear_attachment()
+        return paths
+
+    def pop_attached_image_as_tempfile(self) -> str:
+        """Legacy single-image version — returns first image path only."""
+        paths = self.pop_attached_images_as_tempfiles()
+        return paths[0] if paths else ""
+
+    # ── Input callback ────────────────────────────────────────────────────
 
     def _handle_user_typing(self, *_args):
         """Slot: triggered when the user edits the input field.
@@ -2574,6 +3287,7 @@ class MainWindow(QMainWindow):
     def hide_input_container(self) -> None:
         self.input_container.hide()
         self.collapse_button.hide()
+        self.todo_toggle_button.hide()
         self._update_window_mask()
 
     def toggle_input_container(self) -> None:
@@ -2586,6 +3300,7 @@ class MainWindow(QMainWindow):
         if self._collapsed:
             return
         self._input_visible_before_collapse = self.input_container.isVisible()
+        self.close_todo_drawer()
         self.edge_handle.show_at_edge(self)
         self.edge_handle.raise_()
         self.hide()
@@ -2615,10 +3330,84 @@ class MainWindow(QMainWindow):
             self.input_field.setPlaceholderText("輸入文字、指令或按🎤啟動語音...")
             self.input_callback(text)
 
+    # ── Voice mode ────────────────────────────────────────────────────────
+
+    def set_voice_callback(self, cb) -> None:
+        """cb(text: str|None) called when voice recognition finishes or is cancelled."""
+        self._voice_callback = cb
+
     def on_voice_requested(self):
-        """處理語音請求"""
-        if self.input_callback:
-            self.input_callback(None)  # None 表示使用語音輸入
+        if self._voice_active:
+            self._cancel_voice()
+        else:
+            self._enter_voice_mode()
+
+    def _enter_voice_mode(self) -> None:
+        self._voice_active = True
+        # Swap text field → waveform
+        self.input_field.hide()
+        self._waveform.show()
+        self._waveform.start()
+        # Voice button → cancel (✕)
+        self.voice_button.setText("✕")
+        self.voice_button.setStyleSheet(self._voice_btn_cancel_style)
+        # Send button becomes "送出語音"
+        self._prev_send_click = None
+        try:
+            self.send_button.clicked.disconnect()
+        except Exception:
+            pass
+        self.send_button.clicked.connect(self._submit_voice_now)
+        # Notify main.py to start recognition
+        if self._voice_callback:
+            self._voice_callback("__start__")
+
+    def _exit_voice_mode(self) -> None:
+        self._voice_active = False
+        self._waveform.stop()
+        self._waveform.hide()
+        self.input_field.show()
+        self.input_field.setFocus()
+        self.voice_button.setText("🎤")
+        self.voice_button.setStyleSheet(self._voice_btn_idle_style)
+        # Restore send button
+        try:
+            self.send_button.clicked.disconnect()
+        except Exception:
+            pass
+        if self._is_running:
+            self.send_button.clicked.connect(self._on_stop_requested)
+        else:
+            self.send_button.clicked.connect(self.on_input_submitted)
+
+    def _cancel_voice(self) -> None:
+        self._exit_voice_mode()
+        if self._voice_callback:
+            self._voice_callback("__cancel__")
+
+    def _submit_voice_now(self) -> None:
+        """User pressed send during recording — commit immediately."""
+        self._exit_voice_mode()
+        if self._voice_callback:
+            self._voice_callback("__submit__")
+
+    def set_voice_level(self, level: float) -> None:
+        """Called from voice worker thread (via queued signal) to update waveform."""
+        if self._voice_active:
+            self._waveform.set_level(level)
+
+    def voice_result_ready(self, text: str | None) -> None:
+        """Called when recognition finishes. Appends recognized text to the input field."""
+        if not self._voice_active:
+            return
+        self._exit_voice_mode()
+        if text:
+            existing = self.input_field.text().strip()
+            sep = " " if existing else ""
+            self.input_field.setText(existing + sep + text)
+            self.input_field.setFocus()
+            # Move cursor to end
+            self.input_field.setCursorPosition(len(self.input_field.text()))
 
     # --- Mouse Events for dragging the window ---
     def mousePressEvent(self, event):
@@ -2642,6 +3431,14 @@ class MainWindow(QMainWindow):
         super().showEvent(event)
         # 延遲更新以確保所有子元素都已渲染
         QTimer.singleShot(100, self._update_window_mask)
+
+    def closeEvent(self, event):
+        try:
+            if self.todo_panel_window is not None:
+                self.todo_panel_window.close()
+        except Exception:
+            pass
+        super().closeEvent(event)
 
     def _update_window_mask(self):
         """更新窗口遮罩，定義可交互區域（跨平台方案）"""
@@ -2706,12 +3503,17 @@ class MainWindow(QMainWindow):
 
     def update_speech_bubble(self, text):
         """更新對話框內容，輸出框疊到球的上方一半"""
-        self.speech_bubble.set_content(text)
+        self._pending_bubble_text = text or ""
+        if not self._bubble_update_timer.isActive():
+            self._bubble_update_timer.start(40)
+
+    def _flush_bubble_update(self):
+        self.speech_bubble.set_content(self._pending_bubble_text)
 
         # 延遲處理事件，避免阻塞主線程
         QTimer.singleShot(0, self._update_bubble_geometry)
-        # 再次延遲更新遮罩，確保氣泡完全渲染後更新
-        QTimer.singleShot(100, self._update_window_mask)
+        # Merge mask refresh requests instead of stacking many singleShots.
+        self._mask_update_timer.start(120)
 
     def start_agent_animation(self):
         """啟動 agent 運行動畫"""
@@ -2722,6 +3524,34 @@ class MainWindow(QMainWindow):
         """停止 agent 運行動畫"""
         self.speech_bubble.stop_animation()
         self.edge_handle.set_active_glow(False)
+
+    def set_compact_indicator(self, active: bool) -> None:
+        """Show or hide the compaction-in-progress indicator."""
+        if active:
+            self._position_compact_label()
+            self._compact_label.show()
+            self._compact_label.raise_()
+            self._compact_pulse_phase = 0
+            self._compact_pulse_timer.start()
+        else:
+            self._compact_pulse_timer.stop()
+            self._compact_label.hide()
+
+    def _pulse_compact_label(self) -> None:
+        """Alternate label opacity to create a pulsing effect."""
+        self._compact_pulse_phase = 1 - self._compact_pulse_phase
+        if self._compact_pulse_phase:
+            self._compact_label.setStyleSheet(
+                "QLabel { background: rgba(110, 75, 190, 230); color: #eedeff; "
+                "border: 1px solid rgba(200,160,255,160); border-radius: 11px; "
+                "font-size: 10px; padding: 0 10px; }"
+            )
+        else:
+            self._compact_label.setStyleSheet(
+                "QLabel { background: rgba(70, 45, 130, 180); color: #c8aaee; "
+                "border: 1px solid rgba(160,120,220,90); border-radius: 11px; "
+                "font-size: 10px; padding: 0 10px; }"
+            )
     
     def _update_bubble_geometry(self):
         """更新氣泡幾何形狀（延遲調用以避免阻塞）"""
@@ -2759,7 +3589,8 @@ class MainWindow(QMainWindow):
 
             # 設置講話框位置
             self.speech_bubble.move(bubble_x, bubble_y)
-            self.speech_bubble.show()
+            if not self.speech_bubble.isVisible():
+                self.speech_bubble.show()
 
             # 更新輸入容器位置（固定在視窗底部）
             if self.input_container.isVisible():
@@ -2802,87 +3633,261 @@ class ConfigWebViewWindow(QMainWindow):
         self.setCentralWidget(self.webview)
 
 
+class ChoiceDialog(QDialog):
+    """問題選單對話框 — 顯示 agent 的問題及可點擊的選項按鈕"""
+
+    _STYLE = """
+        QDialog {
+            background-color: #1c1c1e;
+            border-radius: 14px;
+        }
+        QLabel#icon {
+            font-size: 22px;
+        }
+        QLabel#question {
+            color: #f0f0f0;
+            font-size: 14px;
+            line-height: 1.5;
+        }
+        QFrame#sep {
+            color: rgba(255, 255, 255, 25);
+        }
+        QPushButton#option {
+            background-color: rgba(58, 58, 68, 220);
+            color: #dde8f8;
+            border: 1px solid rgba(255, 255, 255, 40);
+            border-radius: 9px;
+            padding: 10px 16px;
+            font-size: 13px;
+            text-align: left;
+        }
+        QPushButton#option:hover {
+            background-color: rgba(0, 112, 240, 200);
+            border-color: rgba(80, 160, 255, 180);
+        }
+        QPushButton#option:pressed {
+            background-color: rgba(0, 80, 180, 230);
+        }
+    """
+
+    def __init__(self, question: str, options: list[str], parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Agent 問題")
+        self.setModal(True)
+        self.setMinimumWidth(440)
+        self.setStyleSheet(self._STYLE)
+        self._selected: str = ""
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(10)
+        layout.setContentsMargins(22, 22, 22, 22)
+
+        # Header: icon + question text
+        header = QHBoxLayout()
+        header.setSpacing(10)
+        icon = QLabel("❓")
+        icon.setObjectName("icon")
+        icon.setFixedWidth(30)
+        icon.setAlignment(Qt.AlignmentFlag.AlignTop)
+        header.addWidget(icon)
+
+        q_label = QLabel(question)
+        q_label.setObjectName("question")
+        q_label.setWordWrap(True)
+        header.addWidget(q_label, 1)
+        layout.addLayout(header)
+
+        # Separator
+        sep = QFrame()
+        sep.setObjectName("sep")
+        sep.setFrameShape(QFrame.Shape.HLine)
+        layout.addWidget(sep)
+        layout.addSpacing(2)
+
+        # Option buttons OR free-text input
+        if options:
+            for opt in options:
+                btn = QPushButton(f"  {opt}")
+                btn.setObjectName("option")
+                btn.setCursor(Qt.CursorShape.PointingHandCursor)
+                btn.clicked.connect(lambda _checked, o=opt: self._select(o))
+                layout.addWidget(btn)
+        else:
+            # Open-ended: show a text input field + confirm button
+            self._text_input = QLineEdit()
+            self._text_input.setPlaceholderText("請輸入回覆…")
+            self._text_input.setStyleSheet(
+                "QLineEdit { "
+                "background: rgba(50,52,65,220); "
+                "color: #e8eaf0; "
+                "border: 1px solid rgba(255,255,255,50); "
+                "border-radius: 8px; "
+                "padding: 8px 12px; "
+                "font-size: 13px; "
+                "}"
+                "QLineEdit:focus { border-color: rgba(80,150,255,180); }"
+            )
+            self._text_input.returnPressed.connect(self._submit_text)
+            layout.addWidget(self._text_input)
+            layout.addSpacing(4)
+
+            confirm_btn = QPushButton("確認")
+            confirm_btn.setObjectName("option")
+            confirm_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            confirm_btn.setStyleSheet(
+                "QPushButton { "
+                "background: rgba(0,100,220,200); color: #fff; "
+                "border: none; border-radius: 9px; "
+                "padding: 10px 16px; font-size: 13px; "
+                "}"
+                "QPushButton:hover { background: rgba(0,120,255,220); }"
+            )
+            confirm_btn.clicked.connect(self._submit_text)
+            layout.addWidget(confirm_btn)
+            QTimer.singleShot(0, self._text_input.setFocus)
+
+    def _submit_text(self) -> None:
+        text = self._text_input.text().strip() if hasattr(self, "_text_input") else ""
+        self._selected = text
+        self.accept()
+
+    def _select(self, option: str) -> None:
+        self._selected = option
+        self.accept()
+
+    def get_result(self) -> str:
+        """顯示對話框並返回使用者選擇的選項或輸入的文字（取消時返回空字串）"""
+        self.exec()
+        return self._selected
+
+
 class ConfirmDialog(QDialog):
-    """確認對話框，用於工具執行確認"""
-    
+    """確認對話框，用於工具執行確認（與 ChoiceDialog 共用視覺語言）"""
+
+    _STYLE = """
+        QDialog {
+            background-color: #1c1c1e;
+            border-radius: 14px;
+        }
+        QLabel#icon { font-size: 22px; }
+        QLabel#title {
+            color: #f0f0f0;
+            font-size: 15px;
+            font-weight: bold;
+        }
+        QFrame#sep { color: rgba(255,255,255,25); }
+        QTextBrowser#body {
+            background-color: rgba(30,30,38,180);
+            color: #b8b8bc;
+            font-size: 12px;
+            border: 1px solid rgba(255,255,255,18);
+            border-radius: 6px;
+            padding: 6px;
+            selection-background-color: rgba(0,112,240,120);
+        }
+        QScrollBar:vertical {
+            border: none; background: transparent; width: 4px; margin: 4px 0;
+        }
+        QScrollBar::handle:vertical {
+            background: rgba(255,255,255,40); min-height: 20px; border-radius: 2px;
+        }
+        QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+        QPushButton#allow {
+            background-color: rgba(0, 112, 240, 200);
+            color: #e8f0ff;
+            border: 1px solid rgba(80, 160, 255, 180);
+            border-radius: 9px;
+            padding: 10px 16px;
+            font-size: 13px;
+            text-align: left;
+        }
+        QPushButton#allow:hover  { background-color: rgba(0, 130, 255, 220); }
+        QPushButton#allow:pressed { background-color: rgba(0, 80, 200, 240); }
+        QPushButton#deny {
+            background-color: rgba(58, 58, 68, 200);
+            color: #c0c0c4;
+            border: 1px solid rgba(255,255,255,35);
+            border-radius: 9px;
+            padding: 10px 16px;
+            font-size: 13px;
+            text-align: left;
+        }
+        QPushButton#deny:hover  { background-color: rgba(80, 80, 92, 220); }
+        QPushButton#deny:pressed { background-color: rgba(45, 45, 55, 240); }
+    """
+
+    _DANGER_KEYWORDS = {"delete", "remove", "rm ", "drop", "kill", "truncate", "format", "wipe"}
+
     def __init__(self, message: str, default_choice: str = '', parent=None):
         super().__init__(parent)
         self.setWindowTitle("工具執行確認")
         self.setModal(True)
-        self.setMinimumWidth(400)
-        
-        # 設置樣式
-        self.setStyleSheet("""
-            QDialog {
-                background-color: #2b2b2b;
-                color: #ffffff;
-                border-radius: 10px;
-            }
-            QLabel {
-                color: #ffffff;
-                font-size: 14px;
-                padding: 10px;
-            }
-            QPushButton {
-                background-color: #007AFF;
-                color: white;
-                border: none;
-                border-radius: 5px;
-                padding: 8px 16px;
-                font-size: 13px;
-                min-width: 80px;
-            }
-            QPushButton:hover {
-                background-color: #329DFF;
-            }
-            QPushButton:pressed {
-                background-color: #0051D5;
-            }
-            QPushButton#cancelButton {
-                background-color: #5a5a5a;
-            }
-            QPushButton#cancelButton:hover {
-                background-color: #6a6a6a;
-            }
-        """)
-        
-        # 創建佈局
+        # Fixed width; height is bounded by the scroll area
+        self.setFixedWidth(460)
+        self.setStyleSheet(self._STYLE)
+
+        msg_lower = message.lower()
+        is_danger = any(kw in msg_lower for kw in self._DANGER_KEYWORDS)
+        icon_char = "⚠️" if is_danger else "🔧"
+
         layout = QVBoxLayout(self)
-        layout.setSpacing(20)
-        layout.setContentsMargins(20, 20, 20, 20)
-        
-        # 訊息標籤
-        message_label = QLabel(message)
-        message_label.setWordWrap(True)
-        message_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-        layout.addWidget(message_label)
-        
-        # 按鈕區域
-        button_box = QDialogButtonBox()
-        
-        yes_button = button_box.addButton("允許", QDialogButtonBox.ButtonRole.AcceptRole)
-        no_button = button_box.addButton("拒絕", QDialogButtonBox.ButtonRole.RejectRole)
-        no_button.setObjectName("cancelButton")
-        
-        # 根據默認選擇設置默認按鈕
+        layout.setSpacing(10)
+        layout.setContentsMargins(22, 20, 22, 20)
+
+        # Header row
+        header = QHBoxLayout()
+        header.setSpacing(10)
+        icon = QLabel(icon_char)
+        icon.setObjectName("icon")
+        icon.setFixedWidth(32)
+        icon.setAlignment(Qt.AlignmentFlag.AlignVCenter)
+        header.addWidget(icon)
+        title = QLabel("工具執行請求")
+        title.setObjectName("title")
+        header.addWidget(title, 1)
+        layout.addLayout(header)
+
+        sep = QFrame()
+        sep.setObjectName("sep")
+        sep.setFrameShape(QFrame.Shape.HLine)
+        layout.addWidget(sep)
+
+        # Scrollable body — fixed height so long messages don't overflow
+        body = QTextBrowser()
+        body.setObjectName("body")
+        body.setOpenLinks(False)
+        body.setReadOnly(True)
+        body.setFixedHeight(140)          # shows ~6-7 lines; scrolls if more
+        body.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        body.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        body.setPlainText(message)
+        layout.addWidget(body)
+
+        layout.addSpacing(4)
+
+        # Full-width option buttons
+        allow_btn = QPushButton("  ✅ 允許執行  (Y)")
+        allow_btn.setObjectName("allow")
+        allow_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        allow_btn.clicked.connect(self.accept)
+        layout.addWidget(allow_btn)
+
+        deny_btn = QPushButton("  ❌ 拒絕  (N)")
+        deny_btn.setObjectName("deny")
+        deny_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        deny_btn.clicked.connect(self.reject)
+        layout.addWidget(deny_btn)
+
         if default_choice.upper() == 'Y':
-            yes_button.setDefault(True)
-            yes_button.setFocus()
-        elif default_choice.upper() == 'N':
-            no_button.setDefault(True)
-            no_button.setFocus()
-        
-        button_box.accepted.connect(self.accept)
-        button_box.rejected.connect(self.reject)
-        
-        layout.addWidget(button_box)
-        
-        self.result_value = False
-    
+            allow_btn.setDefault(True)
+            allow_btn.setFocus()
+        else:
+            deny_btn.setDefault(True)
+            deny_btn.setFocus()
+
     def get_result(self) -> bool:
         """顯示對話框並返回結果"""
-        result = self.exec()
-        return result == QDialog.DialogCode.Accepted
+        return self.exec() == QDialog.DialogCode.Accepted
 
 
 if __name__ == "__main__":

@@ -351,14 +351,28 @@ def api_get_provider(provider_id: str):
 def api_add_provider():
     """新增提供者"""
     data = request.json
-    
+
+    existing_provider = get_provider(data["provider_id"])
+
+    base_url = data.get("base_url")
+    if existing_provider and "base_url" not in data:
+        base_url = existing_provider.base_url
+
+    api_key = data.get("api_key")
+    if existing_provider and (api_key is None or api_key == ""):
+        api_key = existing_provider.api_key
+
+    github_token = data.get("github_token")
+    if existing_provider and (github_token is None or github_token == ""):
+        github_token = existing_provider.github_token
+
     provider = ProviderConfig(
         provider_id=data["provider_id"],
         provider_type=data["provider_type"],
         name=data["name"],
-        base_url=data.get("base_url"),
-        api_key=data.get("api_key"),
-        github_token=data.get("github_token"),
+        base_url=base_url,
+        api_key=api_key,
+        github_token=github_token,
     )
     
     if add_provider(provider):

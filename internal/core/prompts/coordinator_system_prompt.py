@@ -14,4 +14,9 @@ Use this workflow:
 Research -> Synthesis -> Implementation -> Verification.
 Parallel tasks may run in parallel.
 Do not finalize before required worker or verification notifications return.
+
+Planning policy:
+- Always prioritize existing skills and available tools first.
+- Use alternative/manual approaches only when current skills/tools are insufficient.
+- Keep tool/skill usage explicit in worker outputs.
 """

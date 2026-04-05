@@ -11,24 +11,29 @@ Role = Literal["system", "user", "assistant", "tool"]
 CompactMode = Literal["base", "partial_from", "partial_up_to"]
 MessageLike = ModelRequest | ModelResponse
 
-MAX_CONTEXT_TOKENS = 128000
+MAX_CONTEXT_TOKENS = 512000
 COMPACT_TRIGGER_RATIO = 0.75
-RECENT_KEEP_COUNT = 8
+RECENT_KEEP_COUNT = 20   # keep more recent messages for richer continuation context
+TOOL_OUTPUT_RECENT_KEEP = 8
+COMPACTION_INPUT_TOKEN_BUDGET = 90000
+COMPACTION_OLD_SUMMARY_TOKEN_BUDGET = 20000
 
 NO_TOOLS_PREAMBLE = """CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.
 
-- Do NOT use Read, Bash, Grep, Glob, Edit, Write, or ANY other tool.
+- Do NOT use run_terminal_command, fetch, browser, or ANY other tool.
 - You already have all the context you need in the conversation above.
-- Tool calls will be REJECTED and will waste your only turn - you will fail the task.
+- Tool calls will be REJECTED and will waste your only turn — you will fail the task.
 - Your entire response must be plain text: an <analysis> block followed by a <summary> block.
+
 """
 
-BASE_COMPACT_PROMPT = f"""{NO_TOOLS_PREAMBLE}
+NO_TOOLS_TRAILER = (
+    "\n\nREMINDER: Do NOT call any tools. Respond with plain text only — "
+    "an <analysis> block followed by a <summary> block. "
+    "Tool calls will be rejected and you will fail the task."
+)
 
-Your task is to create a detailed summary of the conversation so far, paying close attention to the user's explicit requests and your previous actions.
-This summary should be thorough in capturing technical details, code patterns, and architectural decisions that would be essential for continuing development work without losing context.
-
-Before providing your final summary, wrap your analysis in <analysis> tags to organize your thoughts and ensure you've covered all necessary points. In your analysis process:
+_ANALYSIS_INSTRUCTION_BASE = """Before providing your final summary, wrap your analysis in <analysis> tags to organize your thoughts and ensure you've covered all necessary points. In your analysis process:
 
 1. Chronologically analyze each message and section of the conversation. For each section thoroughly identify:
    - The user's explicit requests and intents
@@ -41,39 +46,9 @@ Before providing your final summary, wrap your analysis in <analysis> tags to or
      - file edits
    - Errors that you ran into and how you fixed them
    - Pay special attention to specific user feedback that you received, especially if the user told you to do something differently.
-2. Double-check for technical accuracy and completeness, addressing each required element thoroughly.
+2. Double-check for technical accuracy and completeness, addressing each required element thoroughly."""
 
-Your summary should include the following sections:
-
-1. Primary Request and Intent
-2. Key Technical Concepts
-3. Files and Code Sections
-4. Errors and fixes
-5. Problem Solving
-6. All user messages
-7. Pending Tasks
-8. Current Work
-9. Optional Next Step
-
-Output format:
-
-<analysis>
-...
-</analysis>
-
-<summary>
-...
-</summary>
-
-CRITICAL REMINDER: Do NOT call tools. Return text only.
-"""
-
-PARTIAL_COMPACT_FROM_PROMPT = f"""{NO_TOOLS_PREAMBLE}
-
-Your task is to create a detailed summary of the RECENT portion of the conversation - the messages that follow earlier retained context. The earlier messages are being kept intact and do NOT need to be summarized.
-This summary should be thorough in capturing technical details, code patterns, and architectural decisions that would be essential for continuing development work without losing context.
-
-Before providing your final summary, wrap your analysis in <analysis> tags to organize your thoughts and ensure you've covered all necessary points. In your analysis process:
+_ANALYSIS_INSTRUCTION_PARTIAL = """Before providing your final summary, wrap your analysis in <analysis> tags to organize your thoughts and ensure you've covered all necessary points. In your analysis process:
 
 1. Analyze the recent messages chronologically. For each section thoroughly identify:
    - The user's explicit requests and intents
@@ -86,19 +61,25 @@ Before providing your final summary, wrap your analysis in <analysis> tags to or
      - file edits
    - Errors that you ran into and how you fixed them
    - Pay special attention to specific user feedback that you received, especially if the user told you to do something differently.
-2. Double-check for technical accuracy and completeness, addressing each required element thoroughly.
+2. Double-check for technical accuracy and completeness, addressing each required element thoroughly."""
+
+_BASE_COMPACT_BODY = f"""Your task is to create a detailed summary of the conversation so far, paying close attention to the user's explicit requests and your previous actions.
+This summary should be thorough in capturing technical details, code patterns, and architectural decisions that would be essential for continuing development work without losing context.
+
+{_ANALYSIS_INSTRUCTION_BASE}
 
 Your summary should include the following sections:
 
-1. Primary Request and Intent
-2. Key Technical Concepts
-3. Files and Code Sections
-4. Errors and fixes
-5. Problem Solving
-6. All user messages
-7. Pending Tasks
-8. Current Work
-9. Optional Next Step
+1. Primary Request and Intent: Capture all of the user's explicit requests and intents in detail
+2. Key Technical Concepts: List all important technical concepts, technologies, and frameworks discussed.
+3. Files and Code Sections: Enumerate specific files and code sections examined, modified, or created. Pay special attention to the most recent messages and include full code snippets where applicable and include a summary of why this file read or edit is important.
+4. Errors and fixes: List all errors that you ran into, and how you fixed them. Pay special attention to specific user feedback that you received, especially if the user told you to do something differently.
+5. Problem Solving: Document problems solved and any ongoing troubleshooting efforts.
+6. All user messages: List ALL user messages that are not tool results. These are critical for understanding the users' feedback and changing intent.
+7. Pending Tasks: Outline any pending tasks that you have explicitly been asked to work on.
+8. Current Work: Describe in detail precisely what was being worked on immediately before this summary request, paying special attention to the most recent messages from both user and assistant. Include file names and code snippets where applicable.
+9. Optional Next Step: List the next step that you will take that is related to the most recent work you were doing. IMPORTANT: ensure that this step is DIRECTLY in line with the user's most recent explicit requests, and the task you were working on immediately before this summary request. If your last task was concluded, then only list next steps if they are explicitly in line with the users request. Do not start on tangential requests or really old requests that were already completed without confirming with the user first.
+                       If there is a next step, include direct quotes from the most recent conversation showing exactly what task you were working on and where you left off. This should be verbatim to ensure there's no drift in task interpretation.
 
 Output format:
 
@@ -108,14 +89,40 @@ Output format:
 
 <summary>
 ...
-</summary>
+</summary>"""
 
-CRITICAL REMINDER: Do NOT call tools. Return text only.
-"""
+BASE_COMPACT_PROMPT = NO_TOOLS_PREAMBLE + _BASE_COMPACT_BODY + NO_TOOLS_TRAILER
 
-PARTIAL_COMPACT_UP_TO_PROMPT = f"""{NO_TOOLS_PREAMBLE}
+_PARTIAL_FROM_BODY = f"""Your task is to create a detailed summary of the RECENT portion of the conversation - the messages that follow earlier retained context. The earlier messages are being kept intact and do NOT need to be summarized.
+This summary should be thorough in capturing technical details, code patterns, and architectural decisions that would be essential for continuing development work without losing context.
 
-Your task is to summarize the EARLIER portion of the conversation up to the cutoff point. Newer messages will remain in the conversation verbatim after this summary, so your summary should focus on preserving the context needed for those later messages to make sense.
+{_ANALYSIS_INSTRUCTION_PARTIAL}
+
+Your summary should include the following sections:
+
+1. Primary Request and Intent: Capture all of the user's explicit requests and intents in detail
+2. Key Technical Concepts: List all important technical concepts, technologies, and frameworks discussed.
+3. Files and Code Sections: Enumerate specific files and code sections examined, modified, or created. Include full code snippets where applicable.
+4. Errors and fixes: List all errors that you ran into, and how you fixed them. Pay special attention to user feedback that changed direction.
+5. Problem Solving: Document problems solved and any ongoing troubleshooting efforts.
+6. All user messages: List ALL user messages that are not tool results.
+7. Pending Tasks: Outline any pending tasks that you have explicitly been asked to work on.
+8. Current Work: Describe precisely what was being worked on immediately before this summary request.
+9. Optional Next Step: List the next step directly in line with the most recent work. Include verbatim quotes from the most recent conversation.
+
+Output format:
+
+<analysis>
+...
+</analysis>
+
+<summary>
+...
+</summary>"""
+
+PARTIAL_COMPACT_FROM_PROMPT = NO_TOOLS_PREAMBLE + _PARTIAL_FROM_BODY + NO_TOOLS_TRAILER
+
+_PARTIAL_UP_TO_BODY = """Your task is to summarize the EARLIER portion of the conversation up to the cutoff point. Newer messages will remain in the conversation verbatim after this summary, so your summary should focus on preserving the context needed for those later messages to make sense.
 
 Before providing your final summary, wrap your analysis in <analysis> tags to organize your thoughts and ensure you've covered all necessary points. In your analysis process:
 
@@ -147,21 +154,21 @@ Output format:
 
 <summary>
 ...
-</summary>
+</summary>"""
 
-CRITICAL REMINDER: Do NOT call tools. Return text only.
-"""
+PARTIAL_COMPACT_UP_TO_PROMPT = NO_TOOLS_PREAMBLE + _PARTIAL_UP_TO_BODY + NO_TOOLS_TRAILER
 
-FALLBACK_COMPACT_PROMPT = f"""{NO_TOOLS_PREAMBLE}
-
-Summarize only what is needed to continue work accurately.
-Return both <analysis> and <summary> blocks.
-In <summary>, include:
-1. Primary Request and Intent
-2. Current Work
-3. Pending Tasks
-4. Key Files and Decisions
-"""
+FALLBACK_COMPACT_PROMPT = (
+    NO_TOOLS_PREAMBLE
+    + "Summarize only what is needed to continue work accurately.\n"
+    "Return both <analysis> and <summary> blocks.\n"
+    "In <summary>, include:\n"
+    "1. Primary Request and Intent\n"
+    "2. Current Work\n"
+    "3. Pending Tasks\n"
+    "4. Key Files and Decisions"
+    + NO_TOOLS_TRAILER
+)
 
 
 @dataclass
@@ -209,6 +216,22 @@ def estimate_tokens(text: str) -> int:
     if not text:
         return 0
     return max(1, len(text) // 4)
+
+
+def trim_text_to_token_budget(text: str, token_budget: int) -> str:
+    if not text:
+        return ""
+    if token_budget <= 0:
+        return ""
+    max_chars = token_budget * 4
+    if len(text) <= max_chars:
+        return text
+    trimmed_chars = len(text) - max_chars
+    return (
+        "[Truncated earlier content for compaction budget]\n"
+        f"[... omitted {trimmed_chars} chars ...]\n"
+        + text[-max_chars:]
+    )
 
 
 def should_compact(total_tokens: int) -> bool:
@@ -293,20 +316,28 @@ def split_messages_for_compaction(
 
 
 def serialize_compaction_input(job: CompactJob) -> str:
-    header = "Previous compressed summary:\n"
-    old_summary = job.oldSummary.strip() or "(none)"
-    body_lines = ["Messages to compress:"]
-    for message in job.messagesToCompress:
-        body_lines.extend(
-            [
-                f"- id: {message.id}",
-                f"  role: {message.role}",
-                f"  createdAt: {message.createdAt}",
-                "  content:",
-                f"{message.content}",
-            ]
+    ROLE_LABELS = {
+        "user": "USER",
+        "assistant": "ASSISTANT",
+        "tool": "TOOL RESULT",
+        "system": "SYSTEM",
+    }
+    parts: list[str] = []
+
+    if job.oldSummary.strip():
+        parts.append(
+            "=== PREVIOUS COMPRESSED SUMMARY ===\n"
+            + job.oldSummary.strip()
+            + "\n=== END OF PREVIOUS SUMMARY ==="
         )
-    return f"{header}{old_summary}\n\n" + "\n".join(body_lines)
+
+    parts.append("=== MESSAGES TO COMPRESS ===")
+    for message in job.messagesToCompress:
+        label = ROLE_LABELS.get(message.role, message.role.upper())
+        content = message.content.strip()
+        parts.append(f"[{label}]\n{content}")
+
+    return "\n\n".join(parts)
 
 
 def format_compact_summary(raw_output: str) -> str:
@@ -384,9 +415,15 @@ class CompactCoordinator:
             get_compaction_prompt(job.mode),
             FALLBACK_COMPACT_PROMPT,
         ]
+        bounded_job = self._fit_job_to_input_budget(job)
+        last_error: Exception | None = None
 
         for prompt in attempts:
-            raw_output = await self._runner(job, prompt)
+            try:
+                raw_output = await self._runner(bounded_job, prompt)
+            except Exception as exc:
+                last_error = exc
+                continue
             formatted = format_compact_summary(raw_output)
             if formatted:
                 return CompactSummary(
@@ -397,7 +434,85 @@ class CompactCoordinator:
                     createdAt=datetime.now().astimezone().isoformat(),
                 )
 
+        if last_error is not None:
+            raise RuntimeError("Compaction failed: runner error") from last_error
         raise RuntimeError("Compaction failed: empty formatted summary")
+
+    def _fit_job_to_input_budget(self, job: CompactJob) -> CompactJob:
+        old_summary = trim_text_to_token_budget(
+            job.oldSummary.strip(),
+            COMPACTION_OLD_SUMMARY_TOKEN_BUDGET,
+        )
+        selected: list[Message] = []
+
+        for message in reversed(job.messagesToCompress):
+            candidate = [message, *selected]
+            candidate_job = CompactJob(
+                jobId=job.jobId,
+                mode=job.mode,
+                oldSummary=old_summary,
+                messagesToCompress=candidate,
+                preservedRecentMessages=job.preservedRecentMessages,
+                suppressFollowUpQuestions=job.suppressFollowUpQuestions,
+            )
+            candidate_tokens = estimate_tokens(serialize_compaction_input(candidate_job))
+            if candidate_tokens <= COMPACTION_INPUT_TOKEN_BUDGET:
+                selected = candidate
+                continue
+
+            if not selected:
+                truncated = trim_text_to_token_budget(
+                    message.content,
+                    max(256, COMPACTION_INPUT_TOKEN_BUDGET // 2),
+                )
+                selected = [
+                    Message(
+                        id=message.id,
+                        role=message.role,
+                        content=truncated,
+                        tokenCount=estimate_tokens(truncated),
+                        createdAt=message.createdAt,
+                    )
+                ]
+            break
+
+        if not selected and job.messagesToCompress:
+            last = job.messagesToCompress[-1]
+            truncated = trim_text_to_token_budget(
+                last.content,
+                max(256, COMPACTION_INPUT_TOKEN_BUDGET // 2),
+            )
+            selected = [
+                Message(
+                    id=last.id,
+                    role=last.role,
+                    content=truncated,
+                    tokenCount=estimate_tokens(truncated),
+                    createdAt=last.createdAt,
+                )
+            ]
+
+        return CompactJob(
+            jobId=job.jobId,
+            mode=job.mode,
+            oldSummary=old_summary,
+            messagesToCompress=selected,
+            preservedRecentMessages=job.preservedRecentMessages,
+            suppressFollowUpQuestions=job.suppressFollowUpQuestions,
+        )
+
+    def _trim_distant_tool_outputs(self, messages: list[Message]) -> list[Message]:
+        tool_positions = [idx for idx, msg in enumerate(messages) if msg.role == "tool"]
+        if len(tool_positions) <= TOOL_OUTPUT_RECENT_KEEP:
+            return messages
+
+        keep_tool_positions = set(tool_positions[-TOOL_OUTPUT_RECENT_KEEP:])
+        trimmed: list[Message] = []
+        for idx, msg in enumerate(messages):
+            if msg.role == "tool" and idx not in keep_tool_positions:
+                continue
+            trimmed.append(msg)
+        return trimmed
 
     def formatCompactSummary(self, rawOutput: str) -> str:
         return format_compact_summary(rawOutput)
@@ -431,7 +546,22 @@ class CompactCoordinator:
             suppressFollowUpQuestions=True,
         )
 
-        summary = await self.runCompact(job)
+        try:
+            summary = await self.runCompact(job)
+        except Exception:
+            trimmed_messages = self._trim_distant_tool_outputs(messages_to_compress)
+            if len(trimmed_messages) == len(messages_to_compress):
+                raise
+
+            retry_job = CompactJob(
+                jobId=f"{job.jobId}-trimmed",
+                mode=job.mode,
+                oldSummary=job.oldSummary,
+                messagesToCompress=trimmed_messages,
+                preservedRecentMessages=job.preservedRecentMessages,
+                suppressFollowUpQuestions=job.suppressFollowUpQuestions,
+            )
+            summary = await self.runCompact(retry_job)
         continuation_message = self.buildContinuationMessage(
             {
                 "summary": summary.formattedSummary,

@@ -13,8 +13,9 @@ from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.openai import OpenAIProvider
 
 from internal.agents import MainAgent
-from internal.app.handle_user_turn import create_runtime
 from internal.logger import logger
+from internal.memory import MemoryManager
+from internal.paths import set_runtime_paths
 from internal.services.agent_factory import AgentConfig, load_base_config
 from internal.services.config_manager import normalize_base_url
 
@@ -52,11 +53,21 @@ class Agent:
         additional_system_prompts: list[str] | None = None,
         auto_load_all_prompts: bool = True,
         start_mcp_servers: bool = True,
+        workspace: str | Path | None = None,
+        memory_enabled: bool = True,
+        memory_dir: str | Path | None = None,
+        memory_system: MemoryManager | None = None,
+        disabled_skills: list[str] | None = None,
+        extra_mcp_servers: list[Any] | None = None,
     ) -> None:
+        self.workspace_root = self._resolve_workspace_root(workspace)
+        if self.workspace_root is not None:
+            set_runtime_paths(sandbox_dir=self.workspace_root)
+
         self.system_name = system_name
         self.system_prompt_append = system_prompt_append
         self.system_prompt_override = system_prompt_override
-        self.skill_root_dirs = [self._to_abs_path(p) for p in (skill_root_dirs or [])]
+        self.skill_root_dirs = [self._to_abs_path(p, self.workspace_root) for p in (skill_root_dirs or [])]
         self.use_default_tools = use_default_tools
         self.extra_tools = list(extra_tools or [])
         self.mcp_servers = mcp_servers
@@ -66,18 +77,39 @@ class Agent:
         self.additional_system_prompts = additional_system_prompts
         self.auto_load_all_prompts = auto_load_all_prompts
         self.start_mcp_servers = start_mcp_servers
+        self.disabled_skills = disabled_skills
+        self.extra_mcp_servers = extra_mcp_servers
+
+        # Memory system: use provided instance, or build one from flags/dir
+        if memory_system is not None:
+            self._memory_manager: MemoryManager | None = memory_system
+        elif not memory_enabled:
+            self._memory_manager = MemoryManager(enabled=False)
+        else:
+            self._memory_manager = MemoryManager(
+                memory_dir=memory_dir,
+                enabled=True,
+            )
 
         self._http_client: AsyncClient | None = None
         self._main_agent: MainAgent | None = None
-        self._runtime: Any | None = None
         self._mcp_stack: AsyncExitStack | None = None
 
     @staticmethod
-    def _to_abs_path(raw_path: str | Path) -> Path:
+    def _resolve_workspace_root(raw_path: str | Path | None) -> Path | None:
+        if raw_path is None:
+            return None
+        return Path(raw_path).expanduser().resolve()
+
+    @staticmethod
+    def _to_abs_path(raw_path: str | Path, workspace_root: Path | None = None) -> Path:
+        from internal.paths import TIM_AGENT_SANDBOX_DIR
         path = Path(raw_path).expanduser()
         if path.is_absolute():
             return path.resolve()
-        return (Path.cwd() / path).resolve()
+        # 使用沙盒目錄作為 agent 的工作目錄，不暴露真實 CWD
+        base = workspace_root or TIM_AGENT_SANDBOX_DIR
+        return (base / path).resolve()
 
     @staticmethod
     def _summarize_exception(exc: Exception) -> str:
@@ -149,8 +181,10 @@ class Agent:
             extra_tools=self.extra_tools,
             include_skill_tool=self.include_skill_tool,
             include_subagent_tools=self.include_subagent_tools,
+            memory_manager=self._memory_manager,
+            disabled_skills=self.disabled_skills,
+            extra_mcp_servers=self.extra_mcp_servers,
         )
-        self._runtime = create_runtime(self._main_agent)
 
         if self.start_mcp_servers:
             self._mcp_stack = AsyncExitStack()
@@ -175,7 +209,6 @@ class Agent:
             await self._http_client.aclose()
             self._http_client = None
 
-        self._runtime = None
         self._main_agent = None
 
     async def run(
@@ -183,11 +216,14 @@ class Agent:
         prompt: str,
         message_history: list[ModelRequest | ModelResponse] | None = None,
     ) -> str:
-        if self._runtime is None:
+        if self._main_agent is None:
             await self.start()
-        if self._runtime is None:
-            raise RuntimeError("Agent runtime 尚未初始化")
-        return await self._runtime.handle_user_turn(prompt, message_history=message_history)
+        if self._main_agent is None:
+            raise RuntimeError("Main agent 尚未初始化")
+        return await self._main_agent.coordinator_handle_user_turn(
+            prompt,
+            message_history=message_history,
+        )
 
     async def run_stream(
         self,

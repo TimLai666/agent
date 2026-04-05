@@ -1,6 +1,7 @@
 import argparse
 import asyncio
 import concurrent.futures
+import html as _html_module
 import sys
 import warnings
 from collections import deque
@@ -9,18 +10,19 @@ from pathlib import Path
 
 from httpx import AsyncClient
 from pydantic_ai.messages import ModelRequest, ModelResponse
-from PySide6.QtCore import QThread, QTimer, Signal
+from PySide6.QtCore import QObject, QThread, QTimer, Signal, Qt
+from PySide6.QtGui import QFont
 from PySide6.QtWidgets import QApplication
 
 
 
 from internal.agents import MainAgent
-from internal.app.handle_user_turn import create_runtime
 from internal.logger import logger
+from internal.memory import MemoryManager
 from internal.runtime.stream_printer import BACKLOG_SCALE, BASE_DELAY, MIN_FACTOR
 from internal.runtime.system import run_cli
 from internal.services.agent_factory import load_base_config
-from internal.services.circle_ui import MainWindow, ConfirmDialog, CommandLineEdit
+from internal.services.circle_ui import MainWindow, ChoiceDialog, ConfirmDialog, CommandLineEdit
 from internal.services.voice_manager import VoiceManager
 from internal.services.config_db import (
     list_agent_configs,
@@ -28,7 +30,7 @@ from internal.services.config_db import (
     list_providers,
     list_remote_mcps,
 )
-from internal.cli import set_gui_confirm_handler
+from internal.cli import set_gui_confirm_handler, set_gui_question_handler
 from internal.command_handler import CommandHandler
 from internal.services import config_webui, config_cli
 from internal.compaction import (
@@ -39,6 +41,7 @@ from internal.compaction import (
 )
 
 COMMAND_PREFIX = "/"
+GUI_CHUNK_EMIT_SIZE = 2000
 
 
 class AgentRuntime(QThread):
@@ -47,6 +50,8 @@ class AgentRuntime(QThread):
     result_ready = Signal(int, str, list)
     error_occurred = Signal(int, str)
     tool_event = Signal(object)
+    compaction_event = Signal(bool)   # True = started, False = finished
+    compact_result = Signal(object)   # (changed, before, after, messages) or Exception
 
     def __init__(self, base_config, skill_root_dirs: list[Path] | None = None):
         super().__init__()
@@ -62,7 +67,6 @@ class AgentRuntime(QThread):
         self._active_request_id = 0
         self._conversation_state = ConversationState(fullMessages=[])
         self._compact_coordinator: CompactCoordinator | None = None
-        self._orchestration_runtime = None
 
     def run(self):
         loop = asyncio.new_event_loop()
@@ -118,8 +122,8 @@ class AgentRuntime(QThread):
                 self.base_config,
                 self.http_client,
                 skill_root_dirs=self.skill_root_dirs,
+                memory_manager=MemoryManager(),
             )
-            self._orchestration_runtime = create_runtime(self.main_agent)
 
             def _reload_skills_from_webui() -> dict[str, object]:
                 if self.main_agent is None:
@@ -218,7 +222,7 @@ class AgentRuntime(QThread):
         if stage == "start":
             return f"[>] {label}"
         if stage == "end":
-            return f"[OK] {label}"
+            return "[OK]"
         if stage == "error":
             error = str(event.get("error") or "")
             suffix = f": {error}" if error else ""
@@ -234,6 +238,10 @@ class AgentRuntime(QThread):
         if not line:
             return
         payload = {"request_id": self._active_request_id, "line": line}
+        self.tool_event.emit(payload)
+
+    def _emit_todo_event(self, snapshot: str) -> None:
+        payload = {"request_id": self._active_request_id, "todo_text": snapshot}
         self.tool_event.emit(payload)
 
     async def _shutdown(self):
@@ -268,17 +276,28 @@ class AgentRuntime(QThread):
         chunks: list[str] = []
 
         async def collect():
-            if self._orchestration_runtime is None:
-                raise RuntimeError("Orchestration runtime not initialized")
-            async for chunk in self._orchestration_runtime.handle_user_turn_stream(
+            async for chunk in self.main_agent.coordinator_handle_user_turn_stream(
                 user_input,
                 message_history=chat_history,
+                on_todo_update=self._emit_todo_event,
             ):
                 if not chunk:
                     continue
-                chunks.append(chunk)
-                self.chunk_ready.emit(request_id, chunk)
-                logger.debug(f"Received chunk: {len(chunk)} chars")
+                if len(chunk) <= GUI_CHUNK_EMIT_SIZE:
+                    chunks.append(chunk)
+                    self.chunk_ready.emit(request_id, chunk)
+                    logger.debug(f"Received chunk: {len(chunk)} chars")
+                    continue
+
+                for i in range(0, len(chunk), GUI_CHUNK_EMIT_SIZE):
+                    part = chunk[i : i + GUI_CHUNK_EMIT_SIZE]
+                    chunks.append(part)
+                    self.chunk_ready.emit(request_id, part)
+                logger.debug(
+                    "Received oversized chunk: %s chars (split into %s parts)",
+                    len(chunk),
+                    (len(chunk) + GUI_CHUNK_EMIT_SIZE - 1) // GUI_CHUNK_EMIT_SIZE,
+                )
 
         timeout_val = None
 
@@ -293,7 +312,14 @@ class AgentRuntime(QThread):
             self._conversation_state.fullMessages = messages
             self._conversation_state.totalTokens = recalc_total_tokens(messages)
             if self._compact_coordinator is not None:
+                tokens_before = self._conversation_state.totalTokens
+                self.compaction_event.emit(True)
                 self._conversation_state = await self._compact_coordinator.maybeCompact(self._conversation_state)
+                if self._conversation_state.totalTokens < tokens_before:
+                    # tokens decreased → compaction actually ran
+                    self.compaction_event.emit(False)
+                else:
+                    self.compaction_event.emit(False)
             updated_history = self._conversation_state.fullMessages
         return result_text, updated_history
 
@@ -356,11 +382,27 @@ class AgentRuntime(QThread):
         changed = after_count < before_count
         return changed, before_count, after_count, after_messages
 
-    def force_compact(self):
+    def force_compact(self, done_callback=None):
+        """Schedule _force_compact on the asyncio loop without blocking the caller.
+
+        done_callback(changed, before, after, updated_history) is called from a
+        background thread when compaction finishes — wire it through a Qt signal
+        if you need to touch the UI from the callback.
+        """
         if not self.loop:
             raise RuntimeError("Initialization failed. Check logs.")
         future = asyncio.run_coroutine_threadsafe(self._force_compact(), self.loop)
-        return future.result()
+
+        def _on_done(fut):
+            try:
+                result = fut.result()
+            except Exception as exc:
+                result = (False, 0, 0, [], exc)
+            if done_callback:
+                done_callback(*result)
+
+        future.add_done_callback(_on_done)
+        return future
 
     def clear_context(self):
         if not self.loop:
@@ -378,12 +420,21 @@ class AgentRuntime(QThread):
         future.result()
 
 
-class GUIAgentApp:
+class GUIAgentApp(QObject):
+    # Signal for cross-thread voice result (worker thread → main/Qt thread)
+    _voice_result_signal = Signal(object)  # str | None
+
     def __init__(self, skill_root_dirs: list[Path] | None = None):
+        super().__init__()
         warnings.filterwarnings("ignore", category=DeprecationWarning)
         warnings.filterwarnings("ignore", category=ResourceWarning)
 
         self.app = QApplication.instance() or QApplication(sys.argv)
+        app_font = self.app.font()
+        if app_font.pointSize() <= 0 and app_font.pointSizeF() <= 0:
+            safe_app_font = QFont(app_font)
+            safe_app_font.setPointSize(11)
+            self.app.setFont(safe_app_font)
         self.base_config = load_base_config()
         self.voice_manager = VoiceManager()
         self.chat_history: list[ModelRequest | ModelResponse] | None = None
@@ -391,8 +442,15 @@ class GUIAgentApp:
         self._active_request_id = 0
         self._display_text = ""
         self._tool_log_lines: list[str] = []
+        self._todo_snapshot_text = ""
+        self._discussion_text = ""  # Q&A from AskUserQuestion
+        self._stop_context = ""    # context saved when user stops mid-run
+        self._pending_tmp_images: list[str] = []  # temp image paths to delete after agent done
+        self._prev_context_tokens = 0   # context token count from previous turn
+        self._total_tokens_consumed = 0  # cumulative tokens consumed this session
         self._ui_collapsed = False
         self._waiting_response = False
+        self._waiting_status = ""
         self._auto_expand_on_result = False
         self._idle_timeout_ms = 60000
         self._idle_timer = QTimer()
@@ -405,6 +463,16 @@ class GUIAgentApp:
         self._typewriter_timer = QTimer()
         self._typewriter_timer.setSingleShot(True)
         self._typewriter_timer.timeout.connect(self._typewriter_tick)
+        # Watchdog: restart typewriter if it stalls with pending chars
+        self._typewriter_watchdog = QTimer()
+        self._typewriter_watchdog.setInterval(500)
+        self._typewriter_watchdog.timeout.connect(self._watchdog_kick_typewriter)
+        self._typewriter_watchdog.start()
+        # Tool HTML cache (avoid recomputing on every typewriter tick)
+        self._tool_events_html_cache: str = ""
+        self._tool_events_cache_dirty: bool = False
+        # Partial result saved when interrupted mid-stream
+        self._interrupted_partial: str = ""
         self._tags = (
             "<tool-execution>",
             "</tool-execution>",
@@ -424,25 +492,38 @@ class GUIAgentApp:
         self._update_throttle_timer.setSingleShot(True)
         self._update_throttle_timer.timeout.connect(self._flush_display_update)
         self._pending_display_update = False
-        self._throttle_interval = 50  # 最小更新間隔（毫秒）
+        self._throttle_interval = 80  # 最小更新間隔（毫秒）
         
         # 創建指令處理器（GUI 專用的輸出回調）
         self.command_handler: CommandHandler | None = None
         
         # 設置 GUI 確認處理器
         set_gui_confirm_handler(self._gui_confirm_handler)
+        # 設置 GUI 問題選單處理器
+        set_gui_question_handler(self._gui_question_handler)
         
         self.runtime = AgentRuntime(self.base_config, skill_root_dirs=skill_root_dirs)
-        self.runtime.ready.connect(self.handle_runtime_ready)
-        self.runtime.result_ready.connect(self.handle_result)
-        self.runtime.chunk_ready.connect(self.handle_chunk)
-        self.runtime.error_occurred.connect(self.handle_error)
-        self.runtime.tool_event.connect(self.handle_tool_event)
+        # AgentRuntime (QThread) lives in the main thread but emits signals from run().
+        # Qt sees sender/receiver both as main-thread objects and uses DirectConnection.
+        # Force QueuedConnection so slots always execute in the main thread event loop.
+        _Q = Qt.ConnectionType.QueuedConnection
+        self.runtime.ready.connect(self.handle_runtime_ready, _Q)
+        self.runtime.result_ready.connect(self.handle_result, _Q)
+        self.runtime.chunk_ready.connect(self.handle_chunk, _Q)
+        self.runtime.error_occurred.connect(self.handle_error, _Q)
+        self.runtime.tool_event.connect(self.handle_tool_event, _Q)
+        self.runtime.compaction_event.connect(self.handle_compaction_event, _Q)
+        self.runtime.compact_result.connect(self.handle_compact_result, _Q)
         self.runtime.start()
 
         self.main_window = MainWindow()
         self.main_window.set_input_callback(self.process_input)
+        self.main_window.set_stop_callback(self.stop_current_request)
+        self.main_window.set_bypass_callback(self._on_bypass_changed)
+        self.main_window.set_voice_callback(self._on_voice_event)
         self.main_window.collapse_state_changed.connect(self._on_collapse_state_changed)
+        # Wire cross-thread voice result signal to main-thread slot
+        self._voice_result_signal.connect(self._on_voice_result)
         # 當使用者在輸入框輸入時，重置閒置計時
         try:
             self.main_window.typing.connect(self._reset_idle_timer)
@@ -453,39 +534,306 @@ class GUIAgentApp:
         self.main_window.update_speech_bubble("Initializing...")
         self.main_window.speech_bubble.show()
 
+    def _on_bypass_changed(self, enabled: bool) -> None:
+        logger.info(f"Bypass mode {'enabled' if enabled else 'disabled'}")
+
+    # ── Voice mode handlers ───────────────────────────────────────────────
+
+    def _on_voice_event(self, event: str) -> None:
+        """Called from MainWindow when user interacts with voice button/send."""
+        if event == "__start__":
+            self._start_voice_recognition()
+        elif event == "__cancel__":
+            self.voice_manager.cancel()
+            self.main_window.update_speech_bubble("語音取消")
+        elif event == "__submit__":
+            self.voice_manager.submit_now()
+            self.main_window.update_speech_bubble("辨識中...")
+
+    def _start_voice_recognition(self) -> None:
+        self.main_window.update_speech_bubble("Listening...")
+
+        def _on_result(text):
+            self._voice_result_signal.emit(text)
+
+        self.voice_manager.start_listening(on_result=_on_result)
+
+    def _on_voice_result(self, text) -> None:
+        """Called in main thread when recognition finishes.
+        Appends text to the input field — user presses 發送 manually to submit."""
+        self.main_window.voice_result_ready(text)
+        if text:
+            logger.info(f"Voice recognized: {text[:60]}")
+        else:
+            self.main_window.update_speech_bubble("未識別到語音，請再試一次")
+
     def _gui_confirm_handler(self, message: str, default_choice: str) -> bool:
-        """
-        GUI 模式下的確認處理器（線程安全）
-        這個方法會在 AgentRuntime 線程中被調用，
-        但對話框會在主 GUI 線程中顯示
-        """
+        """GUI 模式下的確認處理器（線程安全）"""
+        # Bypass mode: auto-approve everything
+        if getattr(self.main_window, "is_bypass_mode", lambda: False)():
+            logger.info(f"[bypass] auto-approving: {message[:60]}")
+            return True
         logger.info(f"_gui_confirm_handler called: {message[:50]}...")
         result = self.main_window.show_confirm_dialog(message, default_choice)
         logger.info(f"_gui_confirm_handler returning: {result}")
         return result
 
+    def _gui_question_handler(self, question: str, options: list[str]) -> str:
+        """GUI 模式下的問題選單處理器（線程安全）"""
+        logger.info(f"_gui_question_handler called: {question[:50]}...")
+        result = self.main_window.show_question_dialog(question, options)
+        logger.info(f"_gui_question_handler returning: {result!r}")
+        if result and result != "(no answer — user dismissed the dialog)":
+            self._discussion_text = f"**Q:** {question}\n\n**A:** {result}"
+            self._request_display_update()
+        return result
+
     def _reset_tool_log(self) -> None:
         self._tool_log_lines = []
+        self._tool_events_html_cache = ""
+        self._tool_events_cache_dirty = False
+
+    def _reset_todo_snapshot(self) -> None:
+        self._todo_snapshot_text = ""
+        try:
+            self.main_window.update_todo_drawer("")
+        except Exception:
+            pass
+
+    # ── Tool event rendering (Claude Code style) ──────────────────────────
+
+    _TOOL_ICONS: dict[str, str] = {
+        "bash": "⬛",
+        "terminal": "⬛",
+        "read": "📄",
+        "write": "✏️",
+        "edit": "✏️",
+        "glob": "🔍",
+        "grep": "🔍",
+        "web": "🌐",
+        "fetch": "🌐",
+        "search": "🔍",
+        "skill": "⚡",
+        "agent": "🤖",
+        "subagent": "🤖",
+        "todo": "📋",
+    }
+
+    def _tool_icon(self, label: str) -> str:
+        low = label.lower()
+        for key, icon in self._TOOL_ICONS.items():
+            if key in low:
+                return icon
+        return "🔧"
+
+    def _render_tool_line_html(self, line: str) -> str:
+        esc = _html_module.escape
+        if line.startswith("[>] "):
+            label = line[4:]
+            icon = self._tool_icon(label)
+            return (
+                f'<div style="padding:1px 0 1px 2px;color:#6eaee8;font-size:11px;'
+                f'font-family:monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">'
+                f'{icon} <span style="color:#8bbcf0;">{esc(label)}</span>'
+                f'</div>'
+            )
+        if line.startswith("[OK]"):
+            return (
+                f'<div style="padding:1px 0 1px 2px;color:#4ec94e;font-size:11px;">'
+                f'✓</div>'
+            )
+        if line.startswith("[ERR] "):
+            label = line[6:]
+            return (
+                f'<div style="padding:1px 0 1px 2px;color:#f06b6b;font-size:11px;'
+                f'font-family:monospace;">'
+                f'✗ {esc(label)}'
+                f'</div>'
+            )
+        if line.startswith("[SKILL] "):
+            label = line[8:]
+            return (
+                f'<div style="padding:1px 0 1px 2px;color:#c792ea;font-size:11px;">'
+                f'⚡ {esc(label)}'
+                f'</div>'
+            )
+        if line.startswith("[*] "):
+            label = line[4:]
+            return (
+                f'<div style="padding:1px 0 1px 2px;color:#888;font-size:11px;'
+                f'font-family:monospace;">'
+                f'· {esc(label)}'
+                f'</div>'
+            )
+        return ""
+
+    def _watchdog_kick_typewriter(self) -> None:
+        """Restart typewriter if it stalled with pending characters."""
+        if self._pending and not self._typewriter_active:
+            self._typewriter_active = True
+            self._typewriter_tick()
+
+    def _render_tool_events_html(self) -> str:
+        """Render tool log lines as compact Claude Code-style HTML rows (cached)."""
+        if not self._tool_log_lines:
+            self._tool_events_html_cache = ""
+            self._tool_events_cache_dirty = False
+            return ""
+        if not self._tool_events_cache_dirty and self._tool_events_html_cache:
+            return self._tool_events_html_cache
+        # Pair [>] start and [OK]/[ERR] together into single rows.
+        # Use a FIFO queue so concurrent tool calls are matched correctly.
+        rows: list[str] = []
+        in_flight: list[str] = []
+        esc = _html_module.escape
+        for line in self._tool_log_lines[-40:]:  # show last 40 events at most
+            if line.startswith("[>] "):
+                in_flight.append(line[4:])
+            elif line.startswith("[OK]"):
+                if in_flight:
+                    label = in_flight.pop(0)
+                    icon = self._tool_icon(label)
+                    rows.append(
+                        f'<div style="padding:1px 0 1px 2px;color:#4db87a;font-size:11px;'
+                        f'font-family:monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">'
+                        f'✓ {icon} <span style="color:#7ec8a0;">{esc(label)}</span>'
+                        f'</div>'
+                    )
+                # If no in_flight match, skip orphan [OK] to avoid bare ✓
+            elif line.startswith("[ERR] "):
+                err = line[6:]
+                if in_flight:
+                    label = in_flight.pop(0)
+                    icon = self._tool_icon(label)
+                    rows.append(
+                        f'<div style="padding:1px 0 1px 2px;color:#f06b6b;font-size:11px;'
+                        f'font-family:monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">'
+                        f'✗ {icon} <span style="color:#f09090;">{esc(label)}: {esc(err)}</span>'
+                        f'</div>'
+                    )
+                else:
+                    rows.append(
+                        f'<div style="padding:1px 0 1px 2px;color:#f06b6b;font-size:11px;">'
+                        f'✗ {esc(err)}'
+                        f'</div>'
+                    )
+            else:
+                rendered = self._render_tool_line_html(line)
+                if rendered:
+                    rows.append(rendered)
+
+        # Show all still-running tools as in-progress
+        for label in in_flight:
+            icon = self._tool_icon(label)
+            rows.append(
+                f'<div style="padding:1px 0 1px 2px;color:#6eaee8;font-size:11px;'
+                f'font-family:monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">'
+                f'▶ {icon} <span style="color:#8bbcf0;">{esc(label)}</span>'
+                f'</div>'
+            )
+
+        if not rows:
+            self._tool_events_html_cache = ""
+            self._tool_events_cache_dirty = False
+            return ""
+        inner = "\n".join(rows)
+        result = (
+            f'<div style="margin:0 0 6px 0;padding:4px 6px;'
+            f'background:rgba(20,20,28,0.7);border-left:2px solid rgba(100,160,255,0.4);'
+            f'border-radius:4px;">'
+            f'{inner}'
+            f'</div>'
+        )
+        self._tool_events_html_cache = result
+        self._tool_events_cache_dirty = False
+        return result
+
+    # ── Display composition ────────────────────────────────────────────────
 
     def _compose_display_text(self, base_text: str | None = None) -> str:
         text = self._display_text if base_text is None else base_text
-        if not self._tool_log_lines:
-            return text
-        tool_block = ("<tool-execution>\n" + "\n".join(self._tool_log_lines) + "\n</tool-execution>")
+        blocks: list[str] = []
+
+        tool_html = self._render_tool_events_html()
+        if tool_html:
+            blocks.append(tool_html)
+
+        if self._discussion_text:
+            blocks.append(
+                f"<discussion>\n{self._discussion_text}\n</discussion>"
+            )
+
         if text:
-            return tool_block + "\n\n" + text
-        return tool_block
+            blocks.append(text)
+
+        return "\n\n".join(blocks)
 
     def handle_tool_event(self, payload: dict) -> None:
         request_id = payload.get("request_id")
-        line = payload.get("line")
-        if request_id != self._active_request_id or not line:
+        if request_id != self._active_request_id:
             return
-        self._tool_log_lines.append(str(line).rstrip())
+        todo_text = payload.get("todo_text")
+        if isinstance(todo_text, str) and todo_text.strip():
+            self._todo_snapshot_text = todo_text.strip()
+            try:
+                self.main_window.update_todo_drawer(self._todo_snapshot_text)
+            except Exception:
+                pass
+            self._request_display_update()
+            self._reset_idle_timer()
+            return
+
+        line = payload.get("line")
+        if not line:
+            return
+        line_text = str(line).rstrip()
+        self._tool_log_lines.append(line_text)
         if len(self._tool_log_lines) > 200:
             self._tool_log_lines = self._tool_log_lines[-200:]
+        self._tool_events_cache_dirty = True
+        if line_text.startswith("[>] "):
+            if "runAgentTask" in line_text:
+                self._set_waiting_status("委派子代理中...")
+            elif "use_skill" in line_text:
+                self._set_waiting_status("載入技能中...")
+            else:
+                self._set_waiting_status("執行工具中...")
+        elif line_text.startswith("[OK]"):
+            self._set_waiting_status("整理結果中...")
         self._request_display_update()
         self._reset_idle_timer()
+
+    def handle_compaction_event(self, started: bool) -> None:
+        try:
+            self.main_window.set_compact_indicator(started)
+        except Exception:
+            pass
+
+    def handle_compact_result(self, payload: object) -> None:
+        """Called in main thread when /compact finishes."""
+        self.main_window.set_compact_indicator(False)
+        try:
+            changed, before, after, updated_history = payload  # type: ignore[misc]
+            self.chat_history = updated_history or self.chat_history
+            if changed:
+                self.main_window.update_speech_bubble(f"已執行壓縮：訊息數 {before} → {after}")
+            else:
+                self.main_window.update_speech_bubble("已嘗試壓縮，但目前可壓縮內容不足（需要超過最近保留訊息量）。")
+        except Exception as exc:
+            self.main_window.update_speech_bubble(f"手動壓縮失敗：{exc}")
+
+    def _set_waiting_status(self, status: str) -> None:
+        self._waiting_status = status
+        if not self._waiting_response:
+            return
+        if self._display_text.strip():
+            return
+        if self._last_user_input:
+            self.main_window.update_speech_bubble(
+                f"You: {self._last_user_input}\n\n{status}"
+            )
+        else:
+            self.main_window.update_speech_bubble(status)
 
     def _reset_idle_timer(self) -> None:
         if self._ui_collapsed or self._waiting_response:
@@ -562,9 +910,22 @@ class GUIAgentApp:
         self._auto_open_config_panel_if_needed()
         self._reset_idle_timer()
 
+    def _cleanup_pending_tmp_image(self) -> None:
+        """Delete all temp image files created for clipboard paste."""
+        import os
+        for path in self._pending_tmp_images:
+            try:
+                if os.path.exists(path):
+                    os.unlink(path)
+                    logger.debug(f"Deleted temp image: {path}")
+            except Exception as e:
+                logger.debug(f"Could not delete temp image {path}: {e}")
+        self._pending_tmp_images = []
+
     def handle_result(self, request_id, output, updated_history):
         if request_id != self._active_request_id:
             return
+        self._cleanup_pending_tmp_image()
         logger.info(
             f"handle_result called with output: {output[:100] if output else 'None'}..."
         )
@@ -589,12 +950,29 @@ class GUIAgentApp:
             # 更新 GUI 歷史
             if self._last_user_input:
                 self._gui_history.append((self._last_user_input, output or ""))
+            # Update token usage display
+            try:
+                from internal.compaction import MAX_CONTEXT_TOKENS
+                ctx = getattr(self.runtime._conversation_state, "totalTokens", 0) or 0
+                # Accumulate delta: how many new tokens were consumed this turn.
+                # If ctx shrank (compaction occurred), count the new context size as the contribution.
+                delta = ctx - self._prev_context_tokens
+                self._total_tokens_consumed += delta if delta > 0 else ctx
+                self._prev_context_tokens = ctx
+                self.main_window.update_context_meter(ctx, MAX_CONTEXT_TOKENS, self._total_tokens_consumed)
+            except Exception:
+                pass
 
         self._waiting_response = False
+        self._waiting_status = ""
+        self._interrupted_partial = ""
+        try:
+            self.main_window.set_running(False)
+        except Exception:
+            pass
         if self._auto_expand_on_result:
             self._expand_ui()
         self._reset_idle_timer()
-
 
     def handle_chunk(self, request_id, chunk):
         if request_id != self._active_request_id:
@@ -605,10 +983,12 @@ class GUIAgentApp:
     def handle_error(self, request_id, error_message):
         if request_id not in (0, self._active_request_id):
             return
+        self._cleanup_pending_tmp_image()
         self.main_window.update_speech_bubble(self._compose_display_text(f"Error: {error_message}"))
         # 停止動畫，即使發生錯誤
         self.main_window.stop_agent_animation()
         self._waiting_response = False
+        self._waiting_status = ""
         if self._auto_expand_on_result:
             self._expand_ui()
         self._reset_idle_timer()
@@ -648,15 +1028,8 @@ class GUIAgentApp:
                     else:
                         self._display_text += emit
                         updated = True
-                # If there is no emit because the buffer is still small, show a transient preview
+                # If there is no emit because the buffer is still small, wait for more chunks.
                 if not emit:
-                    # Show partial preview (do not consume buffer) so UI doesn't appear stalled
-                    try:
-                        # Avoid committing preview if nothing to show
-                        if self._stream_buffer:
-                            self.main_window.update_speech_bubble(self._compose_display_text(self._display_text + self._stream_buffer))
-                    except Exception:
-                        pass
                     break
                 continue
 
@@ -673,8 +1046,15 @@ class GUIAgentApp:
             updated = True
             if tag in ("<tool-execution>", "<plan-suggestion>", "<discussion>"):
                 self._stream_mode = "fast"
+                if tag == "<plan-suggestion>":
+                    self._set_waiting_status("規劃回覆中...")
+                elif tag == "<discussion>":
+                    self._set_waiting_status("分析需求中...")
+                else:
+                    self._set_waiting_status("執行步驟中...")
             else:
                 self._stream_mode = "normal"
+                self._set_waiting_status("生成回覆中...")
             self._stream_buffer = self._stream_buffer[idx + len(tag) :]
 
         if updated:
@@ -755,74 +1135,149 @@ class GUIAgentApp:
             return
 
         if user_input is None:
-            self.main_window.update_speech_bubble("Listening...")
-            user_input = self.voice_manager.recognize_speech()
-            if user_input:
-                logger.info(f"Speech recognized: {user_input}")
-            else:
-                self.main_window.update_speech_bubble(
-                    "No speech recognized. Try again."
-                )
-                return
+            # Legacy CLI voice path (GUI voice now goes through _on_voice_result)
+            return
 
         if user_input:
+            self._reset_todo_snapshot()
             # 檢查是否為指令
             if user_input.startswith(COMMAND_PREFIX):
                 if not self.command_handler:
                     self.main_window.update_speech_bubble("指令處理器尚未就緒")
                     return
-                # 處理指令
-                result = self.command_handler.handle(user_input)
-                if result == "__clear_context__":
-                    try:
-                        self.runtime.clear_context()
-                        self.chat_history = None
-                        self._gui_history.clear()
-                        if self.command_handler:
-                            self.command_handler.clear_context_state()
-                        self._last_user_input = ""
-                        self._last_assistant_reply = ""
-                        self._display_text = ""
-                        self._reset_tool_log()
-                        self.main_window.update_speech_bubble("對話 context 已清空")
-                    except Exception as exc:
-                        self.main_window.update_speech_bubble(f"清空 context 失敗：{exc}")
-                    return
-                if result == "__compact__":
-                    try:
-                        changed, before, after, updated_history = self.runtime.force_compact()
-                        self.chat_history = updated_history or self.chat_history
-                        if changed:
-                            self.main_window.update_speech_bubble(f"已執行壓縮：訊息數 {before} -> {after}")
-                        else:
-                            self.main_window.update_speech_bubble("已嘗試壓縮，但目前可壓縮內容不足（需要超過最近保留訊息量）。")
-                    except Exception as exc:
-                        self.main_window.update_speech_bubble(f"手動壓縮失敗：{exc}")
-                    return
-                if result:
-                    # 指令返回了要執行的提示（如 /retry）
-                    user_input = result
-                else:
-                    # 指令已處理完畢
-                    return
+                # 處理指令（異步）
+                import asyncio
+                async def handle_command():
+                    result = await self.command_handler.handle(user_input)
+                    if result == "__clear_context__":
+                        try:
+                            self.runtime.clear_context()
+                            self.chat_history = None
+                            self._gui_history.clear()
+                            if self.command_handler:
+                                self.command_handler.clear_context_state()
+                            self._last_user_input = ""
+                            self._last_assistant_reply = ""
+                            self._display_text = ""
+                            self._discussion_text = ""
+                            self._stop_context = ""
+                            self._cleanup_pending_tmp_image()
+                            self._reset_tool_log()
+                            self._reset_todo_snapshot()
+                            self.main_window.update_speech_bubble("對話 context 已清空")
+                        except Exception as exc:
+                            self.main_window.update_speech_bubble(f"清空 context 失敗：{exc}")
+                        return
+                    if result == "__compact__":
+                        self.main_window.update_speech_bubble("壓縮中…")
+                        self.main_window.set_compact_indicator(True)
+
+                        def _on_compact_done(changed, before, after, updated_history, *_exc):
+                            # called from background thread — emit signal to main thread
+                            self.runtime.compact_result.emit(
+                                (changed, before, after, updated_history)
+                            )
+
+                        try:
+                            self.runtime.force_compact(done_callback=_on_compact_done)
+                        except Exception as exc:
+                            self.main_window.set_compact_indicator(False)
+                            self.main_window.update_speech_bubble(f"手動壓縮失敗：{exc}")
+                        return
+                    if result:
+                        # 指令返回了要執行的提示（如 /retry）
+                        self.process_input(result)
+                    else:
+                        # 指令已處理完畢
+                        pass
+                
+                try:
+                    loop = asyncio.get_event_loop()
+                    if loop.is_running():
+                        asyncio.ensure_future(handle_command())
+                    else:
+                        loop.run_until_complete(handle_command())
+                except Exception:
+                    # 如果無法獲取事件循環，使用 QTimer
+                    pass
+                return
             
             # 記錄用戶輸入
             self._last_user_input = user_input
             if self.command_handler:
                 self.command_handler.update_last_prompt(user_input)
-            
-            logger.info(f"Processing input: {user_input}")
-            self.main_window.update_speech_bubble(f"You: {user_input}")
 
-            # 啟動動畫並顯示 Thinking 狀態
-            def start_thinking():
-                self.main_window.update_speech_bubble(
-                    f"You: {user_input}\n\nThinking..."
-                )
+            # ── Retrieve any attachment from the input bar ─────────────────
+            _tmp_image_paths: list[str] = []
+            try:
+                attached_file = self.main_window.get_attached_file_path()
+                if attached_file:
+                    user_input = f"{user_input}\n\n[Attached file: {attached_file}]"
+            except Exception:
+                pass
+            try:
+                _tmp_image_paths = self.main_window.pop_attached_images_as_tempfiles()
+                if _tmp_image_paths:
+                    self._pending_tmp_images = _tmp_image_paths
+                    if len(_tmp_image_paths) == 1:
+                        user_input = (
+                            f"{user_input}\n\n"
+                            f"[User pasted an image saved to: {_tmp_image_paths[0]}]\n"
+                            f"Read or analyse this image file."
+                        )
+                    else:
+                        paths_str = "\n".join(f"  - {p}" for p in _tmp_image_paths)
+                        user_input = (
+                            f"{user_input}\n\n"
+                            f"[User pasted {len(_tmp_image_paths)} images saved to:]\n"
+                            f"{paths_str}\n"
+                            f"Read or analyse these image files."
+                        )
+            except Exception:
+                pass
+            # ──────────────────────────────────────────────────────────────
+
+            # ── Inject stop-context from previous cancelled request ────────
+            if self._stop_context and not self._waiting_response:
+                user_input = f"{self._stop_context}\nNew message from user: {user_input}"
+                self._stop_context = ""
+            # ──────────────────────────────────────────────────────────────
+
+            # ── Interrupt-with-progress ────────────────────────────────────
+            # If agent is mid-stream, save partial result and inject context
+            if self._waiting_response:
+                partial = (self._display_text or "").strip()
+                if partial:
+                    # Keep only a brief excerpt to avoid bloating context
+                    excerpt = partial[:400] + ("…" if len(partial) > 400 else "")
+                    self._interrupted_partial = partial
+                    user_input = (
+                        f"[Interrupt] User sent a new message while you were responding.\n"
+                        f"Your partial response so far (do not repeat it):\n"
+                        f"---\n{excerpt}\n---\n\n"
+                        f"New message from user: {user_input}\n\n"
+                        f"Decide: should you continue the original task (incorporating the new message), "
+                        f"pivot entirely, or address the new message first? Act accordingly."
+                    )
+                else:
+                    self._interrupted_partial = ""
+            else:
+                self._interrupted_partial = ""
+            # ──────────────────────────────────────────────────────────────
+
+            logger.info(f"Processing input: {user_input[:80]}...")
+            self.main_window.update_speech_bubble(f"You: {self._last_user_input}")
+
+            # 啟動動畫並顯示等待狀態
+            def start_waiting():
+                if not self._waiting_response:
+                    return
+                self._set_waiting_status("分析需求中...")
                 self.main_window.start_agent_animation()
 
-            QTimer.singleShot(500, start_thinking)
+            QTimer.singleShot(500, start_waiting)
             self._display_text = ""
+            self._discussion_text = ""
             self._reset_tool_log()
             self._pending.clear()
             self._stream_buffer = ""
@@ -830,18 +1285,56 @@ class GUIAgentApp:
             self._typewriter_active = False
             self._typewriter_timer.stop()
             self._waiting_response = True
+            self._waiting_status = "分析需求中..."
             self._idle_timer.stop()
+            # Update stop button state
+            try:
+                self.main_window.set_running(True)
+            except Exception:
+                pass
             request_id = self.runtime.submit(user_input, self.chat_history)
             if request_id:
                 self._active_request_id = request_id
+
+    def stop_current_request(self) -> None:
+        """Cancel the current agent request (stop button handler)."""
+        if not self._waiting_response:
+            return
+        self._cleanup_pending_tmp_image()
+        try:
+            if self.runtime._current_future and not self.runtime._current_future.done():
+                self.runtime._current_future.cancel()
+        except Exception:
+            pass
+        # Save interrupted context so next message can reference it
+        partial = (self._display_text or "").strip()
+        if self._last_user_input:
+            excerpt = partial[:300] + ("…" if len(partial) > 300 else "") if partial else ""
+            self._stop_context = (
+                f"[Previous session was interrupted by user]\n"
+                f"User had asked: {self._last_user_input}\n"
+                + (f"Your partial response: {excerpt}\n" if excerpt else "")
+            )
+        self._waiting_response = False
+        self._waiting_status = ""
+        if partial:
+            self.main_window.update_speech_bubble(self._compose_display_text())
+        else:
+            self.main_window.update_speech_bubble("(stopped)")
+        self.main_window.stop_agent_animation()
+        try:
+            self.main_window.set_running(False)
+        except Exception:
+            pass
 
     def run(self):
         """Run GUI application."""
         try:
             result = self.app.exec()
         finally:
-            # 清理 GUI 確認處理器
+            # 清理 GUI 處理器
             set_gui_confirm_handler(None)
+            set_gui_question_handler(None)
             self.runtime.stop()
             self.runtime.wait(3000)
         return result
@@ -852,6 +1345,9 @@ def _resolve_skill_root_dirs(raw_paths: list[str] | None) -> list[Path]:
     if not raw_paths:
         return []
 
+    # 使用沙盒目錄作為基準目錄，保持一致性
+    from internal.paths import TIM_AGENT_SANDBOX_DIR
+    
     resolved: list[Path] = []
     seen: set[str] = set()
 
@@ -862,7 +1358,7 @@ def _resolve_skill_root_dirs(raw_paths: list[str] | None) -> list[Path]:
 
         path_obj = Path(text).expanduser()
         if not path_obj.is_absolute():
-            path_obj = (Path.cwd() / path_obj).resolve()
+            path_obj = (TIM_AGENT_SANDBOX_DIR / path_obj).resolve()
         else:
             path_obj = path_obj.resolve()
 

@@ -1,11 +1,13 @@
 import functools
 import inspect
+import json
 import re
 import sys
 import uuid
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 
 from httpx import AsyncClient
@@ -39,18 +41,33 @@ from internal.services.subagent_tasks import (
     SubagentTaskManager,
     TaskStopToolInput,
 )
+from internal.memory import MemoryManager
 from internal.set_tools import add_all_tools
 from internal.skills_loader import SkillRegistry, load_skill_registry
 
 from internal.mcp_server_list import get_all_mcp_servers
-from internal.compaction import serialize_compaction_input
+from internal.compaction import estimate_tokens, get_message_text, serialize_compaction_input
+from internal.core.orchestration.runtime import OrchestrationRuntime
+from internal.core.orchestration.store import OrchestrationStore
+from internal.core.orchestration.types import (
+    RecoveryPolicy as OrchestrationRecoveryPolicy,
+    StepContract as OrchestrationStepContract,
+    StepExecutionResult,
+    StepSpec,
+    TaskGraphPlan,
+    VerificationEvidenceItem,
+    VerificationReport,
+)
 from internal.core.protocol.image_output_paths import (
     ImagePathStreamNormalizer,
     enforce_absolute_image_paths,
 )
+from internal.core.protocol.verdict_parser import parse_verification_verdict
 
 PROMPT_KEY = "MAIN_AGENT_PROMPT"
 ENV_PREFIX = "MAIN"
+REQUEST_CONTEXT_TOKEN_BUDGET = 900000
+OVERFLOW_RETRY_KEEP_MESSAGES = 24
 
 
 class MainAgent:
@@ -58,6 +75,122 @@ class MainAgent:
     ENV_PREFIX = ENV_PREFIX
     _IMAGE_DIRECTIVE_RE = re.compile(r"(?mi)^\s*(?:image|img)\s*:\s*(?P<target>.+?)\s*$")
     _IMAGE_MARKDOWN_RE = re.compile(r"!\[(?P<alt>[^\]]*)\]\((?P<target>[^)]+)\)")
+    _TODO_ALLOWED_PHASES = frozenset({"planning", "executing", "blocked", "completed"})
+    _TODO_ALLOWED_STATUSES = frozenset({"pending", "in_progress", "completed", "blocked"})
+    _TODO_FORBIDDEN_TITLES = frozenset({"todo", "task", "step", "item"})
+
+    @staticmethod
+    def _build_subagent_report_contract(subagent_type: str) -> str:
+        return (
+            f"You are subagent '{subagent_type}'. Complete the assigned work, then report in this exact section order:\n"
+            "[RESULT]\n"
+            "- Concrete final result only (not future plans).\n"
+            "[FILES_CHANGED]\n"
+            "- One file path per line. Use '(none)' if no file changed.\n"
+            "[COMMANDS]\n"
+            "- One command per line, each prefixed with '$ '. Use '(none)' if not run.\n"
+            "[EVIDENCE]\n"
+            "- Essential outputs/findings that justify the result.\n"
+            "[UNRESOLVED]\n"
+            "- Remaining gaps/risks. Use '(none)' when fully complete.\n"
+            "[NEEDED_INPUT]\n"
+            "- Missing inputs required from coordinator/user. Use '(none)' if no dependency.\n"
+            "Do not output only plan wording like 'I will/接下來'."
+        )
+
+    @staticmethod
+    def _default_subagent_prompt() -> str:
+        return (
+            "You are a worker agent for the coding assistant system.\n\n"
+            "Given the assigned task, use the tools available to complete the work fully.\n"
+            "Do not over-engineer, but do not leave the task half-done.\n\n"
+            "When you finish, respond with a concise report that includes:\n"
+            "- what you did\n"
+            "- key findings\n"
+            "- any important limitations or follow-up notes\n\n"
+            "The coordinator will relay the final answer to the user, so your response should focus on essentials."
+        )
+
+    @staticmethod
+    def _subagent_env_notes() -> str:
+        return (
+            "Notes:\n"
+            "- Agent execution environments may reset cwd between shell calls, so prefer absolute file paths.\n"
+            "- In your final response, include only file paths that are directly relevant to the task.\n"
+            "- Include code snippets only when the exact text is essential.\n"
+            "- Do not recap large amounts of code you merely read.\n"
+            "- Do not use emojis.\n"
+            "- Do not write a colon immediately before a tool call."
+        )
+
+    @staticmethod
+    def _built_in_subagent_prompt(agent_type: str) -> str:
+        normalized = (agent_type or "").strip().lower()
+        if normalized == "verification":
+            return (
+                "You are a verification-only worker.\n\n"
+                "This task is for verification, not implementation.\n"
+                "You must not edit, write, or create files in the project directory.\n"
+                "Temporary files outside the project may be used only when strictly necessary for testing.\n\n"
+                "For each important check, report:\n"
+                "- what you verified\n"
+                "- the exact command run\n"
+                "- the observed output\n"
+                "- whether it passed or failed\n\n"
+                "You must end with exactly one of:\n"
+                "VERDICT: PASS\n"
+                "VERDICT: FAIL\n"
+                "VERDICT: PARTIAL"
+            )
+        if normalized == "explore":
+            return (
+                "You are a file and code exploration specialist.\n"
+                "This is a READ-ONLY task. Do not create, modify, or delete files.\n"
+                "Use efficient searches first, then targeted reads, and return findings plus uncertainties."
+            )
+        if normalized == "plan":
+            return (
+                "You are a software architecture and implementation planning specialist.\n"
+                "This is a READ-ONLY task. You must not create, edit, or delete files.\n"
+                "Return a practical step-by-step plan with risks, trade-offs, and critical files."
+            )
+        return (
+            "You are a general-purpose worker agent for the coding assistant system.\n"
+            "Complete the assigned task using available tools. Be thorough, avoid over-engineering, and do not leave work half-done."
+        )
+
+    @classmethod
+    def _build_subagent_system_prompt(
+        cls,
+        *,
+        agent_type: str,
+        append_prompt: str | None = None,
+        include_env_notes: bool = True,
+    ) -> str:
+        base = cls._built_in_subagent_prompt(agent_type) or cls._default_subagent_prompt()
+        env_notes = cls._subagent_env_notes() if include_env_notes else ""
+        pieces = [base, env_notes, (append_prompt or "").strip()]
+        return "\n\n".join(piece for piece in pieces if piece)
+
+    @staticmethod
+    def _compose_agent_prompt(
+        system_prompt: str,
+        instructions: str | None,
+    ) -> tuple[str, None]:
+        merged_system_prompt = (system_prompt or "").strip()
+        extra_instructions = (instructions or "").strip()
+
+        if extra_instructions:
+            if merged_system_prompt:
+                merged_system_prompt = (
+                    f"{merged_system_prompt}\n\n"
+                    "## Runtime Instructions\n\n"
+                    f"{extra_instructions}"
+                )
+            else:
+                merged_system_prompt = extra_instructions
+
+        return merged_system_prompt, None
 
     @classmethod
     def _build_enhanced_system_prompt(
@@ -139,11 +272,14 @@ class MainAgent:
         extra_tools: list[Callable[..., Any]] | None = None,
         include_skill_tool: bool = True,
         include_subagent_tools: bool = True,
+        memory_manager: MemoryManager | None = None,
+        disabled_skills: list[str] | None = None,
+        extra_mcp_servers: list[Any] | None = None,
     ) -> "MainAgent":
         # Load skills first
         if skills is None:
             try:
-                skills = load_skill_registry(root_dirs=skill_root_dirs)
+                skills = load_skill_registry(root_dirs=skill_root_dirs, disabled_skills=disabled_skills)
             except Exception:
                 logger.exception("Failed to load skills; continuing without them")
                 skills = SkillRegistry({}, None)
@@ -178,6 +314,8 @@ class MainAgent:
             if mcp_servers_override is None
             else list(mcp_servers_override)
         )
+        if extra_mcp_servers:
+            mcp_servers = list(mcp_servers) + list(extra_mcp_servers)
 
         # 建立增強的 system prompt（預設自動載入所有可用的 prompts）
         enhanced_system_prompt = cls._build_enhanced_system_prompt(
@@ -188,11 +326,15 @@ class MainAgent:
             system_prompt_override=system_prompt_override,
             system_prompt_append=system_prompt_append,
         )
+        agent_system_prompt, agent_instructions = cls._compose_agent_prompt(
+            enhanced_system_prompt,
+            instructions,
+        )
 
         agent: Agent[None, str] = Agent(
             model=model,
-            system_prompt=enhanced_system_prompt,
-            instructions=instructions,
+            system_prompt=agent_system_prompt,
+            instructions=agent_instructions,
             tools=[],
             model_settings={"temperature": model_temperature if model_temperature is not None else config.temperature},
             toolsets=mcp_servers,
@@ -302,6 +444,7 @@ class MainAgent:
             skills,
             http_client,
             skill_root_dirs,
+            memory_manager=memory_manager,
         )
         try:
             # Register skill tool inside wrapped phase so skill activations
@@ -315,8 +458,12 @@ class MainAgent:
             elif extra_tools:
                 for tool in extra_tools:
                     agent.tool_plain(tool)
+            main_agent._register_todo_tools()
             if include_subagent_tools:
                 main_agent._register_subagent_tools()
+            if memory_manager is not None and memory_manager.enabled:
+                from internal.tools.memory_tools import add_memory_tools
+                add_memory_tools(agent, memory_manager)
             logger.info("Registered tools on MainAgent")
         except Exception:
             logger.exception(
@@ -334,10 +481,12 @@ class MainAgent:
         skills: SkillRegistry | None = None,
         http_client: AsyncClient | None = None,
         skill_root_dirs: list[Path] | None = None,
+        memory_manager: MemoryManager | None = None,
     ) -> None:
         self.agent = agent
         self.sub_agents = None
         self.skills = skills
+        self._memory_manager = memory_manager
         self._last_messages: list[ModelRequest | ModelResponse] | None = None
         self._last_execution_steps: list[dict[str, Any]] = []
         self._last_user_prompt: str | None = None
@@ -347,10 +496,17 @@ class MainAgent:
         self.skill_root_dirs = list(skill_root_dirs or [])
         self._session_id = str(uuid.uuid4())
         self._task_notifications: list[str] = []
+        self._todo_tool_snapshot: str = ""
+        self._todo_tool_items: list[dict[str, Any]] = []
+        self._active_todo_update_callback: Callable[[str], None] | None = None
         self._task_manager = SubagentTaskManager(
             worker=self._run_subagent_task,
             enqueue_notification=self._enqueue_pending_notification,
         )
+        # Orchestration v2 stays disabled on the main hot path until it is
+        # redesigned to match the lighter ref_docs coordinator/todo model.
+        self._orchestration_store: OrchestrationStore | None = None
+        self._orchestration_runtime: OrchestrationRuntime | None = None
         setattr(self.agent, "_tool_event_callback", None)
         # tools are registered via add_all_tools during create()
 
@@ -373,7 +529,26 @@ class MainAgent:
                 isolation=cast(Any, isolation or "none"),
                 model=model or None,
             )
-            return cast(dict[str, str], await self._task_manager.spawnAgentTask(payload, self._session_id))
+            created = await self._task_manager.spawnAgentTask(payload, self._session_id)
+            if run_in_background:
+                return cast(dict[str, str], created)
+
+            task_id = created.get("task_id", "")
+            task = self._task_manager.registry.getTask(task_id) if task_id else None
+            if task is None:
+                return cast(dict[str, str], created)
+
+            return {
+                "task_id": task.id,
+                "status": task.status,
+                "name": task.name or "",
+                "summary": task.summary or "",
+                "result": task.result or "",
+                "files_changed": "\n".join(task.filesChanged),
+                "commands_executed": "\n".join(task.commandsExecuted),
+                "evidence": "\n".join(task.evidence),
+                "unresolved_issues": "\n".join(task.unresolvedIssues),
+            }
 
         @self.agent.tool_plain
         def SendMessageTool(to: str, message: str) -> dict[str, str | bool]:
@@ -391,6 +566,154 @@ class MainAgent:
         def ListSubagentTasks() -> list[dict[str, str | int | bool | None]]:
             """List current subagent tasks for this coordinator session."""
             return self._task_manager.listTasks(self._session_id)
+
+    def _render_todo_snapshot(self, phase: str, items: list[dict[str, Any]]) -> str:
+        lines = [f"[TODO] phase={phase or 'executing'}"]
+        if not items:
+            lines.append("- (empty)")
+            return "\n".join(lines)
+
+        for raw in items:
+            todo_id = str(raw.get("id", "")).strip() or "todo"
+            title = str(raw.get("title", "")).strip() or str(raw.get("description", "")).strip() or todo_id
+            status = str(raw.get("status", "")).strip() or "pending"
+            notes = str(raw.get("notes", "")).strip()
+            suffix = f" | notes={notes}" if notes else ""
+            lines.append(f"- {todo_id} [{status}] {title}{suffix}")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _fallback_todo_id(index: int, title: str, description: str) -> str:
+        seed = title.strip() or description.strip() or f"item_{index}"
+        slug = re.sub(r"[^a-z0-9]+", "_", seed.lower()).strip("_")
+        if not slug:
+            slug = f"item_{index}"
+        return f"todo_{index:03d}_{slug[:32]}"
+
+    def _normalize_todo_payload(
+        self,
+        phase: str,
+        items: list[dict[str, Any]],
+    ) -> tuple[str, list[dict[str, Any]]]:
+        normalized_phase = str(phase or "").strip().lower()
+        if normalized_phase not in self._TODO_ALLOWED_PHASES:
+            allowed = ", ".join(sorted(self._TODO_ALLOWED_PHASES))
+            raise ValueError(f"todo.phase must be one of: {allowed}")
+
+        normalized_items: list[dict[str, Any]] = []
+        for index, raw in enumerate(items[:8], start=1):
+            if not isinstance(raw, dict):
+                raise ValueError(f"todo.items[{index}] must be an object")
+
+            todo_id = str(raw.get("id", "")).strip()
+            title = str(raw.get("title", "")).strip()
+            description = str(raw.get("description", "")).strip()
+            status = str(raw.get("status", "")).strip().lower() or "pending"
+            notes = str(raw.get("notes", "")).strip()
+
+            if not title and description:
+                title = description
+            if not todo_id:
+                todo_id = self._fallback_todo_id(index, title, description)
+            if not title:
+                raise ValueError(f"todo.items[{index}].title is required")
+            if title.strip().lower() in self._TODO_FORBIDDEN_TITLES:
+                raise ValueError(
+                    f"todo.items[{index}].title must be a concrete step, not '{title}'"
+                )
+            if status not in self._TODO_ALLOWED_STATUSES:
+                allowed = ", ".join(sorted(self._TODO_ALLOWED_STATUSES))
+                raise ValueError(
+                    f"todo.items[{index}].status must be one of: {allowed}"
+                )
+
+            normalized_items.append(
+                {
+                    "id": todo_id,
+                    "title": title,
+                    "description": description,
+                    "status": status,
+                    "notes": notes,
+                }
+            )
+
+        in_progress_count = sum(
+            1 for item in normalized_items if item.get("status") == "in_progress"
+        )
+        if in_progress_count > 1:
+            raise ValueError("todo list can have at most one in_progress item")
+
+        return normalized_phase, normalized_items
+
+    def _publish_todo_snapshot(
+        self,
+        snapshot: str,
+        items: list[dict[str, Any]] | None = None,
+        *,
+        emit: bool = True,
+    ) -> str:
+        self._todo_tool_snapshot = (snapshot or "").strip()
+        self._todo_tool_items = list(items or [])
+        callback = self._active_todo_update_callback
+        if emit and callback and self._todo_tool_snapshot:
+            callback(self._todo_tool_snapshot)
+        return self._todo_tool_snapshot
+
+    def _register_todo_tools(self) -> None:
+        @self.agent.tool_plain
+        def todo(
+            phase: str,
+            items: list[dict[str, Any]],
+        ) -> str:
+            """Update the current session todo list with strict validation for phase, id, title, and status.
+
+            IMPORTANT: `items` must always contain the COMPLETE current todo list (all items with
+            their current statuses). Never call with an empty `items` list — that would erase all
+            progress. To mark a task complete, re-send all items with the relevant item's status
+            changed to 'completed'.
+            """
+            if not items:
+                # Calling with empty items would wipe the list — return current snapshot unchanged
+                current = self._todo_tool_snapshot
+                if current:
+                    return f"(no-op: items was empty — current list preserved)\n{current}"
+                return "(todo list is currently empty)"
+            normalized_phase, normalized_items = self._normalize_todo_payload(
+                phase,
+                items,
+            )
+            snapshot = self._render_todo_snapshot(normalized_phase, normalized_items)
+            return self._publish_todo_snapshot(snapshot, normalized_items)
+
+        @self.agent.tool_plain
+        def AskUserQuestion(
+            question: str,
+            options: str = "",
+        ) -> str:
+            """向使用者提問，等待回答後再繼續執行。
+
+            **何時使用**：任何需要使用者輸入才能繼續的情況都應使用此工具，包括：
+            - 目標或範圍不明確（例如找到多個候選檔案、路徑不確定）
+            - 有多種有效做法，選擇取決於使用者偏好
+            - 即將執行不可逆操作（刪除、覆寫、發送）
+            - 需要使用者提供具體資訊（名稱、格式、路徑等）
+
+            **`options`**：逗號分隔的選項文字（例如 "Word, PDF, Markdown"）。
+            GUI 會將每個選項渲染成可點擊按鈕；留空則顯示自由輸入框。
+
+            **多個問題**：若需要多項資訊且問題彼此獨立，請在單一 `question` 中以編號列出所有問題，
+            減少對使用者的打擾。只有當第二個問題的答案依賴第一個問題時，才分成多次呼叫。
+
+            **不要**用此工具做已由權限系統處理的例行確認，也不要問你自己查一下就能回答的問題。
+            """
+            try:
+                opts = [o.strip() for o in options.split(",") if o.strip()] if options else []
+                from internal.cli import ask_user_question
+                result = ask_user_question(question, opts)
+                return result if result else "(no answer — user dismissed the dialog)"
+            except Exception as exc:
+                logger.warning("AskUserQuestion encountered an error: %s", exc)
+                return f"(Question could not be displayed. Proceed with your best judgment for: {question})"
 
     def _enqueue_pending_notification(self, xml: str) -> None:
         self._task_notifications.append(xml)
@@ -410,7 +733,46 @@ class MainAgent:
         return (
             "<internal-task-notifications>\n"
             f"{joined}\n"
+            "---\n"
+            "These are internal signals from workers — do not acknowledge, thank, or address workers directly in your response.\n"
+            "Read the results, synthesize the key findings yourself, then decide the next concrete action.\n"
+            "If delegating to another worker based on these findings, write a specific prompt: include exact file paths, line numbers, and what to change — never say 'based on your findings' or re-delegate understanding.\n"
+            "Update the todo list to reflect what is now completed and what comes next.\n"
             "</internal-task-notifications>\n\n"
+            f"{prompt}"
+        )
+
+    def _inject_todo_snapshot(self, prompt: str) -> str:
+        guidance = (
+            "<active-session-todos>\n"
+            "Use the `todo` tool whenever the task has more than one distinct step — use your judgment on what counts as a step.\n"
+            "Skip it only for truly trivial one-shot responses (e.g. a factual question, a single-line fix).\n"
+            "Break the task into as many items as naturally fit. Each item should be the smallest unit of work you can confidently track and complete independently.\n"
+            "Good breakdowns: granular enough to show progress, coarse enough to avoid noise. Never wrap the entire request in a single item.\n"
+            "Each item must have a concrete, action-oriented title that describes what you will actually do, not what the user asked.\n"
+            "Never use vague placeholder titles like 'todo', 'task', 'step', or 'item'.\n"
+            "Allowed phases: planning (researching/understanding), executing (actively doing the work), blocked, completed.\n"
+            "Allowed statuses: pending, in_progress, blocked, completed.\n"
+            "IMPORTANT: Call `todo` to mark an item `in_progress` BEFORE you begin working on it, not after.\n"
+            "Mark items `completed` immediately after finishing — do not batch completions.\n"
+            "Only mark an item completed when you have FULLY accomplished it. Never mark completed if tests are failing, implementation is partial, or errors remain unresolved.\n"
+            "When delegating a step via `AgentTool`: write a specific, self-contained prompt — include exact file paths, line numbers, and what to change. Never write vague prompts like 'based on your findings, fix it'.\n"
+            "Use `SendMessageTool` to continue an existing worker (when it already has relevant context). Use `AgentTool` to spawn fresh (when you need a clean, unbiased perspective or a completely different task).\n"
+            "Use `AskUserQuestion` when the task has unclear requirements, multiple valid approaches, or you need user input before committing to a direction. Set `options` to a comma-separated string of choices (e.g. \"A, B, C\") whenever there are distinct paths — these show as clickable buttons in the GUI. Do not guess when the user's intent is genuinely ambiguous.\n"
+        )
+        if self._todo_tool_snapshot:
+            return (
+                f"{guidance}\n"
+                "Current todo snapshot:\n"
+                f"{self._todo_tool_snapshot}\n"
+                "</active-session-todos>\n\n"
+                f"{prompt}"
+            )
+        return (
+            f"{guidance}"
+            "Current todo snapshot:\n"
+            "- (empty)\n"
+            "</active-session-todos>\n\n"
             f"{prompt}"
         )
 
@@ -433,6 +795,12 @@ class MainAgent:
             worker_instructions = getattr(self.agent, "instructions", "")
             if model is None:
                 raise RuntimeError("Fork subagent requires coordinator model")
+            if subagent_type not in {"compaction", "verification"}:
+                worker_instructions = (
+                    f"{(worker_instructions or '').strip()}\n\n"
+                    f"{self._subagent_env_notes()}\n\n"
+                    f"{self._build_subagent_report_contract(subagent_type)}"
+                ).strip()
         else:
             category = f"sub-agent/{subagent_type}"
             model = create_model_for_agent(
@@ -470,19 +838,21 @@ class MainAgent:
                     "Do not provide user-facing messaging."
                 )
             else:
-                worker_system_prompt = self._build_enhanced_system_prompt(
-                    additional_prompts=None,
-                    auto_load_all=True,
-                    model_name=getattr(model, "model_name", None),
+                worker_system_prompt = self._build_subagent_system_prompt(
+                    agent_type=subagent_type,
+                    include_env_notes=True,
                 )
-                worker_instructions = (
-                    f"You are subagent '{subagent_type}'. Focus only on assigned task and report concise results."
-                )
+                worker_instructions = self._build_subagent_report_contract(subagent_type)
+
+        worker_system_prompt, worker_request_instructions = self._compose_agent_prompt(
+            worker_system_prompt,
+            worker_instructions,
+        )
 
         worker: Agent[None, str] = Agent(
             model=model,
             system_prompt=worker_system_prompt,
-            instructions=worker_instructions,
+            instructions=worker_request_instructions,
             tools=[],
             model_settings={"temperature": 0.2},
         )
@@ -510,14 +880,23 @@ class MainAgent:
         if model is None:
             raise RuntimeError("Unable to resolve model for compaction subagent")
 
+        worker_system_prompt, worker_request_instructions = self._compose_agent_prompt(
+            prompt,
+            (
+                "You are the dedicated context compaction subagent for an AI assistant. "
+                "Your only job is to produce a faithful, detailed summary of the conversation "
+                "provided so that the assistant can continue seamlessly without losing context. "
+                "Preserve all technical details, user intent changes, file names, code snippets, "
+                "and errors verbatim where possible. "
+                "Output ONLY plain text: an <analysis> block followed by a <summary> block. "
+                "Absolutely no tool calls."
+            ),
+        )
+
         worker: Agent[None, str] = Agent(
             model=model,
-            system_prompt=prompt,
-            instructions=(
-                "You are the dedicated context compaction subagent. "
-                "Output only plain text with <analysis> and <summary> blocks. "
-                "No tool calls are allowed."
-            ),
+            system_prompt=worker_system_prompt,
+            instructions=worker_request_instructions,
             tools=[],
             model_settings={"temperature": 0.0},
         )
@@ -529,6 +908,15 @@ class MainAgent:
     def set_tool_event_callback(self, callback) -> None:
         """Register a callback for tool execution events."""
         setattr(self.agent, "_tool_event_callback", callback)
+
+    def resume_incomplete_runs(self) -> list[str]:
+        if self._orchestration_store is None:
+            return []
+        return self._orchestration_store.resume_incomplete_runs()
+
+    @property
+    def orchestration_store(self) -> OrchestrationStore | None:
+        return self._orchestration_store
 
     def _reload_model_from_db(self) -> None:
         """Pick up any model config changes made via the UI since the last call."""
@@ -632,6 +1020,15 @@ class MainAgent:
     ) -> list[UserContent]:
         return [*content, error_context]
 
+    def _inject_memory(self, prompt: str) -> str:
+        """Inject the latest persistent memory context into the user prompt."""
+        if self._memory_manager is None:
+            return prompt
+        block = self._memory_manager.build_context_block()
+        if not block:
+            return prompt
+        return f"{block}\n\n{prompt}"
+
     def _inject_local_timestamp(self, prompt: str) -> str:
         """Inject per-turn local timestamp into user prompt context."""
         dt = datetime.now().astimezone()
@@ -655,17 +1052,393 @@ class MainAgent:
             f"{prompt}"
         )
 
+    def _estimate_user_content_tokens(self, user_content: list[UserContent]) -> int:
+        total = 0
+        for part in user_content:
+            if isinstance(part, str):
+                total += estimate_tokens(part)
+            else:
+                # Non-text content (image/url/binary) still consumes request budget.
+                total += 512
+        return total
+
+    def _trim_message_history_for_budget(
+        self,
+        message_history: list[ModelRequest | ModelResponse] | None,
+        user_content: list[UserContent],
+    ) -> list[ModelRequest | ModelResponse] | None:
+        if not message_history:
+            return message_history
+
+        prompt_tokens = self._estimate_user_content_tokens(user_content)
+        budget_for_history = max(0, REQUEST_CONTEXT_TOKEN_BUDGET - prompt_tokens)
+
+        kept: list[ModelRequest | ModelResponse] = []
+        used = 0
+        for msg in reversed(message_history):
+            msg_tokens = estimate_tokens(get_message_text(msg))
+            if kept and (used + msg_tokens) > budget_for_history:
+                break
+            kept.append(msg)
+            used += msg_tokens
+
+        trimmed = list(reversed(kept))
+        dropped = len(message_history) - len(trimmed)
+        if dropped > 0:
+            logger.warning(
+                "Trimmed message_history for context budget: dropped=%s kept=%s prompt_tokens=%s budget_for_history=%s",
+                dropped,
+                len(trimmed),
+                prompt_tokens,
+                budget_for_history,
+            )
+        return trimmed
+
+    def _is_context_overflow_error(self, exc: Exception) -> bool:
+        text = str(exc).lower()
+        markers = [
+            "maximum context length",
+            "context length",
+            "too many tokens",
+            "requested about",
+            "token limit",
+        ]
+        return any(marker in text for marker in markers)
+
+    def _overflow_retry_history(
+        self,
+        message_history: list[ModelRequest | ModelResponse] | None,
+    ) -> list[ModelRequest | ModelResponse] | None:
+        if not message_history:
+            return message_history
+        if len(message_history) <= OVERFLOW_RETRY_KEEP_MESSAGES:
+            return message_history
+        trimmed = message_history[-OVERFLOW_RETRY_KEEP_MESSAGES:]
+        logger.warning(
+            "Context overflow retry using reduced history: original=%s kept=%s",
+            len(message_history),
+            len(trimmed),
+        )
+        return trimmed
+
+    async def _follow_through_needs_retry(self, user_prompt: str, output_text: str) -> bool:
+        if not output_text.strip():
+            return True
+        if not self._http_client:
+            return False
+
+        verification_task = SimpleNamespace(subagentType="verification", mode="spawn")
+        verification_prompt = (
+            "You are validating whether the assistant actually delivered requested work in this turn.\n"
+            "Return exactly one verdict line: VERDICT: PASS / VERDICT: FAIL / VERDICT: PARTIAL.\n"
+            "PASS: concrete deliverables/results are present.\n"
+            "FAIL: mostly promises/plans without concrete results.\n"
+            "PARTIAL: some output exists but request is not adequately completed.\n\n"
+            "USER REQUEST:\n"
+            f"{user_prompt}\n\n"
+            "ASSISTANT OUTPUT:\n"
+            f"{output_text}\n"
+        )
+
+        try:
+            verification_output = await self._run_subagent_task(verification_task, verification_prompt)
+            verdict = parse_verification_verdict(
+                verification_output,
+                task_id="follow-through-check",
+            ).verdict
+            return verdict in {"FAIL", "PARTIAL"}
+        except Exception as exc:
+            logger.warning("Follow-through verification unavailable, skip retry: %s", exc)
+            return False
+
+    def _build_follow_through_retry_context(self) -> str:
+        return (
+            "\n\nValidation Guard:\n"
+            "The previous response appears not fully delivered for this turn.\n"
+            "Continue immediately and provide concrete completion output now.\n"
+            "Do not provide only future-plan wording.\n"
+        )
+
+    @staticmethod
+    def _orchestration_default_contract(goal: str) -> OrchestrationStepContract:
+        return OrchestrationStepContract(
+            doneWhen=goal,
+            mustProduce=["summary"],
+            mustNotChange=[],
+            requiredChecks=[],
+            evidenceShape=["summary"],
+            repairHint="narrow the failing scope and preserve prior successful checks",
+        )
+
+    @staticmethod
+    def _orchestration_default_recovery_policy() -> OrchestrationRecoveryPolicy:
+        return OrchestrationRecoveryPolicy(
+            maxAttempts=2,
+            onTransient="retry-step",
+            onDeterministic="create-repair-step",
+            onDependency="wait-dependency",
+            onUserDecision="wait-user",
+            onSystemCrash="resume-from-checkpoint",
+        )
+
+    @staticmethod
+    def _orchestration_step_kind_for_task(task_kind: str) -> str:
+        return "implement" if task_kind in {"implementation", "bugfix", "infra"} else "discover"
+
+    def _orchestration_parse_plan_json(
+        self,
+        raw: str,
+        task_kind: str,
+        user_request: str,
+    ) -> TaskGraphPlan:
+        fallback_kind = self._orchestration_step_kind_for_task(task_kind)
+        try:
+            payload = json.loads((raw or "").strip())
+        except Exception:
+            payload = {}
+
+        if isinstance(payload, list):
+            payload = {"steps": payload}
+        steps_payload = payload.get("steps") if isinstance(payload, dict) else None
+        steps: list[StepSpec] = []
+        if isinstance(steps_payload, list):
+            for index, item in enumerate(steps_payload, start=1):
+                if not isinstance(item, dict):
+                    continue
+                step_id = str(item.get("step_id") or item.get("stepId") or f"step_{index:03d}").strip()
+                kind = str(item.get("kind") or fallback_kind).strip().lower()
+                if kind not in {"discover", "plan", "implement", "verify", "repair", "synthesize", "ask_user"}:
+                    kind = fallback_kind
+                goal = str(item.get("goal") or item.get("title") or user_request).strip() or user_request
+                depends_on_raw = item.get("depends_on") or item.get("dependsOn") or []
+                depends_on = [str(dep).strip() for dep in depends_on_raw] if isinstance(depends_on_raw, list) else []
+                inputs = item.get("inputs") if isinstance(item.get("inputs"), dict) else {}
+                inputs = {"user_request": user_request, **inputs}
+                contract_payload = item.get("contract") if isinstance(item.get("contract"), dict) else {}
+                contract = OrchestrationStepContract(
+                    doneWhen=str(contract_payload.get("done_when") or contract_payload.get("doneWhen") or goal),
+                    mustProduce=list(contract_payload.get("must_produce") or contract_payload.get("mustProduce") or ["summary"]),
+                    mustNotChange=list(contract_payload.get("must_not_change") or contract_payload.get("mustNotChange") or []),
+                    requiredChecks=list(contract_payload.get("required_checks") or contract_payload.get("requiredChecks") or []),
+                    evidenceShape=list(contract_payload.get("evidence_shape") or contract_payload.get("evidenceShape") or ["summary"]),
+                    repairHint=str(contract_payload.get("repair_hint") or contract_payload.get("repairHint") or "retry with narrowed scope"),
+                )
+                retry_payload = item.get("retry_policy") if isinstance(item.get("retry_policy"), dict) else item.get("retryPolicy")
+                retry_payload = retry_payload if isinstance(retry_payload, dict) else {}
+                steps.append(
+                    StepSpec(
+                        stepId=step_id,
+                        kind=cast(Any, kind),
+                        goal=goal,
+                        dependsOn=depends_on,
+                        executor=str(item.get("executor") or "worker"),
+                        inputs=inputs,
+                        contract=contract,
+                        verificationMode=str(item.get("verification_mode") or item.get("verificationMode") or "none"),
+                        retryPolicy=OrchestrationRecoveryPolicy(
+                            maxAttempts=int(retry_payload.get("max_attempts") or retry_payload.get("maxAttempts") or 2),
+                            onTransient=str(retry_payload.get("on_transient") or retry_payload.get("onTransient") or "retry-step"),
+                            onDeterministic=str(retry_payload.get("on_deterministic") or retry_payload.get("onDeterministic") or "create-repair-step"),
+                            onDependency=str(retry_payload.get("on_dependency") or retry_payload.get("onDependency") or "wait-dependency"),
+                            onUserDecision=str(retry_payload.get("on_user_decision") or retry_payload.get("onUserDecision") or "wait-user"),
+                            onSystemCrash=str(retry_payload.get("on_system_crash") or retry_payload.get("onSystemCrash") or "resume-from-checkpoint"),
+                        ),
+                        recoveryPoint=str(item.get("recovery_point") or item.get("recoveryPoint") or f"checkpoint:{step_id}"),
+                    )
+                )
+
+        if not steps:
+            steps = [
+                StepSpec(
+                    stepId="step_001",
+                    kind=cast(Any, fallback_kind),
+                    goal=user_request,
+                    executor="worker",
+                    inputs={"user_request": user_request},
+                    contract=self._orchestration_default_contract(user_request),
+                    verificationMode="independent" if task_kind in {"implementation", "bugfix", "infra"} else "none",
+                    retryPolicy=self._orchestration_default_recovery_policy(),
+                    recoveryPoint="checkpoint:step_001",
+                )
+            ]
+        return TaskGraphPlan(taskKind=cast(Any, task_kind), steps=steps)
+
+    async def _orchestration_build_task_graph(self, task_kind: str, user_request: str) -> TaskGraphPlan:
+        execute_turn = getattr(self, "_execute_turn_core", None)
+        if not callable(execute_turn):
+            return self._orchestration_parse_plan_json("", task_kind, user_request)
+        planner_prompt = (
+            "You are the Task Graph Planner for a durable orchestration engine.\n"
+            "Return JSON only with shape: {\"steps\": [...]}.\n"
+            "Each step must include: step_id, kind, goal, depends_on, executor, inputs, contract, verification_mode, retry_policy, recovery_point.\n"
+            "Allowed kinds: discover, plan, implement, verify, repair, synthesize, ask_user.\n"
+            "Rules:\n"
+            "- use at most 5 steps\n"
+            "- implementation, bugfix, infra must include verify after implement\n"
+            "- synthesize should depend on all user-visible work being done\n"
+            "- keep inputs minimal and task-scoped\n"
+            "- do not include markdown fences\n\n"
+            f"Task kind: {task_kind}\n"
+            f"User request:\n{user_request}"
+        )
+        try:
+            raw = await execute_turn(planner_prompt)
+        except Exception:
+            raw = ""
+        return self._orchestration_parse_plan_json(raw, task_kind, user_request)
+
+    async def coordinator_handle_user_turn(
+        self,
+        user_prompt: str,
+        message_history: list[ModelRequest | ModelResponse] | None = None,
+        on_todo_update: Callable[[str], None] | None = None,
+    ) -> str:
+        def todo_callback(snapshot: str) -> None:
+            self._publish_todo_snapshot(snapshot, self._todo_tool_items, emit=False)
+            if on_todo_update:
+                on_todo_update(snapshot)
+
+        self._active_todo_update_callback = todo_callback
+        try:
+            execute_turn = getattr(self, "_execute_turn_core", None)
+            if not callable(execute_turn):
+                raise RuntimeError("Main agent execution core is unavailable")
+            return await execute_turn(
+                user_prompt,
+                message_history=message_history,
+                skip_plan_execution=True,
+            )
+        finally:
+            self._active_todo_update_callback = None
+
+    async def coordinator_handle_user_turn_stream(
+        self,
+        user_prompt: str,
+        message_history: list[ModelRequest | ModelResponse] | None = None,
+        on_todo_update: Callable[[str], None] | None = None,
+    ) -> AsyncIterator[str]:
+        result = await self.coordinator_handle_user_turn(
+            user_prompt,
+            message_history=message_history,
+            on_todo_update=on_todo_update,
+        )
+        if result:
+            yield result
+
+    async def _orchestration_execute_step(
+        self,
+        step: StepSpec,
+        upstream_artifacts: list[dict[str, Any]],
+    ) -> StepExecutionResult:
+        if step.kind == "synthesize":
+            for artifact in reversed(upstream_artifacts):
+                candidate = str(artifact.get("result") or artifact.get("summary") or "").strip()
+                if candidate:
+                    return StepExecutionResult(
+                        status="completed",
+                        summary=step.goal,
+                        result=candidate,
+                        evidence=[candidate],
+                    )
+            return StepExecutionResult(status="completed", summary=step.goal, result=step.goal)
+
+        subagent_type = "implementation" if step.kind in {"implement", "repair"} else "research"
+        prompt_sections = [
+            f"STEP KIND: {step.kind}",
+            f"STEP GOAL: {step.goal}",
+            f"DONE WHEN: {step.contract.doneWhen}",
+            "USER REQUEST:\n" + str(step.inputs.get("user_request", step.goal)),
+        ]
+        if step.contract.requiredChecks:
+            prompt_sections.append("REQUIRED CHECKS:\n" + "\n".join(step.contract.requiredChecks))
+        if upstream_artifacts:
+            prompt_sections.append("UPSTREAM ARTIFACTS:\n" + json.dumps(upstream_artifacts, ensure_ascii=False))
+        output = await self._run_subagent_task(
+            SimpleNamespace(subagentType=subagent_type, mode="spawn"),
+            "\n\n".join(prompt_sections),
+        )
+        worker_result = self._task_manager._build_worker_result(  # noqa: SLF001
+            step.stepId,
+            output,
+            __import__("time").time(),
+        )
+        failed = bool(worker_result.unresolvedIssues)
+        return StepExecutionResult(
+            status=cast(Any, "failed" if failed else "completed"),
+            summary=worker_result.summary,
+            result=worker_result.result,
+            filesChanged=worker_result.filesChanged,
+            commandsExecuted=worker_result.commandsExecuted,
+            evidence=worker_result.evidence,
+            unresolvedIssues=worker_result.unresolvedIssues,
+            failureClass=cast(Any, "deterministic") if failed else None,
+        )
+
+    async def _orchestration_execute_verification(
+        self,
+        step: StepSpec,
+        upstream_artifacts: list[dict[str, Any]],
+    ) -> VerificationReport:
+        original_request = str(step.inputs.get("user_request", step.goal))
+        claims = upstream_artifacts[-1] if upstream_artifacts else {}
+        output = await self._run_subagent_task(
+            SimpleNamespace(subagentType="verification", mode="spawn"),
+            (
+                "ORIGINAL USER REQUEST:\n"
+                f"{original_request}\n\n"
+                "STEP CONTRACT:\n"
+                f"{json.dumps({'done_when': step.contract.doneWhen, 'required_checks': step.contract.requiredChecks}, ensure_ascii=False)}\n\n"
+                "UPSTREAM ARTIFACTS:\n"
+                f"{json.dumps(upstream_artifacts, ensure_ascii=False)}\n\n"
+                "CLAIMS TO VERIFY:\n"
+                f"{json.dumps(claims, ensure_ascii=False)}"
+            ),
+        )
+        verdict = parse_verification_verdict(output, task_id=step.stepId)
+        remediation_steps = [
+            StepSpec(
+                stepId=todo.id,
+                kind="repair",
+                goal=todo.description or todo.title,
+                dependsOn=list(dict.fromkeys(step.dependsOn)),
+                executor="worker",
+                inputs={"user_request": original_request, "verification_feedback": todo.description or todo.title},
+                contract=self._orchestration_default_contract(todo.description or todo.title),
+                verificationMode="independent",
+                retryPolicy=self._orchestration_default_recovery_policy(),
+                recoveryPoint=f"{step.recoveryPoint}:repair:{todo.id}",
+            )
+            for todo in verdict.remediationTodos
+        ]
+        return VerificationReport(
+            verdict=cast(Any, verdict.verdict),
+            summary=verdict.summary,
+            checkedItems=[e.command for e in verdict.evidence if e.command],
+            failedItems=[*verdict.missingRequirements, *verdict.suspectedProblems],
+            evidence=[
+                VerificationEvidenceItem(
+                    name=e.command or "check",
+                    result=e.result,
+                    detail=e.output,
+                )
+                for e in verdict.evidence
+            ],
+            remediationSteps=remediation_steps,
+            confidence=1.0 if verdict.verdict == "PASS" else 0.5,
+            requiresUserInput=False,
+        )
+
     async def run(
         self,
         prompt: str,
         message_history: list[ModelRequest | ModelResponse] | None = None,
         skip_plan_execution: bool = True,
     ) -> str:
-        from internal.app.handle_user_turn import create_runtime
-
         _ = skip_plan_execution  # backward compatibility
-        runtime = create_runtime(self)
-        return await runtime.handle_user_turn(prompt, message_history=message_history)
+        return await self.coordinator_handle_user_turn(
+            prompt,
+            message_history=message_history,
+        )
 
     async def _execute_turn_core(
         self,
@@ -679,19 +1452,38 @@ class MainAgent:
         self._previous_user_prompt = self._last_user_prompt
         self._last_user_prompt = prompt
         prompt = self._inject_task_notifications(prompt)
+        prompt = self._inject_todo_snapshot(prompt)
         prompt = self._inject_local_timestamp(prompt)
+        prompt = self._inject_memory(prompt)
         user_content, _ = self._build_user_prompt_content(prompt)
+        safe_history = self._trim_message_history_for_budget(message_history, user_content)
 
         try:
-            result = await self.agent.run(user_content, message_history=message_history)
+            result = await self.agent.run(user_content, message_history=safe_history)
             output_text = enforce_absolute_image_paths(result.output or "")
             try:
                 self._last_messages = result.all_messages()
             except Exception:
                 self._last_messages = None
             self._last_assistant_reply = self._extract_user_reply(output_text)
+
             return output_text
         except Exception as e:
+            if self._is_context_overflow_error(e):
+                retry_history = self._overflow_retry_history(safe_history)
+                if retry_history is not safe_history:
+                    try:
+                        result = await self.agent.run(user_content, message_history=retry_history)
+                        output_text = enforce_absolute_image_paths(result.output or "")
+                        try:
+                            self._last_messages = result.all_messages()
+                        except Exception:
+                            self._last_messages = None
+                        self._last_assistant_reply = self._extract_user_reply(output_text)
+                        return output_text
+                    except Exception as retry_exc:
+                        e = retry_exc
+
             error_msg = str(e)
             logger.warning("Tool execution error in agent.run(): %s", error_msg)
 
@@ -706,7 +1498,7 @@ class MainAgent:
                     user_content, error_context
                 )
                 result = await self.agent.run(
-                    user_content_with_error, message_history=message_history
+                    user_content_with_error, message_history=safe_history
                 )
                 output_text = enforce_absolute_image_paths(result.output or "")
                 try:
@@ -737,11 +1529,11 @@ class MainAgent:
         message_history: list[ModelRequest | ModelResponse] | None = None,
         skip_plan_execution: bool = True,
     ):
-        from internal.app.handle_user_turn import create_runtime
-
         _ = skip_plan_execution  # backward compatibility
-        runtime = create_runtime(self)
-        async for chunk in runtime.handle_user_turn_stream(prompt, message_history=message_history):
+        async for chunk in self.coordinator_handle_user_turn_stream(
+            prompt,
+            message_history=message_history,
+        ):
             yield chunk
 
     async def _execute_turn_stream_core(
@@ -756,12 +1548,15 @@ class MainAgent:
         self._previous_user_prompt = self._last_user_prompt
         self._last_user_prompt = prompt
         prompt = self._inject_task_notifications(prompt)
+        prompt = self._inject_todo_snapshot(prompt)
         prompt = self._inject_local_timestamp(prompt)
+        prompt = self._inject_memory(prompt)
         user_content, _ = self._build_user_prompt_content(prompt)
+        safe_history = self._trim_message_history_for_budget(message_history, user_content)
 
         try:
             async with self.agent.run_stream(
-                user_prompt=user_content, message_history=message_history
+                user_prompt=user_content, message_history=safe_history
             ) as result:
                 collected = ""
                 normalizer = ImagePathStreamNormalizer()
@@ -791,6 +1586,35 @@ class MainAgent:
                     self._last_messages = None
                 self._last_assistant_reply = self._extract_user_reply(collected)
         except Exception as e:
+            if self._is_context_overflow_error(e):
+                retry_history = self._overflow_retry_history(safe_history)
+                if retry_history is not safe_history:
+                    try:
+                        async with self.agent.run_stream(
+                            user_prompt=user_content, message_history=retry_history
+                        ) as result:
+                            collected = ""
+                            normalizer = ImagePathStreamNormalizer()
+                            async for chunk in result.stream_text(delta=True):
+                                if not chunk:
+                                    continue
+                                normalized_chunk = normalizer.feed(chunk)
+                                if normalized_chunk:
+                                    collected += normalized_chunk
+                                    yield normalized_chunk
+                            tail = normalizer.flush()
+                            if tail:
+                                collected += tail
+                                yield tail
+                            try:
+                                self._last_messages = result.all_messages()
+                            except Exception:
+                                self._last_messages = None
+                            self._last_assistant_reply = self._extract_user_reply(collected)
+                            return
+                    except Exception as retry_exc:
+                        e = retry_exc
+
             error_msg = str(e)
             logger.warning("Error in agent.run_stream(): %s", error_msg)
 
@@ -804,7 +1628,7 @@ class MainAgent:
                     user_content, error_context
                 )
                 async with self.agent.run_stream(
-                    user_prompt=user_content_with_error, message_history=message_history
+                    user_prompt=user_content_with_error, message_history=safe_history
                 ) as result:
                     collected = ""
                     normalizer = ImagePathStreamNormalizer()

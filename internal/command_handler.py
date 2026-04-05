@@ -42,13 +42,13 @@ class CommandHandler:
         self.last_user_prompt = ""
         self.last_assistant_reply = ""
     
-    def handle(self, command: str) -> Optional[str]:
+    async def handle(self, command: str) -> Optional[str]:
         """
         處理指令
-        
+
         Args:
             command: 用戶輸入的指令（以 / 開頭）
-        
+
         Returns:
             - None: 指令已處理完畢
             - "__exit__": 請求退出
@@ -81,7 +81,7 @@ class CommandHandler:
         
         # /skills - Skills 相關指令
         elif name == "/skills":
-            self._handle_skills_command(args)
+            await self._handle_skills_command(args)
             return None
         
         # /history - 顯示對話歷史
@@ -191,14 +191,14 @@ Skills 管理：
                 lines.append(f"- {tool_name}: {doc}" if doc else f"- {tool_name}")
             self.output_callback("\n".join(lines))
     
-    def _handle_skills_command(self, args: list[str]):
+    async def _handle_skills_command(self, args: list[str]):
         """處理 /skills 子指令"""
         if not args or args[0] == "list":
             self._list_skills()
         elif args[0] == "info":
             self._show_skill_info(args[1:])
         elif args[0] == "test":
-            self._test_skill_matching(args[1:])
+            await self._test_skill_matching(args[1:])
         elif args[0] == "reload":
             self._reload_skills()
         else:
@@ -278,18 +278,18 @@ Skills 管理：
         
         self.output_callback("\n".join(lines))
     
-    def _test_skill_matching(self, args: list[str]):
+    async def _test_skill_matching(self, args: list[str]):
         """測試 skill 匹配"""
         if not args:
             self.output_callback("用法：/skills test <prompt>")
             return
-        
+
         test_prompt = " ".join(args)
         if not self.main_agent.skills or self.main_agent.skills.is_empty():
             self.output_callback("沒有已載入的 skills。")
             return
-        
-        skills = self.main_agent.skills.find_relevant_skills(test_prompt, max_skills=5)
+
+        skills = await self.main_agent.skills.find_relevant_skills(test_prompt, max_skills=5)
         if not skills:
             self.output_callback(f"沒有匹配的 skills：'{test_prompt}'")
             return

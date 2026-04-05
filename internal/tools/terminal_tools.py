@@ -1,40 +1,34 @@
 import platform
 import re
-import shutil
 import subprocess
+import os
 from pathlib import Path
 
 from pydantic_ai import Agent
 
 from internal.cli import confirm
 from internal.logger import logger
-from internal.paths import TIM_AGENT_SANDBOX_DIR
+from internal import paths as runtime_paths
 
 
-WORKSPACE_ROOT = Path.cwd().resolve()
-SANDBOX_ROOT = TIM_AGENT_SANDBOX_DIR
+def _workspace_root() -> Path:
+    return runtime_paths.TIM_AGENT_SANDBOX_DIR
 
 
-def _ensure_sandbox_dir() -> Path:
-    SANDBOX_ROOT.mkdir(parents=True, exist_ok=True)
-    return SANDBOX_ROOT
-
-
-def _resolve_sandbox_path(path_in_sandbox: str) -> Path:
-    sandbox = _ensure_sandbox_dir()
-    candidate = (sandbox / path_in_sandbox).resolve() if path_in_sandbox else sandbox
-    if candidate != sandbox and sandbox not in candidate.parents:
-        raise ValueError("Path escapes sandbox directory.")
-    return candidate
+def _ensure_workspace_dir() -> Path:
+    workspace_dir = _workspace_root()
+    workspace_dir.mkdir(parents=True, exist_ok=True)
+    return workspace_dir
 
 
 def _resolve_workspace_path(path_in_workspace: str) -> Path:
     if not path_in_workspace:
         raise ValueError("path_in_workspace cannot be empty.")
 
+    workspace_root = _workspace_root()
     raw = Path(path_in_workspace)
-    candidate = raw.resolve() if raw.is_absolute() else (WORKSPACE_ROOT / raw).resolve()
-    if candidate != WORKSPACE_ROOT and WORKSPACE_ROOT not in candidate.parents:
+    candidate = raw.resolve() if raw.is_absolute() else (workspace_root / raw).resolve()
+    if candidate != workspace_root and workspace_root not in candidate.parents:
         raise ValueError("Path escapes workspace root.")
     return candidate
 
@@ -57,72 +51,31 @@ def get_platform_info() -> str:
     return "\n".join([f"{k}: {v}" for k, v in info.items()])
 
 
-def get_sandbox_info() -> str:
-    """Get sandbox directory information for command execution and artifact isolation."""
-    sandbox = _ensure_sandbox_dir()
+def get_workspace_info() -> str:
+    """Get workspace directory information for command execution and artifact isolation."""
+    workspace_dir = _ensure_workspace_dir()
+    mode = runtime_paths.get_workspace_mode()
+    mode_note = (
+        "workspace path was overridden by env or programmatic configuration."
+        if mode == "workspace"
+        else "workspace uses default sandbox path because no override is configured."
+    )
     return "\n".join(
         [
-            f"workspace_root: {WORKSPACE_ROOT}",
-            f"sandbox_root: {sandbox}",
-            "note: run_terminal_command executes with sandbox as current working directory.",
+            f"workspace_mode: {mode}",
+            f"workspace_root: {_workspace_root()}",
+            f"workspace_exists: {workspace_dir.exists()}",
+            f"mode_note: {mode_note}",
+            "note: run_terminal_command executes with workspace as current working directory.",
         ]
     )
 
 
-def stage_to_sandbox(path_in_workspace: str, target_path_in_sandbox: str = "") -> str:
-    """Copy a file or directory from workspace into sandbox for isolated changes."""
-    source = _resolve_workspace_path(path_in_workspace)
-    if not source.exists():
-        return f"Error: source path not found: {source}"
-
-    sandbox_target_base = _resolve_sandbox_path(target_path_in_sandbox)
-    if source.is_file():
-        destination = sandbox_target_base
-        if destination.exists() and destination.is_dir():
-            destination = destination / source.name
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, destination)
-        return f"Staged file to sandbox: {source} -> {destination}"
-
-    destination = sandbox_target_base
-    if destination.exists() and destination.is_file():
-        return f"Error: destination is a file: {destination}"
-
-    if destination.exists():
-        destination = destination / source.name
-
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(source, destination, dirs_exist_ok=True)
-    return f"Staged directory to sandbox: {source} -> {destination}"
-
-
-def export_from_sandbox(path_in_sandbox: str, destination_in_workspace: str, overwrite: bool = False) -> str:
-    """Export a file or directory from sandbox back into workspace."""
-    source = _resolve_sandbox_path(path_in_sandbox)
-    destination = _resolve_workspace_path(destination_in_workspace)
-
-    if not source.exists():
-        return f"Error: sandbox path not found: {source}"
-
-    if destination.exists() and not overwrite:
-        return (
-            f"Error: destination exists: {destination}. "
-            "Set overwrite=true to replace it."
-        )
-
-    if source.is_file():
-        if destination.exists() and destination.is_dir():
-            destination = destination / source.name
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, destination)
-        return f"Exported file from sandbox: {source} -> {destination}"
-
-    if destination.exists() and destination.is_file():
-        return f"Error: destination is a file: {destination}"
-
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(source, destination, dirs_exist_ok=overwrite)
-    return f"Exported directory from sandbox: {source} -> {destination}"
+def _workspace_process_env() -> dict[str, str]:
+    env = os.environ.copy()
+    env["TIM_AGENT_WORKSPACE_MODE"] = runtime_paths.get_workspace_mode()
+    env["TIM_AGENT_WORKSPACE_ROOT"] = str(_workspace_root())
+    return env
 
 
 def run_terminal_command(command: str) -> str:
@@ -208,9 +161,7 @@ def run_terminal_command(command: str) -> str:
 def add_terminal_tools(agent: Agent) -> None:
     """Add terminal execution tools to the agent."""
     agent.tool_plain(get_platform_info)
-    agent.tool_plain(get_sandbox_info)
-    agent.tool_plain(stage_to_sandbox)
-    agent.tool_plain(export_from_sandbox)
+    agent.tool_plain(get_workspace_info)
     agent.tool_plain(run_terminal_command)
 
 
@@ -339,7 +290,8 @@ def _run_windows_command(command: str) -> subprocess.CompletedProcess[str]:
         errors="replace",
         capture_output=True,
         timeout=120,
-        cwd=str(_ensure_sandbox_dir()),
+        cwd=str(_ensure_workspace_dir()),
+        env=_workspace_process_env(),
         creationflags=subprocess.CREATE_NO_WINDOW,
     )
 
@@ -353,5 +305,6 @@ def _run_posix_command(command: str) -> subprocess.CompletedProcess[str]:
         errors="replace",
         capture_output=True,
         timeout=120,
-        cwd=str(_ensure_sandbox_dir()),
+        cwd=str(_ensure_workspace_dir()),
+        env=_workspace_process_env(),
     )
