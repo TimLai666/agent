@@ -15,6 +15,8 @@ MAX_CONTEXT_TOKENS = 512000
 COMPACT_TRIGGER_RATIO = 0.75
 RECENT_KEEP_COUNT = 20   # keep more recent messages for richer continuation context
 TOOL_OUTPUT_RECENT_KEEP = 8
+COMPACTION_INPUT_TOKEN_BUDGET = 90000
+COMPACTION_OLD_SUMMARY_TOKEN_BUDGET = 20000
 
 NO_TOOLS_PREAMBLE = """CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.
 
@@ -216,6 +218,22 @@ def estimate_tokens(text: str) -> int:
     return max(1, len(text) // 4)
 
 
+def trim_text_to_token_budget(text: str, token_budget: int) -> str:
+    if not text:
+        return ""
+    if token_budget <= 0:
+        return ""
+    max_chars = token_budget * 4
+    if len(text) <= max_chars:
+        return text
+    trimmed_chars = len(text) - max_chars
+    return (
+        "[Truncated earlier content for compaction budget]\n"
+        f"[... omitted {trimmed_chars} chars ...]\n"
+        + text[-max_chars:]
+    )
+
+
 def should_compact(total_tokens: int) -> bool:
     return total_tokens >= int(MAX_CONTEXT_TOKENS * COMPACT_TRIGGER_RATIO)
 
@@ -397,11 +415,12 @@ class CompactCoordinator:
             get_compaction_prompt(job.mode),
             FALLBACK_COMPACT_PROMPT,
         ]
+        bounded_job = self._fit_job_to_input_budget(job)
         last_error: Exception | None = None
 
         for prompt in attempts:
             try:
-                raw_output = await self._runner(job, prompt)
+                raw_output = await self._runner(bounded_job, prompt)
             except Exception as exc:
                 last_error = exc
                 continue
@@ -418,6 +437,69 @@ class CompactCoordinator:
         if last_error is not None:
             raise RuntimeError("Compaction failed: runner error") from last_error
         raise RuntimeError("Compaction failed: empty formatted summary")
+
+    def _fit_job_to_input_budget(self, job: CompactJob) -> CompactJob:
+        old_summary = trim_text_to_token_budget(
+            job.oldSummary.strip(),
+            COMPACTION_OLD_SUMMARY_TOKEN_BUDGET,
+        )
+        selected: list[Message] = []
+
+        for message in reversed(job.messagesToCompress):
+            candidate = [message, *selected]
+            candidate_job = CompactJob(
+                jobId=job.jobId,
+                mode=job.mode,
+                oldSummary=old_summary,
+                messagesToCompress=candidate,
+                preservedRecentMessages=job.preservedRecentMessages,
+                suppressFollowUpQuestions=job.suppressFollowUpQuestions,
+            )
+            candidate_tokens = estimate_tokens(serialize_compaction_input(candidate_job))
+            if candidate_tokens <= COMPACTION_INPUT_TOKEN_BUDGET:
+                selected = candidate
+                continue
+
+            if not selected:
+                truncated = trim_text_to_token_budget(
+                    message.content,
+                    max(256, COMPACTION_INPUT_TOKEN_BUDGET // 2),
+                )
+                selected = [
+                    Message(
+                        id=message.id,
+                        role=message.role,
+                        content=truncated,
+                        tokenCount=estimate_tokens(truncated),
+                        createdAt=message.createdAt,
+                    )
+                ]
+            break
+
+        if not selected and job.messagesToCompress:
+            last = job.messagesToCompress[-1]
+            truncated = trim_text_to_token_budget(
+                last.content,
+                max(256, COMPACTION_INPUT_TOKEN_BUDGET // 2),
+            )
+            selected = [
+                Message(
+                    id=last.id,
+                    role=last.role,
+                    content=truncated,
+                    tokenCount=estimate_tokens(truncated),
+                    createdAt=last.createdAt,
+                )
+            ]
+
+        return CompactJob(
+            jobId=job.jobId,
+            mode=job.mode,
+            oldSummary=old_summary,
+            messagesToCompress=selected,
+            preservedRecentMessages=job.preservedRecentMessages,
+            suppressFollowUpQuestions=job.suppressFollowUpQuestions,
+        )
 
     def _trim_distant_tool_outputs(self, messages: list[Message]) -> list[Message]:
         tool_positions = [idx for idx, msg in enumerate(messages) if msg.role == "tool"]

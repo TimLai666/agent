@@ -582,6 +582,14 @@ class MainAgent:
             lines.append(f"- {todo_id} [{status}] {title}{suffix}")
         return "\n".join(lines)
 
+    @staticmethod
+    def _fallback_todo_id(index: int, title: str, description: str) -> str:
+        seed = title.strip() or description.strip() or f"item_{index}"
+        slug = re.sub(r"[^a-z0-9]+", "_", seed.lower()).strip("_")
+        if not slug:
+            slug = f"item_{index}"
+        return f"todo_{index:03d}_{slug[:32]}"
+
     def _normalize_todo_payload(
         self,
         phase: str,
@@ -603,8 +611,10 @@ class MainAgent:
             status = str(raw.get("status", "")).strip().lower() or "pending"
             notes = str(raw.get("notes", "")).strip()
 
+            if not title and description:
+                title = description
             if not todo_id:
-                raise ValueError(f"todo.items[{index}].id is required")
+                todo_id = self._fallback_todo_id(index, title, description)
             if not title:
                 raise ValueError(f"todo.items[{index}].title is required")
             if title.strip().lower() in self._TODO_FORBIDDEN_TITLES:

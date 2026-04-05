@@ -2,12 +2,17 @@ import asyncio
 
 from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, UserPromptPart
 
+import internal.compaction as compaction
 from internal.compaction import (
+    CompactJob,
     CompactCoordinator,
     ConversationState,
+    Message,
+    estimate_tokens,
     format_compact_summary,
     get_compact_user_summary_message,
     get_compaction_prompt,
+    serialize_compaction_input,
 )
 
 
@@ -92,3 +97,36 @@ def test_compaction_retry_and_fallback():
 
     assert compacted.compressedSummary == "Summary:\nRecovered"
     assert call_count == 3
+
+
+def test_run_compact_trims_input_to_budget():
+    observed_tokens: list[int] = []
+
+    async def fake_runner(job, _prompt: str) -> str:
+        observed_tokens.append(estimate_tokens(serialize_compaction_input(job)))
+        return "<analysis>ok</analysis><summary>Trimmed</summary>"
+
+    coordinator = CompactCoordinator(runner=fake_runner)
+    huge = "z" * (compaction.COMPACTION_INPUT_TOKEN_BUDGET * 8)
+    job = CompactJob(
+        jobId="compact-test",
+        mode="base",
+        oldSummary=huge,
+        messagesToCompress=[
+            Message(
+                id="msg-1",
+                role="assistant",
+                content=huge,
+                tokenCount=estimate_tokens(huge),
+                createdAt="2026-01-01T00:00:00+00:00",
+            )
+        ],
+        preservedRecentMessages=[],
+        suppressFollowUpQuestions=True,
+    )
+
+    summary = asyncio.run(coordinator.runCompact(job))
+
+    assert summary.formattedSummary == "Summary:\nTrimmed"
+    assert observed_tokens
+    assert observed_tokens[0] <= compaction.COMPACTION_INPUT_TOKEN_BUDGET

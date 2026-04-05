@@ -144,3 +144,22 @@ def test_todo_tool_rejects_multiple_in_progress_items():
         assert "at most one in_progress" in str(exc)
     else:
         raise AssertionError("todo tool should reject multiple in_progress items")
+
+
+def test_todo_tool_auto_generates_missing_id_from_title():
+    fake_agent = _FakeAgent()
+    main = MainAgent(fake_agent)  # type: ignore[arg-type]
+    main._register_todo_tools()
+    todo_tool = fake_agent.tools["todo"]
+
+    result = todo_tool(
+        phase="executing",
+        items=[
+            {"title": "Inspect logs", "status": "in_progress"},
+            {"title": "Fix bug", "status": "pending"},
+        ],
+    )
+
+    assert "[TODO] phase=executing" in result
+    assert "todo_001_inspect_logs [in_progress] Inspect logs" in result
+    assert "todo_002_fix_bug [pending] Fix bug" in result
