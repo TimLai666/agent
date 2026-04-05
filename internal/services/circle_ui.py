@@ -3648,8 +3648,9 @@ class _InlineQuestionBubble(QFrame):
         card.setObjectName("IQCard")
         card.setStyleSheet(
             "#IQCard {"
-            "background: rgba(28,38,68,230);"
-            "border: 1px solid rgba(100,150,255,90);"
+            "background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+            "stop:0 rgba(24,40,80,235),stop:1 rgba(18,32,68,228));"
+            "border: 1px solid rgba(56,190,220,70);"
             "border-radius: 14px;"
             "}"
         )
@@ -3662,7 +3663,7 @@ class _InlineQuestionBubble(QFrame):
         q_lbl.setTextFormat(Qt.TextFormat.RichText)
         q_lbl.setWordWrap(True)
         q_lbl.setText(
-            '<span style="color:#7ab4ff;font-size:11px;">❓ AskUserQuestion</span><br>'
+            '<span style="color:#38c8d8;font-size:11px;">❓ 請選擇</span><br>'
             + html.escape(question).replace("\n", "<br>")
         )
         q_lbl.setStyleSheet(
@@ -3739,10 +3740,12 @@ class _InlineConfirmBubble(QFrame):
 
         card = QWidget()
         card.setObjectName("ICCard")
+        _border = "rgba(220,100,80,80)" if is_danger else "rgba(150,100,240,70)"
         card.setStyleSheet(
             "#ICCard {"
-            "background: rgba(32,28,52,230);"
-            "border: 1px solid rgba(180,120,255,80);"
+            "background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+            "stop:0 rgba(28,22,52,235),stop:1 rgba(22,18,44,228));"
+            f"border: 1px solid {_border};"
             "border-radius: 14px;"
             "}"
         )
@@ -3878,8 +3881,9 @@ class _UserBubble(QFrame):
         self._text_label.setText(html.escape(text).replace("\n", "<br>"))
         self._text_label.setStyleSheet(
             "QLabel {"
-            "background: rgba(40,78,160,220);"
-            "color: #e8f0ff;"
+            "background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+            "stop:0 rgba(55,100,200,230),stop:1 rgba(38,78,168,225));"
+            "color: #e8f4ff;"
             "border-radius: 14px;"
             "padding: 8px 12px;"
             "font-size: 13px;"
@@ -3904,15 +3908,16 @@ class _AgentBubble(QFrame):
 
     _CARD_STYLE = (
         "#ABCard {"
-        "background-color: rgba(26,30,46,210);"
-        "border: 1px solid rgba(255,255,255,20);"
+        "background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+        "stop:0 rgba(28,34,62,218),stop:1 rgba(20,26,52,212));"
+        "border: 1px solid rgba(60,110,230,42);"
         "border-radius: 14px;"
         "}"
     )
     _STREAM_BROWSER_STYLE = (
         "QTextBrowser {"
         "background: transparent; border: none;"
-        "color: #e8eaf0; font-size: 13px; font-family: 'Segoe UI', 'Microsoft JhengHei', sans-serif;"
+        "color: #dde8f8; font-size: 13px; font-family: 'Segoe UI', 'Microsoft JhengHei', sans-serif;"
         "}"
         "QTextBrowser::viewport { background: transparent; }"
     )
@@ -4230,7 +4235,7 @@ class ChatWindow(QMainWindow):
         self.setWindowTitle("AI Assistant — Chat")
         self.resize(680, 860)
         self.setWindowFlags(Qt.WindowType.Window)
-        self.setStyleSheet("QMainWindow { background: rgb(16,18,26); }")
+        self.setStyleSheet("QMainWindow { background: rgb(12,14,24); }")
 
         # ── Internal state ─────────────────���──────────────────────────────
         self._bypass_mode: bool = False
@@ -4268,7 +4273,7 @@ class ChatWindow(QMainWindow):
 
     def _build_ui(self) -> None:
         central = QWidget()
-        central.setStyleSheet("background: rgb(16,18,26);")
+        central.setStyleSheet("background: rgb(12,14,24);")
         self.setCentralWidget(central)
         vbox = QVBoxLayout(central)
         vbox.setContentsMargins(0, 0, 0, 0)
@@ -4281,7 +4286,10 @@ class ChatWindow(QMainWindow):
         # Separator
         sep = QWidget()
         sep.setFixedHeight(1)
-        sep.setStyleSheet("background: rgba(255,255,255,12);")
+        sep.setStyleSheet(
+            "background: qlineargradient(x1:0,y1:0,x2:1,y2:0,"
+            "stop:0 rgba(60,100,255,50),stop:0.5 rgba(120,70,220,60),stop:1 rgba(30,150,200,40));"
+        )
         vbox.addWidget(sep)
 
         # Chat scroll area
@@ -4289,9 +4297,9 @@ class ChatWindow(QMainWindow):
         self._scroll.setWidgetResizable(True)
         self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self._scroll.setStyleSheet(
-            "QScrollArea { background: rgb(16,18,26); border: none; }"
+            "QScrollArea { background: rgb(12,14,24); border: none; }"
             "QScrollBar:vertical { width: 6px; background: transparent; }"
-            "QScrollBar::handle:vertical { background: rgba(100,120,180,90); border-radius: 3px; }"
+            "QScrollBar::handle:vertical { background: rgba(80,110,200,80); border-radius: 3px; }"
             "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; }"
         )
         self._chat_container = QWidget()
@@ -4323,22 +4331,23 @@ class ChatWindow(QMainWindow):
     def _build_todo_panel(self) -> QWidget:
         """Build the right-side sidebar: top = todo, bottom = memory file list."""
         _PANEL_STYLE = (
-            "background: rgba(18,20,30,240);"
-            "border-left: 1px solid rgba(255,255,255,15);"
+            "background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+            "stop:0 rgba(16,18,40,245),stop:1 rgba(14,16,36,245));"
+            "border-left: 1px solid rgba(80,100,200,30);"
         )
         _BROWSER_STYLE = (
             "QTextBrowser { background: transparent; border: none; "
-            "color: #c0d0e8; font-size: 11px; }"
+            "color: #b8cce4; font-size: 11px; }"
             "QTextBrowser::viewport { background: transparent; padding: 0; }"
             "QScrollBar:vertical { width: 4px; background: transparent; }"
-            "QScrollBar::handle:vertical { background: rgba(100,120,180,90); border-radius: 2px; }"
+            "QScrollBar::handle:vertical { background: rgba(80,110,200,80); border-radius: 2px; }"
             "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; }"
         )
         _HDR_STYLE = (
-            "QLabel { color: #90b0e0; font-size: 11px; font-weight: bold; "
+            "QLabel { font-size: 11px; font-weight: bold; "
             "border: none; background: transparent; padding: 2px 0; }"
         )
-        _SEP_STYLE = "background: rgba(255,255,255,15);"
+        _SEP_STYLE = "background: rgba(80,100,200,25);"
 
         panel = QWidget()
         panel.setFixedWidth(220)
@@ -4363,7 +4372,7 @@ class ChatWindow(QMainWindow):
         top_v.setSpacing(4)
 
         todo_hdr = QLabel("📋 待辦事項")
-        todo_hdr.setStyleSheet(_HDR_STYLE)
+        todo_hdr.setStyleSheet(_HDR_STYLE + "color: #38c8d8;")
         top_v.addWidget(todo_hdr)
 
         sep1 = QWidget(); sep1.setFixedHeight(1); sep1.setStyleSheet(_SEP_STYLE)
@@ -4386,7 +4395,7 @@ class ChatWindow(QMainWindow):
         bot_v.setSpacing(4)
 
         mem_hdr = QLabel("🧠 記憶檔案")
-        mem_hdr.setStyleSheet(_HDR_STYLE)
+        mem_hdr.setStyleSheet(_HDR_STYLE + "color: #b078f0;")
         bot_v.addWidget(mem_hdr)
 
         sep2 = QWidget(); sep2.setFixedHeight(1); sep2.setStyleSheet(_SEP_STYLE)
@@ -4442,14 +4451,24 @@ class ChatWindow(QMainWindow):
 
     def _build_top_bar(self) -> QWidget:
         bar = QWidget()
-        bar.setFixedHeight(42)
-        bar.setStyleSheet("background: rgb(20,22,32);")
+        bar.setFixedHeight(44)
+        bar.setStyleSheet(
+            "background: qlineargradient(x1:0,y1:0,x2:1,y2:0,"
+            "stop:0 rgba(18,22,50,255),stop:0.5 rgba(22,18,44,255),stop:1 rgba(16,20,42,255));"
+        )
         h = QHBoxLayout(bar)
         h.setContentsMargins(14, 0, 10, 0)
         h.setSpacing(8)
 
+        # Glowing dot indicator
+        dot = QLabel("●")
+        dot.setStyleSheet("color: #38c8e0; font-size: 10px;")
+        h.addWidget(dot)
+
         title = QLabel("AI Assistant")
-        title.setStyleSheet("color: #c0d0f0; font-size: 14px; font-weight: bold;")
+        title.setStyleSheet(
+            "color: #c8deff; font-size: 14px; font-weight: bold; letter-spacing: 0.5px;"
+        )
         h.addWidget(title)
         h.addStretch(1)
 
@@ -4469,12 +4488,13 @@ class ChatWindow(QMainWindow):
         h.addWidget(self._compact_label)
 
         switch_btn = QPushButton("⭕ 切換圓圈")
-        switch_btn.setFixedHeight(28)
+        switch_btn.setFixedHeight(26)
         switch_btn.setStyleSheet(
-            "QPushButton { background: rgba(40,55,85,200); color: #90b0e0; "
-            "border: 1px solid rgba(90,130,200,80); border-radius: 8px; "
+            "QPushButton { background: rgba(36,48,90,210); color: #88c0f0; "
+            "border: 1px solid rgba(70,110,220,80); border-radius: 8px; "
             "font-size: 11px; padding: 0 12px; }"
-            "QPushButton:hover { background: rgba(55,75,115,230); color: #b0d0f8; }"
+            "QPushButton:hover { background: rgba(50,68,120,235); color: #b8d8ff; "
+            "border: 1px solid rgba(90,140,255,120); }"
         )
         switch_btn.clicked.connect(self.switch_to_circle.emit)
         h.addWidget(switch_btn)
@@ -4482,7 +4502,7 @@ class ChatWindow(QMainWindow):
 
     def _build_input_area(self, parent_layout: QVBoxLayout) -> None:
         wrapper = QWidget()
-        wrapper.setStyleSheet("background: rgb(20,22,32);")
+        wrapper.setStyleSheet("background: rgb(14,16,30);")
         wrapper_vbox = QVBoxLayout(wrapper)
         wrapper_vbox.setContentsMargins(10, 8, 10, 10)
         wrapper_vbox.setSpacing(0)
@@ -4492,8 +4512,8 @@ class ChatWindow(QMainWindow):
         card.setObjectName("ChatInputCard")
         card.setStyleSheet(
             "#ChatInputCard {"
-            "background: rgba(28,30,38,230);"
-            "border: 1px solid rgba(255,255,255,35);"
+            "background: rgba(22,26,52,235);"
+            "border: 1px solid rgba(70,110,220,65);"
             "border-radius: 18px;"
             "}"
         )
@@ -4685,7 +4705,7 @@ class ChatWindow(QMainWindow):
                 self._ensure_live_agent_bubble()
                 if self._live_agent_bubble:
                     self._live_agent_bubble.set_stream_content(text)
-                    self._scroll_to_bottom()
+                    QTimer.singleShot(0, self._scroll_to_bottom)
 
     def _ensure_live_user_bubble(self, user_msg: str) -> None:
         """Create or update the live user bubble at the bottom of the chat."""
@@ -4706,6 +4726,7 @@ class ChatWindow(QMainWindow):
             self._live_agent_bubble = _AgentBubble()
             count = self._chat_layout.count()
             self._chat_layout.insertWidget(count - 1, self._live_agent_bubble)
+            QTimer.singleShot(0, self._scroll_to_bottom)
 
     def start_agent_animation(self) -> None:
         self._ensure_live_agent_bubble()
@@ -4737,9 +4758,11 @@ class ChatWindow(QMainWindow):
             except Exception:
                 pass
             self.send_button.clicked.connect(self.on_input_submitted)
-            # Finalize: do full SiriResponseBubble render, then detach refs
-            if self._live_agent_bubble is not None and self._live_agent_text:
-                self._live_agent_bubble.set_content(self._live_agent_text)
+            # Finalize: stop glow, do full SiriResponseBubble render, then detach refs
+            if self._live_agent_bubble is not None:
+                self._live_agent_bubble.stop_animation()
+                if self._live_agent_text:
+                    self._live_agent_bubble.set_content(self._live_agent_text)
             self._live_user_bubble = None
             self._live_agent_bubble = None
             self._live_user_text = ""
