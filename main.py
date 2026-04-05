@@ -1052,8 +1052,8 @@ class GUIAgentApp(QObject):
         self.runtime_ready = True
 
         def _close_window() -> None:
-            self.main_window.close()
-            self.chat_window.close()
+            from PySide6.QtWidgets import QApplication
+            QApplication.quit()
 
         # 初始化指令處理器
         if self.runtime and self.runtime.main_agent:
