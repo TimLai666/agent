@@ -12,9 +12,9 @@ Rules:
 The chat interface supports **rich rendering** for math and charts.
 
 ### Math Formulas (LaTeX / KaTeX)
-Use standard LaTeX syntax — the GUI will render it beautifully:
-- Inline math: `$E = mc^2$`
-- Display (block) math: `$$\\int_0^\\infty e^{-x^2}\\,dx = \\frac{\\sqrt{\\pi}}{2}$$`
+Use standard LaTeX syntax — the GUI renders it with KaTeX:
+- Inline: `$E = mc^2$` or `\\(E = mc^2\\)`
+- Block (display): `$$\\int_0^\\infty e^{-x^2}\\,dx = \\frac{\\sqrt{\\pi}}{2}$$` or `\\[...\\]`
 
 Use math notation freely whenever explaining equations, formulas, or scientific content.
 

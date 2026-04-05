@@ -1,26 +1,8 @@
-"""rich_render.py — Math formula and chart rendering for the agent chat bubble.
+"""rich_render.py — Math formula, flowchart and chart rendering for the agent chat bubble.
 
-Math: standard LaTeX  $inline$  /  $$block$$  syntax  → rendered via KaTeX (CDN).
-Charts: fenced code block  ```chart  with JSON spec  → rendered via matplotlib → base64 PNG.
-
-Chart spec JSON schema (all fields optional except `type`):
-{
-  "type":   "bar" | "line" | "pie" | "scatter" | "hist" | "barh",
-  "title":  "Chart title",
-  "xlabel": "X axis label",
-  "ylabel": "Y axis label",
-  "x":      [...],          // x-axis values  (bar / line / scatter)
-  "y":      [...],          // y-axis values  (bar / line / scatter)
-  "labels": [...],          // slice labels   (pie)
-  "values": [...],          // slice values   (pie)
-  "data":   [...],          // raw data list  (hist)
-  "series": [               // multiple series (bar / line / scatter)
-    {"label": "A", "x": [...], "y": [...]},
-    ...
-  ],
-  "colors": [...],          // per-series or per-slice colors
-  "grid":   true            // show grid (default true for most types)
-}
+Math  : $inline$  /  $$block$$  /  \\(inline\\)  /  \\[block\\]  → KaTeX
+Charts: ```chart JSON``` → matplotlib (offline, base64 PNG)
+Mermaid flowcharts: ```mermaid ... ``` → Mermaid.js
 """
 
 from __future__ import annotations
@@ -30,24 +12,29 @@ import re
 import html as _html
 from io import BytesIO
 
-# ── Pattern helpers ──────────────────────────────────────────────────────────
+# ── Detection patterns ───────────────────────────────────────────────────────
 
-_MATH_RE = re.compile(r'\$\$[\s\S]+?\$\$|\$[^$\n]+?\$', re.DOTALL)
-_CHART_BLOCK_RE = re.compile(r'```chart\s*\n([\s\S]*?)```', re.IGNORECASE)
-
-KATEX_CDN = "https://cdn.jsdelivr.net/npm/katex@0.16.11/dist"
+# $ ... $  /  $$ ... $$
+_DOLLAR_MATH_RE  = re.compile(r'\$\$[\s\S]+?\$\$|\$(?!\s)[^$\n]+?(?<!\s)\$')
+# \[ ... \]  /  \( ... \)
+_BRACKET_MATH_RE = re.compile(r'\\\[[\s\S]+?\\\]|\\\(.+?\\\)')
+# ```chart ... ```
+_CHART_BLOCK_RE  = re.compile(r'```chart\s*\n([\s\S]*?)```', re.IGNORECASE)
+# ```mermaid ... ```
+_MERMAID_BLOCK_RE = re.compile(r'```mermaid\s*\n([\s\S]*?)```', re.IGNORECASE)
 
 
 def has_rich_content(text: str) -> bool:
-    """Return True if text contains math or chart syntax."""
-    if _CHART_BLOCK_RE.search(text):
-        return True
-    if _MATH_RE.search(text):
-        return True
-    return False
+    """Return True if text contains math, chart, or mermaid syntax."""
+    return bool(
+        _CHART_BLOCK_RE.search(text)
+        or _MERMAID_BLOCK_RE.search(text)
+        or _DOLLAR_MATH_RE.search(text)
+        or _BRACKET_MATH_RE.search(text)
+    )
 
 
-# ── Chart rendering ──────────────────────────────────────────────────────────
+# ── Chart rendering (matplotlib, fully offline) ──────────────────────────────
 
 def render_chart(spec: dict) -> str:
     """Render a chart spec dict to a base64-encoded PNG data URI."""
@@ -86,7 +73,7 @@ def render_chart(spec: dict) -> str:
         labels = spec.get("labels", [])
         values = spec.get("values", spec.get("y", []))
         pie_colors = colors or default_colors[:len(labels)]
-        wedges, texts, autotexts = ax.pie(
+        _, texts, autotexts = ax.pie(
             values, labels=labels, colors=pie_colors,
             autopct="%1.1f%%", startangle=140,
             textprops={"color": "#dde8f8"},
@@ -118,13 +105,13 @@ def render_chart(spec: dict) -> str:
                 else:
                     ax.bar(x_pos + offset, ys, width, label=s.get("label", f"S{i+1}"),
                            color=_color(i), alpha=0.88)
+            ticks = x_pos
+            tick_labels = [str(v) for v in xs_raw]
             if chart_type == "barh":
-                ax.set_yticks(x_pos)
-                ax.set_yticklabels([str(v) for v in xs_raw], color="#b0c8e8")
+                ax.set_yticks(ticks); ax.set_yticklabels(tick_labels, color="#b0c8e8")
             else:
-                ax.set_xticks(x_pos)
-                ax.set_xticklabels([str(v) for v in xs_raw], color="#b0c8e8")
-            leg = ax.legend(facecolor="#1e2848", edgecolor="#3060a0", labelcolor="#dde8f8")
+                ax.set_xticks(ticks); ax.set_xticklabels(tick_labels, color="#b0c8e8")
+            ax.legend(facecolor="#1e2848", edgecolor="#3060a0", labelcolor="#dde8f8")
         else:
             x = spec.get("x", [])
             y = spec.get("y", [])
@@ -133,7 +120,8 @@ def render_chart(spec: dict) -> str:
             else:
                 ax.bar(x, y, color=_color(0), alpha=0.88, edgecolor="#1a2040")
         if grid:
-            ax.grid(True, color="#2a3860", linewidth=0.5, axis="y" if chart_type == "bar" else "x")
+            axis = "y" if chart_type == "bar" else "x"
+            ax.grid(True, color="#2a3860", linewidth=0.5, axis=axis)
 
     elif chart_type == "scatter":
         if series:
@@ -148,7 +136,7 @@ def render_chart(spec: dict) -> str:
         if grid:
             ax.grid(True, color="#2a3860", linewidth=0.5)
 
-    else:  # line (default)
+    else:  # line
         if series:
             for i, s in enumerate(series):
                 ax.plot(s.get("x", []), s.get("y", []),
@@ -161,12 +149,9 @@ def render_chart(spec: dict) -> str:
         if grid:
             ax.grid(True, color="#2a3860", linewidth=0.5)
 
-    if title:
-        ax.set_title(title, fontsize=13, pad=8)
-    if xlabel:
-        ax.set_xlabel(xlabel)
-    if ylabel:
-        ax.set_ylabel(ylabel)
+    if title:  ax.set_title(title, fontsize=13, pad=8)
+    if xlabel: ax.set_xlabel(xlabel)
+    if ylabel: ax.set_ylabel(ylabel)
 
     plt.tight_layout(pad=1.2)
     buf = BytesIO()
@@ -177,39 +162,39 @@ def render_chart(spec: dict) -> str:
 
 
 def _render_chart_block(json_src: str) -> str:
-    """Parse a chart JSON block and return an <img> tag or an error div."""
     try:
         spec = json.loads(json_src.strip())
         uri = render_chart(spec)
         return (
-            f'<div style="text-align:center;margin:10px 0;">'
-            f'<img src="{uri}" style="max-width:100%;border-radius:8px;" /></div>'
+            f'<div class="chart-wrap">'
+            f'<img src="{uri}" /></div>'
         )
     except Exception as exc:
         return (
-            f'<div style="color:#f06b6b;font-size:11px;padding:4px 8px;'
-            f'background:rgba(240,80,80,0.1);border-radius:6px;">'
-            f'⚠ Chart error: {_html.escape(str(exc))}</div>'
+            f'<div class="err">⚠ Chart error: {_html.escape(str(exc))}</div>'
         )
 
 
-# ── Markdown → HTML conversion ───────────────────────────────────────────────
+# ── Markdown → HTML (pre-process special blocks) ─────────────────────────────
 
 def _md_to_html(text: str) -> str:
-    """Convert markdown text to HTML, replacing chart blocks with <img> first."""
-    # 1. Replace ```chart blocks with rendered images
-    def _chart_repl(m: re.Match) -> str:
-        return _render_chart_block(m.group(1))
-
-    text = _CHART_BLOCK_RE.sub(_chart_repl, text)
-
-    # 2. Convert markdown to HTML
+    """Convert markdown to HTML; replace ```chart blocks with inline PNG images."""
+    # 1. Replace ```chart blocks with rendered <img>
+    text = _CHART_BLOCK_RE.sub(lambda m: _render_chart_block(m.group(1)), text)
+    # 2. Standard markdown conversion
     import markdown
     md = markdown.Markdown(extensions=["fenced_code", "tables", "nl2br"])
     return md.convert(text)
 
 
-# ── Full page builder ────────────────────────────────────────────────────────
+# ── HTML page builder ─────────────────────────────────────────────────────────
+
+# Mermaid + KaTeX are loaded from CDN.
+# The page is loaded via setHtml(..., baseUrl=QUrl("https://cdn.jsdelivr.net/"))
+# so Qt WebEngine treats the page as remote content and allows CDN script loading.
+
+_KATEX_CDN  = "https://cdn.jsdelivr.net/npm/katex@0.16.11/dist"
+_MERMAID_CDN = "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"
 
 _HTML_TEMPLATE = """\
 <!DOCTYPE html>
@@ -219,13 +204,34 @@ _HTML_TEMPLATE = """\
 <link rel="stylesheet" href="{katex_css}">
 <script defer src="{katex_js}"></script>
 <script defer src="{auto_render_js}"
-        onload="renderMathInElement(document.body,{{
-          delimiters:[
-            {{left:'$$',right:'$$',display:true}},
-            {{left:'$',right:'$',display:false}}
-          ],
-          throwOnError:false
-        }});">
+  onload="renderMathInElement(document.body, {{
+    delimiters: [
+      {{left: '$$', right: '$$', display: true}},
+      {{left: '$',  right: '$',  display: false}},
+      {{left: '\\\\[', right: '\\\\]', display: true}},
+      {{left: '\\\\(', right: '\\\\)', display: false}}
+    ],
+    throwOnError: false
+  }});">
+</script>
+<script src="{mermaid_js}"></script>
+<script>
+  document.addEventListener('DOMContentLoaded', function() {{
+    if (window.mermaid) {{
+      mermaid.initialize({{
+        startOnLoad: true,
+        theme: 'dark',
+        themeVariables: {{
+          darkMode: true,
+          background: '#1a2040',
+          primaryColor: '#4ea8de',
+          primaryTextColor: '#dde8f8',
+          lineColor: '#5080c0',
+          fontSize: '13px'
+        }}
+      }});
+    }}
+  }});
 </script>
 <style>
   * {{ box-sizing: border-box; margin: 0; padding: 0; }}
@@ -234,65 +240,49 @@ _HTML_TEMPLATE = """\
     color: #dde8f8;
     font-family: 'Segoe UI', 'Microsoft JhengHei', 'PingFang TC', sans-serif;
     font-size: 13px;
-    line-height: 1.65;
-    padding: 6px 2px;
+    line-height: 1.7;
+    padding: 4px 2px;
     word-break: break-word;
   }}
-  h1,h2,h3,h4,h5,h6 {{
-    color: #90c0f0;
-    margin: 10px 0 6px;
-    line-height: 1.3;
-  }}
-  p {{ margin: 6px 0; }}
+  h1,h2,h3,h4,h5,h6 {{ color: #90c0f0; margin: 10px 0 5px; line-height: 1.3; }}
+  p {{ margin: 5px 0; }}
   a {{ color: #5eaef0; }}
   code {{
-    background: rgba(30,40,80,0.7);
-    color: #e8c87a;
-    border-radius: 4px;
-    padding: 1px 5px;
-    font-family: 'Cascadia Code', 'Consolas', monospace;
-    font-size: 12px;
+    background: rgba(30,40,80,0.7); color: #e8c87a;
+    border-radius: 4px; padding: 1px 5px;
+    font-family: 'Cascadia Code','Consolas',monospace; font-size: 12px;
   }}
   pre {{
     background: rgba(20,28,60,0.85);
     border: 1px solid rgba(60,90,180,0.4);
-    border-radius: 8px;
-    padding: 10px 14px;
-    overflow-x: auto;
-    margin: 8px 0;
+    border-radius: 8px; padding: 10px 14px;
+    overflow-x: auto; margin: 8px 0;
   }}
-  pre code {{
-    background: transparent;
-    color: #c8d8f0;
-    font-size: 12px;
-    padding: 0;
-  }}
-  table {{
-    border-collapse: collapse;
-    width: 100%;
-    margin: 8px 0;
-  }}
-  th, td {{
-    border: 1px solid rgba(60,90,180,0.4);
-    padding: 5px 10px;
-    text-align: left;
-  }}
+  pre code {{ background: transparent; color: #c8d8f0; font-size: 12px; padding: 0; }}
+  table {{ border-collapse: collapse; width: 100%; margin: 8px 0; }}
+  th, td {{ border: 1px solid rgba(60,90,180,0.4); padding: 5px 10px; text-align: left; }}
   th {{ background: rgba(40,60,120,0.5); color: #90c0f0; }}
   tr:nth-child(even) td {{ background: rgba(30,45,90,0.35); }}
   blockquote {{
     border-left: 3px solid rgba(80,140,255,0.5);
-    padding: 4px 12px;
-    color: #a0b8d8;
-    margin: 6px 0;
-    background: rgba(30,50,100,0.2);
-    border-radius: 0 6px 6px 0;
+    padding: 4px 12px; color: #a0b8d8; margin: 6px 0;
+    background: rgba(30,50,100,0.2); border-radius: 0 6px 6px 0;
   }}
   ul, ol {{ padding-left: 22px; margin: 6px 0; }}
   li {{ margin: 3px 0; }}
-  .katex-display {{ margin: 12px 0; overflow-x: auto; }}
-  .katex {{ font-size: 1.05em; }}
   hr {{ border: none; border-top: 1px solid rgba(60,90,180,0.4); margin: 10px 0; }}
   img {{ max-width: 100%; }}
+  .katex-display {{ margin: 12px 0; overflow-x: auto; }}
+  .katex {{ font-size: 1.05em; }}
+  .chart-wrap {{ text-align: center; margin: 10px 0; }}
+  .chart-wrap img {{ max-width: 100%; border-radius: 8px; }}
+  .err {{
+    color: #f06b6b; font-size: 11px; padding: 4px 8px;
+    background: rgba(240,80,80,0.1); border-radius: 6px; margin: 6px 0;
+  }}
+  /* Mermaid */
+  .mermaid {{ margin: 10px 0; text-align: center; }}
+  .mermaid svg {{ max-width: 100%; }}
 </style>
 </head>
 <body>
@@ -303,11 +293,12 @@ _HTML_TEMPLATE = """\
 
 
 def build_rich_html(markdown_text: str) -> str:
-    """Return a full standalone HTML page with KaTeX math + chart images."""
+    """Return a full HTML page with KaTeX math + Mermaid diagrams + chart images."""
     body_html = _md_to_html(markdown_text)
     return _HTML_TEMPLATE.format(
-        katex_css=f"{KATEX_CDN}/katex.min.css",
-        katex_js=f"{KATEX_CDN}/katex.min.js",
-        auto_render_js=f"{KATEX_CDN}/contrib/auto-render.min.js",
+        katex_css=f"{_KATEX_CDN}/katex.min.css",
+        katex_js=f"{_KATEX_CDN}/katex.min.js",
+        auto_render_js=f"{_KATEX_CDN}/contrib/auto-render.min.js",
+        mermaid_js=_MERMAID_CDN,
         body=body_html,
     )

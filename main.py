@@ -570,10 +570,12 @@ class GUIAgentApp(QObject):
         self._current_mode = "chat"
         # Populate chat history from completed pairs
         self.chat_window.load_history(list(self._gui_history))
-        # Sync live exchange state
+        # Sync live exchange state — only pass agent_text when actively running.
+        # If the response is already complete, load_history already rendered it;
+        # passing _display_text here would create a duplicate bubble.
         self.chat_window.sync_live_state(
             user_text=self._last_user_input if self._waiting_response else "",
-            agent_text=self._display_text,
+            agent_text=self._display_text if self._waiting_response else "",
             is_running=self._waiting_response,
         )
         # Sync bypass state
