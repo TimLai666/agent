@@ -581,6 +581,12 @@ class GUIAgentApp(QObject):
         )
         # Sync running state
         self.chat_window.set_running(self._waiting_response)
+        # Sync todo drawer
+        try:
+            if self._todo_snapshot_text:
+                self.chat_window.update_todo_drawer(self._todo_snapshot_text)
+        except Exception:
+            pass
         # Sync context meter
         try:
             from internal.compaction import MAX_CONTEXT_TOKENS
@@ -606,6 +612,11 @@ class GUIAgentApp(QObject):
         self.main_window.show()
         self.main_window.raise_()
         self.main_window.activateWindow()
+        # Sync todo drawer
+        try:
+            self.main_window.update_todo_drawer(self._todo_snapshot_text or "")
+        except Exception:
+            pass
         # Restore current display text
         if self._display_text:
             self.main_window.update_speech_bubble(self._compose_display_text())
@@ -675,10 +686,11 @@ class GUIAgentApp(QObject):
 
     def _reset_todo_snapshot(self) -> None:
         self._todo_snapshot_text = ""
-        try:
-            self._active_ui.update_todo_drawer("")
-        except Exception:
-            pass
+        for win in (self.main_window, self.chat_window):
+            try:
+                win.update_todo_drawer("")
+            except Exception:
+                pass
 
     # ── Tool event rendering (Claude Code style) ──────────────────────────
 
@@ -855,8 +867,13 @@ class GUIAgentApp(QObject):
         todo_text = payload.get("todo_text")
         if isinstance(todo_text, str) and todo_text.strip():
             self._todo_snapshot_text = todo_text.strip()
+            # Keep BOTH windows in sync so switching doesn't lose todo state
             try:
-                self._active_ui.update_todo_drawer(self._todo_snapshot_text)
+                self.main_window.update_todo_drawer(self._todo_snapshot_text)
+            except Exception:
+                pass
+            try:
+                self.chat_window.update_todo_drawer(self._todo_snapshot_text)
             except Exception:
                 pass
             self._request_display_update()
@@ -880,6 +897,20 @@ class GUIAgentApp(QObject):
                 self._set_waiting_status("執行工具中...")
         elif line_text.startswith("[OK]"):
             self._set_waiting_status("整理結果中...")
+
+        # In chat mode, forward tool events directly to the live agent bubble
+        if self._current_mode == "chat":
+            try:
+                live_bubble = self.chat_window._live_agent_bubble
+                if live_bubble is None:
+                    # Create bubble so tool events appear even before text arrives
+                    self.chat_window._ensure_live_agent_bubble()
+                    live_bubble = self.chat_window._live_agent_bubble
+                if live_bubble is not None:
+                    live_bubble.add_tool_event(line_text)
+            except Exception:
+                pass
+
         self._request_display_update()
         self._reset_idle_timer()
 
@@ -1023,8 +1054,11 @@ class GUIAgentApp(QObject):
             self._stream_mode = "normal"
             self._typewriter_active = False
             self._typewriter_timer.stop()
-            # 直接使用原始文字，讓 circle_ui 處理圖片
-            final_text = self._compose_display_text()
+            # Chat mode: pass raw text (no tool HTML); circle mode: full composed text
+            if self._current_mode == "chat":
+                final_text = self._display_text
+            else:
+                final_text = self._compose_display_text()
             self._active_ui.update_speech_bubble(final_text)
             # 停止動畫，表示 agent 已完成
             self._active_ui.stop_agent_animation()
@@ -1409,7 +1443,10 @@ class GUIAgentApp(QObject):
         self._waiting_response = False
         self._waiting_status = ""
         if partial:
-            self._active_ui.update_speech_bubble(self._compose_display_text())
+            if self._current_mode == "chat":
+                self._active_ui.update_speech_bubble(partial)
+            else:
+                self._active_ui.update_speech_bubble(self._compose_display_text())
         else:
             self._active_ui.update_speech_bubble("(stopped)")
         self._active_ui.stop_agent_animation()

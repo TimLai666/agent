@@ -3843,17 +3843,36 @@ class _InlineConfirmBubble(QFrame):
 
 class _UserBubble(QFrame):
     """Right-aligned user message bubble."""
-    def __init__(self, text: str, parent=None):
+    def __init__(self, text: str, image_count: int = 0, parent=None):
         super().__init__(parent)
         row = QHBoxLayout(self)
         row.setContentsMargins(60, 2, 8, 2)
         row.setSpacing(0)
         row.addStretch(1)
-        label = QLabel()
-        label.setTextFormat(Qt.TextFormat.RichText)
-        label.setWordWrap(True)
-        label.setText(html.escape(text).replace("\n", "<br>"))
-        label.setStyleSheet(
+
+        # Vertical column so image chip can appear above text
+        col_w = QWidget()
+        col_w.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        col = QVBoxLayout(col_w)
+        col.setContentsMargins(0, 0, 0, 0)
+        col.setSpacing(4)
+
+        if image_count > 0:
+            chip_text = f"🖼 {image_count} 張圖片" if image_count > 1 else "🖼 圖片"
+            img_chip = QLabel(chip_text)
+            img_chip.setStyleSheet(
+                "QLabel { background: rgba(30,60,120,180); color: #a0c8ff; "
+                "border: 1px solid rgba(80,130,220,100); border-radius: 8px; "
+                "padding: 2px 8px; font-size: 11px; }"
+            )
+            img_chip.setAlignment(Qt.AlignmentFlag.AlignRight)
+            col.addWidget(img_chip, 0, Qt.AlignmentFlag.AlignRight)
+
+        self._text_label = QLabel()
+        self._text_label.setTextFormat(Qt.TextFormat.RichText)
+        self._text_label.setWordWrap(True)
+        self._text_label.setText(html.escape(text).replace("\n", "<br>"))
+        self._text_label.setStyleSheet(
             "QLabel {"
             "background: rgba(40,78,160,220);"
             "color: #e8f0ff;"
@@ -3862,8 +3881,13 @@ class _UserBubble(QFrame):
             "font-size: 13px;"
             "}"
         )
-        label.setMaximumWidth(460)
-        row.addWidget(label)
+        self._text_label.setMaximumWidth(460)
+        col.addWidget(self._text_label, 0, Qt.AlignmentFlag.AlignRight)
+        col_w.setMaximumWidth(480)
+        row.addWidget(col_w)
+
+    def update_text(self, text: str) -> None:
+        self._text_label.setText(html.escape(text).replace("\n", "<br>"))
 
 
 class _AgentBubble(QFrame):
@@ -3888,11 +3912,29 @@ class _AgentBubble(QFrame):
         "}"
         "QTextBrowser::viewport { background: transparent; }"
     )
-    # Regex to strip special XML tags that appear in _display_text during streaming
+    # Regex to strip ALL special XML blocks that appear in _display_text during streaming
     _TAG_RE = re.compile(
         r'<(tool-execution|plan-suggestion|discussion)>.*?</\1>',
         re.DOTALL,
     )
+    # Also strip incomplete opening tags that haven't closed yet
+    _OPEN_TAG_RE = re.compile(
+        r'<(tool-execution|plan-suggestion|discussion)>.*$',
+        re.DOTALL,
+    )
+    # Strip text-format tool call echoes that some models emit (e.g. AskUserQuestion({...}))
+    _TOOL_CALL_TEXT_RE = re.compile(
+        r'\b[A-Z][A-Za-z]+\s*\(\s*\{[\s\S]*?\}\s*\)',
+        re.DOTALL,
+    )
+
+    # Tool icon map (subset)
+    _TOOL_ICONS: dict[str, str] = {
+        "bash": "⬛", "read": "📄", "write": "✏️", "edit": "✏️",
+        "glob": "🔍", "grep": "🔍", "web": "🌐", "fetch": "🌐",
+        "search": "🔍", "skill": "⚡", "agent": "🤖", "subagent": "🤖",
+        "todo": "📋",
+    }
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -3938,7 +3980,22 @@ class _AgentBubble(QFrame):
         self._full_bubble.hide()
         self._stack.addWidget(self._full_bubble)
 
+        # ── Tool log (compact, shown above text, hidden until events arrive) ──
+        self._tool_lines: list[str] = []
+        self._tool_log_browser = AutoWrapTextBrowser()
+        self._tool_log_browser.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._tool_log_browser.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._tool_log_browser.setFrameShape(QFrame.Shape.NoFrame)
+        self._tool_log_browser.setStyleSheet(
+            "QTextBrowser { background: transparent; border: none; }"
+            "QTextBrowser::viewport { background: transparent; }"
+        )
+        self._tool_log_browser.setFixedHeight(0)
+        self._tool_log_browser.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self._stack.insertWidget(0, self._tool_log_browser)  # above stream/full
+
         self._finalized = False
+        self._tool_log_dirty = False
         outer.addWidget(self._card, 1)
 
         # Resize stream browser once laid out
@@ -3947,15 +4004,91 @@ class _AgentBubble(QFrame):
         except Exception:
             pass
 
+    # ── Tool events ────────────────────────────────────────────────────
+
+    def _tool_icon(self, label: str) -> str:
+        low = label.lower()
+        for key, icon in self._TOOL_ICONS.items():
+            if key in low:
+                return icon
+        return "🔧"
+
+    def add_tool_event(self, line: str) -> None:
+        """Append a tool event line and refresh the compact log."""
+        if not line:
+            return
+        self._tool_lines.append(line)
+        if len(self._tool_lines) > 20:
+            self._tool_lines = self._tool_lines[-20:]
+        self._tool_log_dirty = True
+        QTimer.singleShot(0, self._refresh_tool_log)
+
+    def _refresh_tool_log(self) -> None:
+        if not self._tool_log_dirty:
+            return
+        self._tool_log_dirty = False
+        esc = html.escape
+        rows: list[str] = []
+        in_flight: list[str] = []
+        for line in self._tool_lines:
+            if line.startswith("[>] "):
+                label = line[4:]
+                in_flight.append(label)
+                icon = self._tool_icon(label)
+                rows.append(
+                    f'<div style="color:#6eaee8;font-size:10px;font-family:monospace;'
+                    f'white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">'
+                    f'▶ {icon} {esc(label)}</div>'
+                )
+            elif line.startswith("[OK]"):
+                if in_flight:
+                    label = in_flight.pop(0)
+                    icon = self._tool_icon(label)
+                    # Replace the last ▶ with ✓ — just append a completion row
+                    rows.append(
+                        f'<div style="color:#4db87a;font-size:10px;font-family:monospace;">'
+                        f'✓ {icon} {esc(label)}</div>'
+                    )
+                    # Remove the matching ▶ row (last added for this label)
+                    for i in reversed(range(len(rows) - 1)):
+                        if esc(label) in rows[i] and "▶" in rows[i]:
+                            rows.pop(i)
+                            break
+            elif line.startswith("[ERR] "):
+                err = line[6:]
+                label = in_flight.pop(0) if in_flight else err
+                rows.append(
+                    f'<div style="color:#f06b6b;font-size:10px;font-family:monospace;">'
+                    f'✗ {esc(label)}</div>'
+                )
+            elif line.startswith("[SKILL] "):
+                label = line[8:]
+                rows.append(
+                    f'<div style="color:#c792ea;font-size:10px;">'
+                    f'⚡ {esc(label)}</div>'
+                )
+        if not rows:
+            self._tool_log_browser.setFixedHeight(0)
+            return
+        inner = "\n".join(rows[-10:])  # show last 10 completed events
+        self._tool_log_browser.setHtml(
+            f'<div style="margin:0;padding:0;background:transparent;">{inner}</div>'
+        )
+        line_count = min(len(rows), 10)
+        self._tool_log_browser.setFixedHeight(min(14 * line_count + 6, 140))
+
     # ── Streaming phase ────────────────────────────────────────────────
 
     def set_stream_content(self, text: str) -> None:
         """Fast in-place update during streaming — does NOT re-create widgets."""
         if self._finalized:
             return
-        # Strip <tool-execution> / <plan-suggestion> / <discussion> blocks;
-        # they're not useful in the streaming view.
-        clean = self._TAG_RE.sub('', text).strip()
+        # Strip complete <tool-execution> / <plan-suggestion> / <discussion> blocks
+        clean = self._TAG_RE.sub('', text)
+        # Also strip any incomplete block (opening tag with no closing tag yet)
+        clean = self._OPEN_TAG_RE.sub('', clean)
+        # Strip text-format tool call echoes (e.g. AskUserQuestion({...}))
+        clean = self._TOOL_CALL_TEXT_RE.sub('', clean).strip()
         self._stream_browser.setMarkdown(_prepare_markdown(clean) if clean else '')
         QTimer.singleShot(0, self._resize_stream)
 
@@ -4045,6 +4178,13 @@ class ChatWindow(QMainWindow):
         self._live_user_text: str = ""
         self._live_agent_text: str = ""
 
+        # Image tracking: count of images attached to the next user message
+        self._last_user_image_count: int = 0
+
+        # Todo panel refs (built in _build_ui)
+        self._todo_panel: QWidget | None = None
+        self._todo_browser: QTextBrowser | None = None
+
         # Build UI
         self._build_ui()
 
@@ -4089,7 +4229,17 @@ class ChatWindow(QMainWindow):
         self._chat_layout.setSpacing(12)
         self._chat_layout.addStretch(1)   # keeps messages pushed to top
         self._scroll.setWidget(self._chat_container)
-        vbox.addWidget(self._scroll, 1)
+
+        # Body row: chat area (left) + todo sidebar (right, hidden by default)
+        body_row = QWidget()
+        body_row.setStyleSheet("background: transparent;")
+        body_h = QHBoxLayout(body_row)
+        body_h.setContentsMargins(0, 0, 0, 0)
+        body_h.setSpacing(0)
+        body_h.addWidget(self._scroll, 1)
+        self._todo_panel = self._build_todo_panel()
+        body_h.addWidget(self._todo_panel)
+        vbox.addWidget(body_row, 1)
 
         # Input area
         sep2 = QWidget()
@@ -4097,6 +4247,46 @@ class ChatWindow(QMainWindow):
         sep2.setStyleSheet("background: rgba(255,255,255,12);")
         vbox.addWidget(sep2)
         self._build_input_area(vbox)
+
+    def _build_todo_panel(self) -> QWidget:
+        """Build the right-side todo drawer panel (hidden until content arrives)."""
+        panel = QFrame()
+        panel.setFixedWidth(220)
+        panel.setStyleSheet(
+            "QFrame { background: rgba(18,20,30,240); "
+            "border-left: 1px solid rgba(255,255,255,15); }"
+        )
+        v = QVBoxLayout(panel)
+        v.setContentsMargins(8, 8, 8, 8)
+        v.setSpacing(4)
+
+        header = QLabel("📋 待辦事項")
+        header.setStyleSheet(
+            "QLabel { color: #90b0e0; font-size: 12px; font-weight: bold; "
+            "border: none; background: transparent; }"
+        )
+        v.addWidget(header)
+
+        sep = QWidget()
+        sep.setFixedHeight(1)
+        sep.setStyleSheet("background: rgba(255,255,255,15);")
+        v.addWidget(sep)
+
+        self._todo_browser = QTextBrowser()
+        self._todo_browser.setStyleSheet(
+            "QTextBrowser { background: transparent; border: none; "
+            "color: #c0d0e8; font-size: 11px; }"
+            "QTextBrowser::viewport { background: transparent; padding: 0; }"
+            "QScrollBar:vertical { width: 4px; background: transparent; }"
+            "QScrollBar::handle:vertical { background: rgba(100,120,180,90); border-radius: 2px; }"
+            "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; }"
+        )
+        self._todo_browser.setOpenExternalLinks(False)
+        self._todo_browser.setReadOnly(True)
+        v.addWidget(self._todo_browser, 1)
+
+        panel.hide()  # hidden until todo content arrives
+        return panel
 
     def _build_top_bar(self) -> QWidget:
         bar = QWidget()
@@ -4348,16 +4538,15 @@ class ChatWindow(QMainWindow):
     def _ensure_live_user_bubble(self, user_msg: str) -> None:
         """Create or update the live user bubble at the bottom of the chat."""
         if self._live_user_bubble is None:
-            self._live_user_bubble = _UserBubble(user_msg)
+            img_count = self._last_user_image_count
+            self._last_user_image_count = 0
+            self._live_user_bubble = _UserBubble(user_msg, image_count=img_count)
             # Insert before the last stretch item
             count = self._chat_layout.count()
             self._chat_layout.insertWidget(count - 1, self._live_user_bubble)
             self._scroll_to_bottom()
         else:
-            # Update text inside existing bubble
-            label = self._live_user_bubble.findChild(QLabel)
-            if label:
-                label.setText(html.escape(user_msg).replace("\n", "<br>"))
+            self._live_user_bubble.update_text(user_msg)
 
     def _ensure_live_agent_bubble(self) -> None:
         """Create the live agent bubble if it doesn't exist yet."""
@@ -4447,7 +4636,17 @@ class ChatWindow(QMainWindow):
             self._total_tok_label.setText("Σ —")
 
     def update_todo_drawer(self, text: str) -> None:
-        pass  # todo panel not present in chat mode (could be added later)
+        if self._todo_browser is None or self._todo_panel is None:
+            return
+        if not text:
+            self._todo_panel.hide()
+            return
+        try:
+            self._todo_browser.setMarkdown(text)
+        except Exception:
+            self._todo_browser.setPlainText(text)
+        if not self._todo_panel.isVisible():
+            self._todo_panel.show()
 
     def voice_result_ready(self, text: str | None) -> None:
         if not self._voice_active:
@@ -4470,6 +4669,8 @@ class ChatWindow(QMainWindow):
     def pop_attached_images_as_tempfiles(self) -> list[str]:
         if not self._attached_images:
             return []
+        # Track count so user bubble can show an image chip
+        self._last_user_image_count = len(self._attached_images)
         import tempfile, os
         paths = []
         for data in self._attached_images:
@@ -4773,6 +4974,9 @@ class ChatWindow(QMainWindow):
                 result_container.result = allow
                 result_container.done.set()
                 logger.info(f"[ChatWindow inline] confirm answered: {allow}")
+                # Reset live agent bubble so continuation appears BELOW this card
+                self._live_agent_bubble = None
+                self._live_agent_text = ""
 
             bubble.answered.connect(_on_answered)
             count = self._chat_layout.count()
@@ -4810,6 +5014,9 @@ class ChatWindow(QMainWindow):
                 result_container.result = option
                 result_container.done.set()
                 logger.info(f"[ChatWindow inline] question answered: {option!r}")
+                # Reset live agent bubble so continuation appears BELOW this card
+                self._live_agent_bubble = None
+                self._live_agent_text = ""
 
             bubble.answered.connect(_on_answered)
 
