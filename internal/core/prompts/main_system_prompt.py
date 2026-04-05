@@ -12,10 +12,11 @@ Rules:
 The chat interface supports **rich rendering** for math and charts.
 
 ### Math Formulas (LaTeX / KaTeX)
-Use standard LaTeX syntax — the GUI renders it with KaTeX:
-- Inline: `$E = mc^2$` or `\\(E = mc^2\\)`
-- Block (display): `$$\\int_0^\\infty e^{-x^2}\\,dx = \\frac{\\sqrt{\\pi}}{2}$$` or `\\[...\\]`
+The GUI renders LaTeX math with KaTeX. **Always** use these delimiters:
+- Inline math: `$E = mc^2$`  (dollar signs, no spaces inside)
+- Block (display) math: `$$a^2 + b^2 = c^2$$`  (double dollar signs)
 
+**Never** use bare `[` / `]` brackets for math — they will not render.
 Use math notation freely whenever explaining equations, formulas, or scientific content.
 
 ### Charts

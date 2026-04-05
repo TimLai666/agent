@@ -14,23 +14,37 @@ from io import BytesIO
 
 # ── Detection patterns ───────────────────────────────────────────────────────
 
-# $ ... $  /  $$ ... $$
-_DOLLAR_MATH_RE  = re.compile(r'\$\$[\s\S]+?\$\$|\$(?!\s)[^$\n]+?(?<!\s)\$')
-# \[ ... \]  /  \( ... \)
-_BRACKET_MATH_RE = re.compile(r'\\\[[\s\S]+?\\\]|\\\(.+?\\\)')
+# $$ ... $$  /  $ ... $
+_DOLLAR_MATH_RE   = re.compile(r'\$\$[\s\S]+?\$\$|\$(?!\s)[^$\n]+?(?<!\s)\$')
+# \[ ... \]  /  \( ... \)  (with literal backslashes in the text)
+_BRACKET_MATH_RE  = re.compile(r'\\\[[\s\S]+?\\\]|\\\([\s\S]+?\\\)')
+# Bare [ on its own line ... ] on its own line  (agent sometimes writes this)
+_BARE_BRACKET_RE  = re.compile(r'(?m)^[ \t]*\[[ \t]*\n([\s\S]+?)\n[ \t]*\][ \t]*$')
 # ```chart ... ```
-_CHART_BLOCK_RE  = re.compile(r'```chart\s*\n([\s\S]*?)```', re.IGNORECASE)
+_CHART_BLOCK_RE   = re.compile(r'```chart\s*\n([\s\S]*?)```', re.IGNORECASE)
 # ```mermaid ... ```
 _MERMAID_BLOCK_RE = re.compile(r'```mermaid\s*\n([\s\S]*?)```', re.IGNORECASE)
 
 
+def preprocess_math(text: str) -> str:
+    """Normalise various math delimiter styles to $$ / $ before rendering."""
+    # \[...\]  →  $$...$$
+    text = re.sub(r'\\\[([\s\S]+?)\\\]', r'$$\1$$', text)
+    # \(...\)  →  $...$
+    text = re.sub(r'\\\(([\s\S]+?)\\\)', r'$\1$', text)
+    # Bare-bracket block: standalone [ ... ] lines → $$...$$
+    text = _BARE_BRACKET_RE.sub(r'$$\n\1\n$$', text)
+    return text
+
+
 def has_rich_content(text: str) -> bool:
     """Return True if text contains math, chart, or mermaid syntax."""
+    preprocessed = preprocess_math(text)
     return bool(
-        _CHART_BLOCK_RE.search(text)
-        or _MERMAID_BLOCK_RE.search(text)
-        or _DOLLAR_MATH_RE.search(text)
-        or _BRACKET_MATH_RE.search(text)
+        _CHART_BLOCK_RE.search(preprocessed)
+        or _MERMAID_BLOCK_RE.search(preprocessed)
+        or _DOLLAR_MATH_RE.search(preprocessed)
+        or _BRACKET_MATH_RE.search(preprocessed)
     )
 
 
@@ -178,10 +192,12 @@ def _render_chart_block(json_src: str) -> str:
 # ── Markdown → HTML (pre-process special blocks) ─────────────────────────────
 
 def _md_to_html(text: str) -> str:
-    """Convert markdown to HTML; replace ```chart blocks with inline PNG images."""
-    # 1. Replace ```chart blocks with rendered <img>
+    """Convert markdown to HTML; normalise math delimiters and render chart blocks."""
+    # 1. Normalise math delimiters (\[..\], \(..\), bare [..] → $$ / $)
+    text = preprocess_math(text)
+    # 2. Replace ```chart blocks with rendered <img>
     text = _CHART_BLOCK_RE.sub(lambda m: _render_chart_block(m.group(1)), text)
-    # 2. Standard markdown conversion
+    # 3. Standard markdown conversion
     import markdown
     md = markdown.Markdown(extensions=["fenced_code", "tables", "nl2br"])
     return md.convert(text)
