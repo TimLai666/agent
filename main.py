@@ -617,6 +617,22 @@ class GUIAgentApp(QObject):
             self.main_window.update_todo_drawer(self._todo_snapshot_text or "")
         except Exception:
             pass
+        # Sync running state + glow
+        try:
+            self.main_window.set_running(self._waiting_response)
+            if self._waiting_response:
+                self.main_window.start_agent_animation()
+            else:
+                self.main_window.stop_agent_animation()
+        except Exception:
+            pass
+        # Sync context meter
+        try:
+            from internal.compaction import MAX_CONTEXT_TOKENS
+            ctx = getattr(self.runtime._conversation_state, "totalTokens", 0) or 0
+            self.main_window.update_context_meter(ctx, MAX_CONTEXT_TOKENS, self._total_tokens_consumed)
+        except Exception:
+            pass
         # Restore current display text
         if self._display_text:
             self.main_window.update_speech_bubble(self._compose_display_text())
@@ -654,6 +670,24 @@ class GUIAgentApp(QObject):
             logger.info(f"Voice recognized: {text[:60]}")
         else:
             self._active_ui.update_speech_bubble("未識別到語音，請再試一次")
+
+    # ── Broadcast helpers (keep both UIs in sync) ────────────────────────
+
+    def _set_running_both(self, running: bool) -> None:
+        """Set running state on both windows so button/glow stays in sync."""
+        for win in (self.main_window, self.chat_window):
+            try:
+                win.set_running(running)
+            except Exception:
+                pass
+
+    def _update_context_both(self, used: int, max_tokens: int, total: int = 0) -> None:
+        """Push context meter update to both windows simultaneously."""
+        for win in (self.main_window, self.chat_window):
+            try:
+                win.update_context_meter(used, max_tokens, total)
+            except Exception:
+                pass
 
     def _gui_confirm_handler(self, message: str, default_choice: str) -> bool:
         """GUI 模式下的確認處理器（線程安全）"""
@@ -1077,7 +1111,7 @@ class GUIAgentApp(QObject):
                 delta = ctx - self._prev_context_tokens
                 self._total_tokens_consumed += delta if delta > 0 else ctx
                 self._prev_context_tokens = ctx
-                self._active_ui.update_context_meter(ctx, MAX_CONTEXT_TOKENS, self._total_tokens_consumed)
+                self._update_context_both(ctx, MAX_CONTEXT_TOKENS, self._total_tokens_consumed)
             except Exception:
                 pass
 
@@ -1085,7 +1119,7 @@ class GUIAgentApp(QObject):
         self._waiting_status = ""
         self._interrupted_partial = ""
         try:
-            self._active_ui.set_running(False)
+            self._set_running_both(False)
         except Exception:
             pass
         if self._auto_expand_on_result:
@@ -1107,6 +1141,10 @@ class GUIAgentApp(QObject):
         self._active_ui.stop_agent_animation()
         self._waiting_response = False
         self._waiting_status = ""
+        try:
+            self._set_running_both(False)
+        except Exception:
+            pass
         if self._auto_expand_on_result:
             self._expand_ui()
         self._reset_idle_timer()
@@ -1414,7 +1452,7 @@ class GUIAgentApp(QObject):
             self._idle_timer.stop()
             # Update stop button state
             try:
-                self._active_ui.set_running(True)
+                self._set_running_both(True)
             except Exception:
                 pass
             request_id = self.runtime.submit(user_input, self.chat_history)
@@ -1451,7 +1489,7 @@ class GUIAgentApp(QObject):
             self._active_ui.update_speech_bubble("(stopped)")
         self._active_ui.stop_agent_animation()
         try:
-            self._active_ui.set_running(False)
+            self._set_running_both(False)
         except Exception:
             pass
 
