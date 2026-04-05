@@ -3715,6 +3715,132 @@ class _InlineQuestionBubble(QFrame):
         self.answered.emit(option)
 
 
+class _InlineConfirmBubble(QFrame):
+    """Left-aligned inline permission-confirm bubble for chat mode."""
+
+    answered = Signal(bool)  # True = allow, False = deny
+
+    _DANGER_KEYWORDS = {"delete", "remove", "rm ", "drop", "kill", "truncate", "format", "wipe"}
+
+    def __init__(self, message: str, default_choice: str = '', parent=None):
+        super().__init__(parent)
+        self._done = False
+
+        is_danger = any(kw in message.lower() for kw in self._DANGER_KEYWORDS)
+        icon_char = "⚠️" if is_danger else "🔧"
+
+        outer = QHBoxLayout(self)
+        outer.setContentsMargins(8, 4, 60, 4)
+        outer.setSpacing(0)
+
+        card = QWidget()
+        card.setObjectName("ICCard")
+        card.setStyleSheet(
+            "#ICCard {"
+            "background: rgba(32,28,52,230);"
+            "border: 1px solid rgba(180,120,255,80);"
+            "border-radius: 14px;"
+            "}"
+        )
+        vbox = QVBoxLayout(card)
+        vbox.setContentsMargins(14, 12, 14, 12)
+        vbox.setSpacing(8)
+
+        # Header
+        hdr = QHBoxLayout()
+        hdr.setSpacing(8)
+        icon_lbl = QLabel(icon_char)
+        icon_lbl.setStyleSheet("font-size: 18px; background: transparent;")
+        icon_lbl.setFixedWidth(28)
+        title_lbl = QLabel("工具執行請求")
+        title_lbl.setStyleSheet(
+            "QLabel { color: #d0b0ff; font-size: 13px; font-weight: bold; background: transparent; }"
+        )
+        hdr.addWidget(icon_lbl)
+        hdr.addWidget(title_lbl, 1)
+        vbox.addLayout(hdr)
+
+        # Message body
+        body_lbl = QLabel()
+        body_lbl.setTextFormat(Qt.TextFormat.PlainText)
+        body_lbl.setWordWrap(True)
+        body_lbl.setText(message)
+        body_lbl.setStyleSheet(
+            "QLabel { color: #b0b8d8; font-size: 12px; background: transparent; }"
+        )
+        vbox.addWidget(body_lbl)
+
+        # Buttons
+        _allow_style = (
+            "QPushButton {"
+            "background: rgba(0,100,200,180); color: #c8dfff;"
+            "border: 1px solid rgba(80,160,255,120); border-radius: 8px;"
+            "padding: 7px 14px; font-size: 12px; text-align: left;"
+            "}"
+            "QPushButton:hover { background: rgba(0,120,240,210); }"
+            "QPushButton:disabled {"
+            "background: rgba(20,30,50,100); color: rgba(80,120,180,100);"
+            "border-color: rgba(40,60,120,50);"
+            "}"
+        )
+        _deny_style = (
+            "QPushButton {"
+            "background: rgba(60,60,80,180); color: #c0c0cc;"
+            "border: 1px solid rgba(255,255,255,40); border-radius: 8px;"
+            "padding: 7px 14px; font-size: 12px; text-align: left;"
+            "}"
+            "QPushButton:hover { background: rgba(80,80,100,210); }"
+            "QPushButton:disabled {"
+            "background: rgba(30,30,40,80); color: rgba(100,100,120,80);"
+            "border-color: rgba(60,60,80,40);"
+            "}"
+        )
+
+        self._allow_btn = QPushButton("  ✅ 允許執行  (Y)")
+        self._allow_btn.setStyleSheet(_allow_style)
+        self._allow_btn.clicked.connect(lambda: self._select(True))
+        vbox.addWidget(self._allow_btn)
+
+        self._deny_btn = QPushButton("  ❌ 拒絕  (N)")
+        self._deny_btn.setStyleSheet(_deny_style)
+        self._deny_btn.clicked.connect(lambda: self._select(False))
+        vbox.addWidget(self._deny_btn)
+
+        # Result label (hidden until answered)
+        self._result_lbl = QLabel()
+        self._result_lbl.setStyleSheet(
+            "QLabel { font-size: 12px; background: transparent; }"
+        )
+        self._result_lbl.hide()
+        vbox.addWidget(self._result_lbl)
+
+        if default_choice.upper() == 'Y':
+            self._allow_btn.setFocus()
+        else:
+            self._deny_btn.setFocus()
+
+        outer.addWidget(card, 1)
+
+    def _select(self, allow: bool) -> None:
+        if self._done:
+            return
+        self._done = True
+        self._allow_btn.setEnabled(False)
+        self._deny_btn.setEnabled(False)
+        if allow:
+            self._result_lbl.setStyleSheet(
+                "QLabel { color: #7ddfb0; font-size: 12px; background: transparent; }"
+            )
+            self._result_lbl.setText("✓ 已允許")
+        else:
+            self._result_lbl.setStyleSheet(
+                "QLabel { color: #df7d7d; font-size: 12px; background: transparent; }"
+            )
+            self._result_lbl.setText("✗ 已拒絕")
+        self._result_lbl.show()
+        self.answered.emit(allow)
+
+
 class _UserBubble(QFrame):
     """Right-aligned user message bubble."""
     def __init__(self, text: str, parent=None):
@@ -3741,50 +3867,135 @@ class _UserBubble(QFrame):
 
 
 class _AgentBubble(QFrame):
-    """Left-aligned agent message bubble (uses SiriResponseBubble for rendering)."""
+    """Left-aligned agent message bubble.
+
+    Two-phase rendering:
+    - Streaming: lightweight QTextBrowser updated in-place (fast, cheap).
+    - Final:     SiriResponseBubble for full markdown / code-block / collapsible rendering.
+    """
+
+    _CARD_STYLE = (
+        "#ABCard {"
+        "background-color: rgba(26,30,46,210);"
+        "border: 1px solid rgba(255,255,255,20);"
+        "border-radius: 14px;"
+        "}"
+    )
+    _STREAM_BROWSER_STYLE = (
+        "QTextBrowser {"
+        "background: transparent; border: none;"
+        "color: #e8eaf0; font-size: 13px; font-family: 'Segoe UI', 'Microsoft JhengHei', sans-serif;"
+        "}"
+        "QTextBrowser::viewport { background: transparent; }"
+    )
+    # Regex to strip special XML tags that appear in _display_text during streaming
+    _TAG_RE = re.compile(
+        r'<(tool-execution|plan-suggestion|discussion)>.*?</\1>',
+        re.DOTALL,
+    )
+
     def __init__(self, parent=None):
         super().__init__(parent)
-        row = QHBoxLayout(self)
-        row.setContentsMargins(8, 2, 60, 2)
-        row.setSpacing(0)
-        self._bubble = SiriResponseBubble()
-        self._bubble.setStyleSheet(
-            "SiriResponseBubble {"
-            "background-color: rgba(26,30,46,210);"
-            "border: 1px solid rgba(255,255,255,20);"
-            "border-radius: 14px;"
-            "}"
+        outer = QHBoxLayout(self)
+        outer.setContentsMargins(8, 2, 20, 2)
+        outer.setSpacing(0)
+
+        # Wrapper card
+        self._card = QWidget()
+        self._card.setObjectName("ABCard")
+        self._card.setStyleSheet(self._CARD_STYLE)
+        self._card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self._card.setMinimumWidth(180)
+
+        self._stack = QVBoxLayout(self._card)
+        self._stack.setContentsMargins(12, 10, 12, 10)
+        self._stack.setSpacing(0)
+
+        # ── Phase 1: streaming browser ─────────────────────────────────
+        self._stream_browser = AutoWrapTextBrowser()
+        self._stream_browser.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
+        self._stream_browser.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._stream_browser.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._stream_browser.setFrameShape(QFrame.Shape.NoFrame)
+        self._stream_browser.setOpenExternalLinks(True)
+        self._stream_browser.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
+        self._stream_browser.setStyleSheet(self._STREAM_BROWSER_STYLE)
+        self._stream_browser.setViewportMargins(0, 0, 0, 0)
+        self._stream_browser.setContentsMargins(0, 0, 0, 0)
+        self._stream_browser.document().setDocumentMargin(0)
+        self._stream_browser.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self._stack.addWidget(self._stream_browser)
+
+        # ── Phase 2: full SiriResponseBubble (hidden until finalized) ──
+        self._full_bubble = SiriResponseBubble()
+        self._full_bubble.setStyleSheet(
+            "SiriResponseBubble { background: transparent; border: none; }"
             "QTextBrowser { background: transparent; border: none; }"
             "QTextBrowser::viewport { padding: 0px; margin: 0px; border: none; }"
         )
-        # Disable internal scrollbar; bubble expands to full content height
-        self._bubble.scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self._bubble.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-        self._bubble.setMinimumWidth(180)
-        # stretch=1 so the bubble claims all available width, not the spacer
-        row.addWidget(self._bubble, 1)
-        # Deferred resize so Qt has laid out children before we measure
-        QTimer.singleShot(0, self._resize_to_content)
+        self._full_bubble.scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._full_bubble.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self._full_bubble.hide()
+        self._stack.addWidget(self._full_bubble)
+
+        self._finalized = False
+        outer.addWidget(self._card, 1)
+
+        # Resize stream browser once laid out
+        try:
+            self._stream_browser.document().contentsChanged.connect(self._resize_stream)
+        except Exception:
+            pass
+
+    # ── Streaming phase ────────────────────────────────────────────────
+
+    def set_stream_content(self, text: str) -> None:
+        """Fast in-place update during streaming — does NOT re-create widgets."""
+        if self._finalized:
+            return
+        # Strip <tool-execution> / <plan-suggestion> / <discussion> blocks;
+        # they're not useful in the streaming view.
+        clean = self._TAG_RE.sub('', text).strip()
+        self._stream_browser.setMarkdown(_prepare_markdown(clean) if clean else '')
+        QTimer.singleShot(0, self._resize_stream)
+
+    def _resize_stream(self) -> None:
+        try:
+            self._stream_browser.update_wrap_width(
+                max(1, self._card.width() - 24)
+            )
+            doc_h = self._stream_browser.document().documentLayout().documentSize().height()
+            h = max(32, int(doc_h) + 4)
+            self._stream_browser.setMinimumHeight(h)
+            self._stream_browser.setMaximumHeight(h)
+        except Exception:
+            pass
+
+    # ── Final render phase ─────────────────────────────────────────────
 
     def set_content(self, text: str) -> None:
-        self._bubble.set_content(text)
-        QTimer.singleShot(60, self._resize_to_content)
+        """Full render — switch to SiriResponseBubble. Called once on completion."""
+        self._finalized = True
+        self._stream_browser.hide()
+        self._full_bubble.set_content(text)
+        self._full_bubble.show()
+        QTimer.singleShot(80, self._resize_full)
 
-    def _resize_to_content(self) -> None:
+    def _resize_full(self) -> None:
         try:
             QApplication.processEvents()
-            h = self._bubble.content_height()
+            h = self._full_bubble.content_height()
             target = max(54, h + 28)
-            self._bubble.setMinimumHeight(target)
-            self._bubble.setMaximumHeight(target)
+            self._full_bubble.setMinimumHeight(target)
+            self._full_bubble.setMaximumHeight(target)
         except Exception:
             pass
 
     def start_animation(self) -> None:
-        self._bubble.start_animation()
+        self._full_bubble.start_animation()
 
     def stop_animation(self) -> None:
-        self._bubble.stop_animation()
+        self._full_bubble.stop_animation()
 
 
 class ChatWindow(QMainWindow):
@@ -4126,12 +4337,12 @@ class ChatWindow(QMainWindow):
                 self._live_user_text = user_msg
                 self._ensure_live_user_bubble(user_msg)
         else:
-            # Agent response content (streaming or final)
+            # Agent response content — use fast streaming path
             if text and text != self._live_agent_text:
                 self._live_agent_text = text
                 self._ensure_live_agent_bubble()
                 if self._live_agent_bubble:
-                    self._live_agent_bubble.set_content(text)
+                    self._live_agent_bubble.set_stream_content(text)
                     self._scroll_to_bottom()
 
     def _ensure_live_user_bubble(self, user_msg: str) -> None:
@@ -4185,7 +4396,9 @@ class ChatWindow(QMainWindow):
             except Exception:
                 pass
             self.send_button.clicked.connect(self.on_input_submitted)
-            # Finalize live exchange (detach tracking refs so next turn is fresh)
+            # Finalize: do full SiriResponseBubble render, then detach refs
+            if self._live_agent_bubble is not None and self._live_agent_text:
+                self._live_agent_bubble.set_content(self._live_agent_text)
             self._live_user_bubble = None
             self._live_agent_bubble = None
             self._live_user_text = ""
@@ -4552,12 +4765,21 @@ class ChatWindow(QMainWindow):
 
     @Slot(str, str, object)
     def _handle_confirm_request(self, message: str, default_choice: str, result_container: object) -> None:
+        """In chat mode: insert an inline confirm bubble instead of a popup dialog."""
         try:
-            dialog = ConfirmDialog(message, default_choice, parent=self)
-            result_container.result = dialog.get_result()
+            bubble = _InlineConfirmBubble(message, default_choice)
+
+            def _on_answered(allow: bool) -> None:
+                result_container.result = allow
+                result_container.done.set()
+                logger.info(f"[ChatWindow inline] confirm answered: {allow}")
+
+            bubble.answered.connect(_on_answered)
+            count = self._chat_layout.count()
+            self._chat_layout.insertWidget(count - 1, bubble)
+            self._scroll_to_bottom()
         except Exception as exc:
-            logger.error(f"ChatWindow confirm dialog error: {exc}", exc_info=True)
-        finally:
+            logger.error(f"ChatWindow inline confirm error: {exc}", exc_info=True)
             result_container.done.set()
 
     def show_confirm_dialog(self, message: str, default_choice: str = '') -> bool:

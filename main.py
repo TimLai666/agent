@@ -1183,9 +1183,13 @@ class GUIAgentApp(QObject):
         """執行實際的顯示更新"""
         if self._pending_display_update:
             try:
-                # 直接使用原始文字，讓 circle_ui 處理圖片
-                display_text = self._compose_display_text()
-                self._active_ui.update_speech_bubble(display_text)
+                if self._current_mode == "chat":
+                    # Chat mode: pass raw _display_text so the agent bubble
+                    # does a fast QTextBrowser update (no tool HTML mixed in).
+                    self._active_ui.update_speech_bubble(self._display_text)
+                else:
+                    display_text = self._compose_display_text()
+                    self._active_ui.update_speech_bubble(display_text)
                 self._pending_display_update = False
             except Exception as e:
                 logger.error(f"Display update error: {e}")
