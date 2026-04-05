@@ -272,14 +272,18 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QFrame,
+    QGraphicsDropShadowEffect,
     QHBoxLayout,
     QLabel,
     QFileDialog,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMainWindow,
     QPushButton,
     QScrollArea,
     QSizePolicy,
+    QSplitter,
     QTextBrowser,
     QTextEdit,
     QToolButton,
@@ -3922,11 +3926,6 @@ class _AgentBubble(QFrame):
         r'<(tool-execution|plan-suggestion|discussion)>.*$',
         re.DOTALL,
     )
-    # Strip text-format tool call echoes that some models emit (e.g. AskUserQuestion({...}))
-    _TOOL_CALL_TEXT_RE = re.compile(
-        r'\b[A-Z][A-Za-z]+\s*\(\s*\{[\s\S]*?\}\s*\)',
-        re.DOTALL,
-    )
 
     # Tool icon map (subset)
     _TOOL_ICONS: dict[str, str] = {
@@ -3997,6 +3996,17 @@ class _AgentBubble(QFrame):
         self._finalized = False
         self._tool_log_dirty = False
         outer.addWidget(self._card, 1)
+
+        # ── Glow animation (streaming indicator) ──────────────────────────
+        self._glow = QGraphicsDropShadowEffect()
+        self._glow.setBlurRadius(0)
+        self._glow.setColor(QColor(80, 140, 255, 0))
+        self._glow.setOffset(0, 0)
+        self._card.setGraphicsEffect(self._glow)
+        self._pulse_timer = QTimer(self)
+        self._pulse_timer.setInterval(700)
+        self._pulse_timer.timeout.connect(self._pulse_card)
+        self._pulse_phase = 0
 
         # Resize stream browser once laid out
         try:
@@ -4086,9 +4096,7 @@ class _AgentBubble(QFrame):
         # Strip complete <tool-execution> / <plan-suggestion> / <discussion> blocks
         clean = self._TAG_RE.sub('', text)
         # Also strip any incomplete block (opening tag with no closing tag yet)
-        clean = self._OPEN_TAG_RE.sub('', clean)
-        # Strip text-format tool call echoes (e.g. AskUserQuestion({...}))
-        clean = self._TOOL_CALL_TEXT_RE.sub('', clean).strip()
+        clean = self._OPEN_TAG_RE.sub('', clean).strip()
         self._stream_browser.setMarkdown(_prepare_markdown(clean) if clean else '')
         QTimer.singleShot(0, self._resize_stream)
 
@@ -4124,11 +4132,75 @@ class _AgentBubble(QFrame):
         except Exception:
             pass
 
+    def _pulse_card(self) -> None:
+        self._pulse_phase = 1 - self._pulse_phase
+        try:
+            if self._pulse_phase:
+                self._glow.setBlurRadius(16)
+                self._glow.setColor(QColor(80, 140, 255, 130))
+            else:
+                self._glow.setBlurRadius(6)
+                self._glow.setColor(QColor(80, 140, 255, 55))
+        except Exception:
+            pass
+
     def start_animation(self) -> None:
+        self._pulse_phase = 0
+        self._pulse_timer.start()
         self._full_bubble.start_animation()
 
     def stop_animation(self) -> None:
+        self._pulse_timer.stop()
+        try:
+            self._glow.setBlurRadius(0)
+            self._glow.setColor(QColor(80, 140, 255, 0))
+        except Exception:
+            pass
         self._full_bubble.stop_animation()
+
+
+class _MemoryViewerDialog(QDialog):
+    """Simple read-only viewer for a memory .md file."""
+
+    def __init__(self, fname: str, label: str, content: str, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"記憶檔案 — {label}")
+        self.resize(560, 420)
+        self.setStyleSheet(
+            "QDialog { background: rgb(18,20,30); }"
+            "QTextBrowser { background: rgb(22,24,36); border: 1px solid rgba(255,255,255,18); "
+            "border-radius: 8px; color: #d0dff0; font-size: 12px; padding: 6px; }"
+            "QTextBrowser::viewport { background: transparent; }"
+        )
+        v = QVBoxLayout(self)
+        v.setContentsMargins(12, 12, 12, 12)
+        v.setSpacing(8)
+
+        hdr = QLabel(f"<b style='color:#90b0e0'>{html.escape(label)}</b>"
+                     f"<span style='color:#506070;font-size:10px;'> ({html.escape(fname)})</span>")
+        hdr.setTextFormat(Qt.TextFormat.RichText)
+        v.addWidget(hdr)
+
+        browser = QTextBrowser()
+        browser.setOpenExternalLinks(False)
+        if content:
+            try:
+                browser.setMarkdown(content)
+            except Exception:
+                browser.setPlainText(content)
+        else:
+            browser.setPlaceholderText("（此檔案為空）")
+        v.addWidget(browser, 1)
+
+        close_btn = QPushButton("關閉")
+        close_btn.setFixedHeight(28)
+        close_btn.setStyleSheet(
+            "QPushButton { background: rgba(50,65,100,200); color: #90b0e0; "
+            "border: 1px solid rgba(90,130,200,60); border-radius: 8px; font-size: 11px; padding: 0 16px; }"
+            "QPushButton:hover { background: rgba(65,85,130,230); }"
+        )
+        close_btn.clicked.connect(self.accept)
+        v.addWidget(close_btn, 0, Qt.AlignmentFlag.AlignRight)
 
 
 class ChatWindow(QMainWindow):
@@ -4249,31 +4321,12 @@ class ChatWindow(QMainWindow):
         self._build_input_area(vbox)
 
     def _build_todo_panel(self) -> QWidget:
-        """Build the right-side todo drawer panel (hidden until content arrives)."""
-        panel = QFrame()
-        panel.setFixedWidth(220)
-        panel.setStyleSheet(
-            "QFrame { background: rgba(18,20,30,240); "
-            "border-left: 1px solid rgba(255,255,255,15); }"
+        """Build the right-side sidebar: top = todo, bottom = memory file list."""
+        _PANEL_STYLE = (
+            "background: rgba(18,20,30,240);"
+            "border-left: 1px solid rgba(255,255,255,15);"
         )
-        v = QVBoxLayout(panel)
-        v.setContentsMargins(8, 8, 8, 8)
-        v.setSpacing(4)
-
-        header = QLabel("📋 待辦事項")
-        header.setStyleSheet(
-            "QLabel { color: #90b0e0; font-size: 12px; font-weight: bold; "
-            "border: none; background: transparent; }"
-        )
-        v.addWidget(header)
-
-        sep = QWidget()
-        sep.setFixedHeight(1)
-        sep.setStyleSheet("background: rgba(255,255,255,15);")
-        v.addWidget(sep)
-
-        self._todo_browser = QTextBrowser()
-        self._todo_browser.setStyleSheet(
+        _BROWSER_STYLE = (
             "QTextBrowser { background: transparent; border: none; "
             "color: #c0d0e8; font-size: 11px; }"
             "QTextBrowser::viewport { background: transparent; padding: 0; }"
@@ -4281,12 +4334,111 @@ class ChatWindow(QMainWindow):
             "QScrollBar::handle:vertical { background: rgba(100,120,180,90); border-radius: 2px; }"
             "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; }"
         )
+        _HDR_STYLE = (
+            "QLabel { color: #90b0e0; font-size: 11px; font-weight: bold; "
+            "border: none; background: transparent; padding: 2px 0; }"
+        )
+        _SEP_STYLE = "background: rgba(255,255,255,15);"
+
+        panel = QWidget()
+        panel.setFixedWidth(220)
+        panel.setStyleSheet(_PANEL_STYLE)
+
+        outer = QVBoxLayout(panel)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        splitter = QSplitter(Qt.Orientation.Vertical)
+        splitter.setHandleWidth(4)
+        splitter.setStyleSheet(
+            "QSplitter::handle { background: rgba(255,255,255,20); }"
+        )
+        outer.addWidget(splitter)
+
+        # ── Top pane: Todo ────────────────────────────────────────────────
+        top = QWidget()
+        top.setStyleSheet("background: transparent;")
+        top_v = QVBoxLayout(top)
+        top_v.setContentsMargins(8, 8, 8, 4)
+        top_v.setSpacing(4)
+
+        todo_hdr = QLabel("📋 待辦事項")
+        todo_hdr.setStyleSheet(_HDR_STYLE)
+        top_v.addWidget(todo_hdr)
+
+        sep1 = QWidget(); sep1.setFixedHeight(1); sep1.setStyleSheet(_SEP_STYLE)
+        top_v.addWidget(sep1)
+
+        self._todo_browser = QTextBrowser()
+        self._todo_browser.setStyleSheet(_BROWSER_STYLE)
         self._todo_browser.setOpenExternalLinks(False)
         self._todo_browser.setReadOnly(True)
-        v.addWidget(self._todo_browser, 1)
+        self._todo_browser.setPlaceholderText("暫無待辦事項")
+        top_v.addWidget(self._todo_browser, 1)
 
-        panel.hide()  # hidden until todo content arrives
+        splitter.addWidget(top)
+
+        # ── Bottom pane: Memory files ─────────────────────────────────────
+        bot = QWidget()
+        bot.setStyleSheet("background: transparent;")
+        bot_v = QVBoxLayout(bot)
+        bot_v.setContentsMargins(8, 4, 8, 8)
+        bot_v.setSpacing(4)
+
+        mem_hdr = QLabel("🧠 記憶檔案")
+        mem_hdr.setStyleSheet(_HDR_STYLE)
+        bot_v.addWidget(mem_hdr)
+
+        sep2 = QWidget(); sep2.setFixedHeight(1); sep2.setStyleSheet(_SEP_STYLE)
+        bot_v.addWidget(sep2)
+
+        self._mem_list = QListWidget()
+        self._mem_list.setStyleSheet(
+            "QListWidget { background: transparent; border: none; color: #b0c8e8; font-size: 11px; }"
+            "QListWidget::item { padding: 4px 2px; border-radius: 4px; }"
+            "QListWidget::item:hover { background: rgba(80,110,180,60); }"
+            "QListWidget::item:selected { background: rgba(60,90,160,100); }"
+            "QScrollBar:vertical { width: 4px; background: transparent; }"
+            "QScrollBar::handle:vertical { background: rgba(100,120,180,90); border-radius: 2px; }"
+            "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; }"
+        )
+        self._mem_list.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self._mem_list.itemDoubleClicked.connect(self._open_memory_file)
+        self._mem_list.itemClicked.connect(self._open_memory_file)
+        self._populate_memory_list()
+        bot_v.addWidget(self._mem_list, 1)
+
+        splitter.addWidget(bot)
+        splitter.setSizes([240, 160])  # default: todo taller
+
         return panel
+
+    def _populate_memory_list(self) -> None:
+        """Fill the memory file list widget."""
+        try:
+            from internal.memory import MEMORY_FILES, _FILE_LABELS
+            self._mem_list.clear()
+            for fname in MEMORY_FILES:
+                label = _FILE_LABELS.get(fname, fname)
+                item = QListWidgetItem(f"  {fname}")
+                item.setToolTip(label)
+                item.setData(Qt.ItemDataRole.UserRole, fname)
+                self._mem_list.addItem(item)
+        except Exception as exc:
+            logger.warning(f"Memory list populate failed: {exc}")
+
+    def _open_memory_file(self, item: QListWidgetItem) -> None:
+        """Open a memory file in a viewer dialog."""
+        try:
+            from internal.memory import MemoryManager, _FILE_LABELS
+            fname = item.data(Qt.ItemDataRole.UserRole) or item.text().strip()
+            mm = MemoryManager()
+            content = mm.read_file(fname)
+            label = _FILE_LABELS.get(fname, fname)
+            dlg = _MemoryViewerDialog(fname, label, content, parent=self)
+            dlg.exec()
+        except Exception as exc:
+            logger.warning(f"Open memory file failed: {exc}")
 
     def _build_top_bar(self) -> QWidget:
         bar = QWidget()
@@ -4636,17 +4788,16 @@ class ChatWindow(QMainWindow):
             self._total_tok_label.setText("Σ —")
 
     def update_todo_drawer(self, text: str) -> None:
-        if self._todo_browser is None or self._todo_panel is None:
+        if self._todo_browser is None:
             return
         if not text:
-            self._todo_panel.hide()
+            self._todo_browser.setPlaceholderText("暫無待辦事項")
+            self._todo_browser.clear()
             return
         try:
             self._todo_browser.setMarkdown(text)
         except Exception:
             self._todo_browser.setPlainText(text)
-        if not self._todo_panel.isVisible():
-            self._todo_panel.show()
 
     def voice_result_ready(self, text: str | None) -> None:
         if not self._voice_active:
