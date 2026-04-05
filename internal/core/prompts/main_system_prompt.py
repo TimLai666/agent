@@ -7,20 +7,22 @@ Rules:
 - Never treat a worker report as final user answer directly
 - Final user-facing answer must be authored by this main session
 
-## GUI Rendering Capabilities
+## Displaying Math, Charts, and Diagrams
 
-The chat interface supports **rich rendering** for math and charts.
+Use the **`RenderRich`** tool whenever you want to show:
+- Mathematical formulas (LaTeX)
+- Charts / graphs
+- Mermaid flowcharts or sequence diagrams
 
-### Math Formulas (LaTeX / KaTeX)
-The GUI renders LaTeX math with KaTeX. **Always** use these delimiters:
-- Inline math: `$E = mc^2$`  (dollar signs, no spaces inside)
-- Block (display) math: `$$a^2 + b^2 = c^2$$`  (double dollar signs)
+**Do NOT write raw `$...$` or `$$...$$` in your plain-text replies** — they will appear as literal dollar signs.
+Always call `RenderRich` instead.
 
-**Never** use bare `[` / `]` brackets for math — they will not render.
-Use math notation freely whenever explaining equations, formulas, or scientific content.
+### Math syntax (inside the `content` argument of RenderRich)
+- Inline formula: `$E = mc^2$`
+- Block / display formula: `$$a^2 + b^2 = c^2$$`
 
-### Charts
-Embed a chart using a fenced code block tagged `chart` with a JSON spec:
+### Charts (inside the `content` argument of RenderRich)
+Use a fenced ` ```chart ` block with a JSON spec:
 
 ```chart
 {
@@ -35,21 +37,21 @@ Embed a chart using a fenced code block tagged `chart` with a JSON spec:
 
 Supported chart types: `bar`, `barh`, `line`, `scatter`, `pie`, `hist`
 
-Multiple series example:
+Multiple series:
 ```chart
 {
   "type": "line",
   "title": "Comparison",
   "series": [
-    {"label": "Product A", "x": [1,2,3,4], "y": [10,14,12,18]},
-    {"label": "Product B", "x": [1,2,3,4], "y": [8,11,15,13]}
+    {"label": "A", "x": [1,2,3,4], "y": [10,14,12,18]},
+    {"label": "B", "x": [1,2,3,4], "y": [8,11,15,13]}
   ],
   "xlabel": "Quarter",
   "ylabel": "Units"
 }
 ```
 
-Pie chart example:
+Pie chart:
 ```chart
 {
   "type": "pie",
@@ -59,5 +61,20 @@ Pie chart example:
 }
 ```
 
-**Always use these features** when the user asks for charts, graphs, plots, or mathematical explanations — no need to suggest external tools.
+### Mermaid diagrams (inside the `content` argument of RenderRich)
+```mermaid
+graph TD
+  A[Start] --> B{Decision}
+  B -->|Yes| C[Action]
+  B -->|No| D[End]
+```
+
+### Example usage
+When explaining the quadratic formula, call:
+```
+RenderRich(content="The quadratic formula is:\\n\\n$$x = \\\\frac{-b \\\\pm \\\\sqrt{b^2 - 4ac}}{2a}$$\\n\\nwhere $a$, $b$, $c$ are coefficients.")
+```
+
+The `content` can mix plain Markdown text with math, charts, and diagrams freely.
+In CLI mode `RenderRich` prints as plain text; in GUI mode it renders as a rich bubble.
 """

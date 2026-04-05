@@ -30,7 +30,7 @@ from internal.services.config_db import (
     list_providers,
     list_remote_mcps,
 )
-from internal.cli import set_gui_confirm_handler, set_gui_question_handler
+from internal.cli import set_gui_confirm_handler, set_gui_question_handler, set_gui_render_handler
 from internal.command_handler import CommandHandler
 from internal.services import config_webui, config_cli
 from internal.compaction import (
@@ -501,6 +501,8 @@ class GUIAgentApp(QObject):
         set_gui_confirm_handler(self._gui_confirm_handler)
         # 設置 GUI 問題選單處理器
         set_gui_question_handler(self._gui_question_handler)
+        # 設置 GUI 富媒體渲染處理器
+        set_gui_render_handler(self._gui_render_handler)
         
         # Current UI mode: "circle" or "chat"
         self._current_mode: str = "circle"
@@ -723,6 +725,17 @@ class GUIAgentApp(QObject):
                 self._discussion_text = f"**Q:** {question}\n\n**A:** {result}"
                 self._request_display_update()
         return result
+
+    def _gui_render_handler(self, content: str) -> None:
+        """GUI 模式下的富媒體渲染處理器（線程安全）。
+
+        Called from the agent thread; emits a signal so ChatWindow renders on the main thread.
+        """
+        logger.info("_gui_render_handler called, emitting render_rich_requested")
+        try:
+            self.chat_window.render_rich_requested.emit(content)
+        except Exception as exc:
+            logger.warning("_gui_render_handler emit error: %s", exc)
 
     def _reset_tool_log(self) -> None:
         self._tool_log_lines = []
@@ -1519,6 +1532,7 @@ class GUIAgentApp(QObject):
             # 清理 GUI 處理器
             set_gui_confirm_handler(None)
             set_gui_question_handler(None)
+            set_gui_render_handler(None)
             self.runtime.stop()
             self.runtime.wait(3000)
         return result

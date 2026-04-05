@@ -686,6 +686,42 @@ class MainAgent:
             return self._publish_todo_snapshot(snapshot, normalized_items)
 
         @self.agent.tool_plain
+        def RenderRich(content: str) -> str:
+            """在 GUI 介面中渲染富媒體內容（數學公式、圖表、流程圖）。
+
+            **何時使用**：每當你需要展示以下內容時，必須呼叫此工具：
+            - 數學公式（LaTeX 語法）
+            - 統計圖表（bar/line/pie 等）
+            - Mermaid 流程圖/序列圖
+
+            **數學公式語法**：
+            - 行內公式：`$E = mc^2$`（單個錢號）
+            - 獨立公式：`$$a^2 + b^2 = c^2$$`（雙錢號）
+
+            **圖表語法**（JSON 格式的 ```chart 區塊）：
+            ```chart
+            {"type": "bar", "title": "範例", "x": ["A","B"], "y": [10, 20]}
+            ```
+            支援類型：bar, barh, line, scatter, pie, hist
+
+            **Mermaid 流程圖語法**：
+            ```mermaid
+            graph TD; A --> B --> C
+            ```
+
+            `content` 可以是純數學、純圖表、純流程圖，也可以混合 Markdown 文字。
+            在 CLI 模式下會以純文字顯示。
+
+            **重要**：不要在一般回覆中直接寫 $...$，一律透過此工具渲染。
+            """
+            try:
+                from internal.cli import render_rich
+                return render_rich(content)
+            except Exception as exc:
+                logger.warning("RenderRich encountered an error: %s", exc)
+                return f"(RenderRich failed: {exc}. Content: {content[:200]})"
+
+        @self.agent.tool_plain
         def AskUserQuestion(
             question: str,
             options: str = "",

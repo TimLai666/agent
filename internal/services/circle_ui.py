@@ -4372,6 +4372,108 @@ class _AgentBubble(QFrame):
         self._full_bubble.stop_animation()
 
 
+class _RichBubble(QFrame):
+    """Agent bubble that displays pre-rendered rich content (math/charts/diagrams).
+
+    Used exclusively by the RenderRich tool.  All math and charts are rendered
+    offline by rich_render.build_rich_html(); only Mermaid uses CDN (optional).
+    """
+
+    _CARD_STYLE = (
+        "#RBCard {"
+        "background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+        "stop:0 rgba(22,32,64,220),stop:1 rgba(16,24,52,215));"
+        "border: 1px solid rgba(80,150,240,60);"
+        "border-radius: 14px;"
+        "}"
+    )
+
+    def __init__(self, content: str, parent=None):
+        super().__init__(parent)
+        outer = QHBoxLayout(self)
+        outer.setContentsMargins(8, 2, 20, 2)
+        outer.setSpacing(0)
+
+        self._card = QWidget()
+        self._card.setObjectName("RBCard")
+        self._card.setStyleSheet(self._CARD_STYLE)
+        self._card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self._card.setMinimumWidth(180)
+
+        self._stack = QVBoxLayout(self._card)
+        self._stack.setContentsMargins(12, 10, 12, 10)
+        self._stack.setSpacing(0)
+
+        outer.addWidget(self._card, 1)
+
+        self._view = None
+
+        if HAS_WEBENGINE:
+            self._setup_webview(content)
+        else:
+            # Fallback: render plain text
+            from PySide6.QtWidgets import QLabel
+            lbl = QLabel(content)
+            lbl.setWordWrap(True)
+            lbl.setStyleSheet("QLabel { color: #dde8f8; font-size: 13px; }")
+            self._stack.addWidget(lbl)
+
+    def _setup_webview(self, content: str) -> None:
+        from PySide6.QtCore import QUrl
+        from PySide6.QtWebEngineCore import QWebEngineSettings
+        from internal.services.rich_render import build_rich_html
+
+        view = QWebEngineView()
+        view.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        view.setMinimumHeight(60)
+        view.page().setBackgroundColor(QColor(0, 0, 0, 0))
+        view.setStyleSheet("background: transparent;")
+        view.settings().setAttribute(
+            QWebEngineSettings.WebAttribute.LocalContentCanAccessRemoteUrls, True
+        )
+        self._stack.addWidget(view)
+        self._view = view
+
+        try:
+            html_content = build_rich_html(content)
+        except Exception as exc:
+            logger.warning("_RichBubble build_rich_html error: %s", exc)
+            html_content = f"<pre style='color:#dde8f8'>{content}</pre>"
+
+        # CDN base URL so Mermaid.js can load if online
+        view.setHtml(html_content, QUrl("https://cdn.jsdelivr.net/"))
+
+        def _on_load(ok):
+            # Give Mermaid ~600 ms to render, then measure height
+            QTimer.singleShot(600, self._resize_view)
+
+        view.loadFinished.connect(_on_load)
+
+    def _resize_view(self) -> None:
+        if self._view is None:
+            return
+
+        def _apply(h):
+            try:
+                target = max(60, int(h) + 24)
+                self._view.setMinimumHeight(target)
+                self._view.setMaximumHeight(target)
+                # Notify parent scroll area to update
+                p = self.parent()
+                if p is not None:
+                    p.updateGeometry()
+            except Exception:
+                pass
+
+        try:
+            self._view.page().runJavaScript(
+                "Math.max(document.body.scrollHeight, document.documentElement.scrollHeight)",
+                _apply,
+            )
+        except Exception:
+            pass
+
+
 class _MemoryViewerDialog(QDialog):
     """Simple read-only viewer for a memory .md file."""
 
@@ -4427,6 +4529,7 @@ class ChatWindow(QMainWindow):
     # Thread-safe dialog signals (same pattern as MainWindow)
     confirm_requested = Signal(str, str, object)
     question_requested = Signal(str, list, bool, object)  # question, options, multi, result_container
+    render_rich_requested = Signal(str)  # content — insert a _RichBubble into chat
 
     _CHIP_STYLE = (
         "QLabel { background: rgba(45,55,80,200); color: #a8d4ff; "
@@ -4477,6 +4580,7 @@ class ChatWindow(QMainWindow):
         # Thread-safe dialogs
         self.confirm_requested.connect(self._handle_confirm_request)
         self.question_requested.connect(self._handle_question_request)
+        self.render_rich_requested.connect(self.insert_rich_content)
 
     # ── UI construction ───────────────────────────────────────────────────
 
@@ -4937,6 +5041,19 @@ class ChatWindow(QMainWindow):
             count = self._chat_layout.count()
             self._chat_layout.insertWidget(count - 1, self._live_agent_bubble)
             QTimer.singleShot(30, self._scroll_to_bottom)
+
+    def insert_rich_content(self, content: str) -> None:
+        """Insert a _RichBubble with pre-rendered math/chart/mermaid into the chat.
+
+        Called (on the main thread via Signal) when the agent uses the RenderRich tool.
+        """
+        try:
+            bubble = _RichBubble(content)
+            count = self._chat_layout.count()
+            self._chat_layout.insertWidget(count - 1, bubble)
+            QTimer.singleShot(200, self._scroll_to_bottom)
+        except Exception as exc:
+            logger.error(f"insert_rich_content error: {exc}", exc_info=True)
 
     def start_agent_animation(self) -> None:
         self._ensure_live_agent_bubble()

@@ -1,8 +1,11 @@
-"""rich_render.py — Math formula, flowchart and chart rendering for the agent chat bubble.
+"""rich_render.py — Pre-render math/chart/mermaid for the agent chat bubble.
 
-Math  : $inline$  /  $$block$$  /  \\(inline\\)  /  \\[block\\]  → KaTeX
-Charts: ```chart JSON``` → matplotlib (offline, base64 PNG)
-Mermaid flowcharts: ```mermaid ... ``` → Mermaid.js
+All math and chart rendering is fully offline (no CDN required):
+  Math  : $inline$  /  $$block$$ → matplotlib mathtext → base64 PNG embedded as <img>
+  Charts: ```chart JSON```       → matplotlib            → base64 PNG embedded as <img>
+  Mermaid:```mermaid ...```      → Mermaid.js CDN (optional; falls back to code block)
+
+Detection helpers (has_rich_content, preprocess_math) are kept for legacy use.
 """
 
 from __future__ import annotations
@@ -46,6 +49,91 @@ def has_rich_content(text: str) -> bool:
         or _DOLLAR_MATH_RE.search(preprocessed)
         or _BRACKET_MATH_RE.search(preprocessed)
     )
+
+
+# ── Math rendering (matplotlib mathtext, fully offline) ──────────────────────
+
+def render_math_png(formula: str, display: bool = False) -> str:
+    """Render a LaTeX formula via matplotlib mathtext → base64 PNG data URI.
+
+    Args:
+        formula: Raw LaTeX (without surrounding $ delimiters).
+        display: True for block/display-mode (larger), False for inline.
+
+    Returns:
+        A ``data:image/png;base64,...`` string for embedding as <img src=...>.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    dpi = 120
+    fontsize = 17 if display else 13
+
+    # Build a tiny figure just large enough to hold the formula.
+    # We use a generous initial size, then let bbox_inches='tight' crop it.
+    fig_w = max(1.5, min(12, len(formula) * (0.10 if display else 0.085)))
+    fig_h = 0.9 if display else 0.55
+
+    fig = plt.figure(figsize=(fig_w, fig_h), dpi=dpi)
+    fig.patch.set_alpha(0.0)
+
+    ax = fig.add_axes([0, 0, 1, 1])
+    ax.set_axis_off()
+    ax.patch.set_alpha(0.0)
+
+    ax.text(
+        0.5, 0.5,
+        f"${formula}$",
+        fontsize=fontsize,
+        color="#dde8f8",
+        ha="center",
+        va="center",
+        transform=ax.transAxes,
+    )
+
+    buf = BytesIO()
+    try:
+        fig.savefig(buf, format="png", bbox_inches="tight",
+                    transparent=True, dpi=dpi)
+    finally:
+        plt.close(fig)
+
+    buf.seek(0)
+    return "data:image/png;base64," + base64.b64encode(buf.read()).decode()
+
+
+def _prerender_math_in_text(text: str) -> str:
+    """Replace all $$...$$  and $...$  occurrences with pre-rendered <img> tags.
+
+    Must be called AFTER preprocess_math() so delimiters are normalised.
+    Processes $$ first (to avoid the inner $ matching the inline pattern).
+    """
+
+    # ── Display math: $$...$$  ───────────────────────────────────────────────
+    def _replace_display(m: re.Match) -> str:
+        formula = m.group(1).strip()
+        try:
+            uri = render_math_png(formula, display=True)
+            return f'\n<div class="math-display"><img src="{uri}" class="math-img" alt="{_html.escape(formula)}"/></div>\n'
+        except Exception:
+            return m.group(0)  # keep raw on failure
+
+    text = re.sub(r'\$\$([\s\S]+?)\$\$', _replace_display, text)
+
+    # ── Inline math: $...$  ──────────────────────────────────────────────────
+    def _replace_inline(m: re.Match) -> str:
+        formula = m.group(1).strip()
+        if not formula:
+            return m.group(0)
+        try:
+            uri = render_math_png(formula, display=False)
+            return f'<img src="{uri}" class="math-img math-inline" alt="{_html.escape(formula)}"/>'
+        except Exception:
+            return m.group(0)
+
+    text = re.sub(r'\$(?!\s)([^$\n]+?)(?<!\s)\$', _replace_inline, text)
+    return text
 
 
 # ── Chart rendering (matplotlib, fully offline) ──────────────────────────────
@@ -189,27 +277,26 @@ def _render_chart_block(json_src: str) -> str:
         )
 
 
-# ── Markdown → HTML (pre-process special blocks) ─────────────────────────────
+# ── Mermaid block → HTML div ──────────────────────────────────────────────────
+
+def _render_mermaid_block(mermaid_src: str) -> str:
+    """Wrap mermaid source in a <div class="mermaid"> for Mermaid.js to pick up."""
+    escaped = _html.escape(mermaid_src.strip())
+    return f'<div class="mermaid">{escaped}</div>'
+
+
+# ── Markdown → HTML (fully self-contained, no KaTeX CDN needed) ──────────────
 
 def _md_to_html(text: str) -> str:
-    """Convert markdown to HTML; normalise math delimiters and render chart blocks."""
-    # 1. Normalise math delimiters (\[..\], \(..\), bare [..] → $$ / $)
-    text = preprocess_math(text)
-    # 2. Replace ```chart blocks with rendered <img>
-    text = _CHART_BLOCK_RE.sub(lambda m: _render_chart_block(m.group(1)), text)
-    # 3. Standard markdown conversion
+    """Convert markdown to HTML. Math has already been replaced with <img> tags."""
     import markdown
-    md = markdown.Markdown(extensions=["fenced_code", "tables", "nl2br"])
+    # Only fenced_code and tables — no nl2br (it breaks inline HTML tags)
+    md = markdown.Markdown(extensions=["fenced_code", "tables"])
     return md.convert(text)
 
 
-# ── HTML page builder ─────────────────────────────────────────────────────────
+# ── HTML page template (no KaTeX — math pre-rendered as PNG) ─────────────────
 
-# Mermaid + KaTeX are loaded from CDN.
-# The page is loaded via setHtml(..., baseUrl=QUrl("https://cdn.jsdelivr.net/"))
-# so Qt WebEngine treats the page as remote content and allows CDN script loading.
-
-_KATEX_CDN  = "https://cdn.jsdelivr.net/npm/katex@0.16.11/dist"
 _MERMAID_CDN = "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"
 
 _HTML_TEMPLATE = """\
@@ -217,19 +304,6 @@ _HTML_TEMPLATE = """\
 <html>
 <head>
 <meta charset="utf-8">
-<link rel="stylesheet" href="{katex_css}">
-<script defer src="{katex_js}"></script>
-<script defer src="{auto_render_js}"
-  onload="renderMathInElement(document.body, {{
-    delimiters: [
-      {{left: '$$', right: '$$', display: true}},
-      {{left: '$',  right: '$',  display: false}},
-      {{left: '\\\\[', right: '\\\\]', display: true}},
-      {{left: '\\\\(', right: '\\\\)', display: false}}
-    ],
-    throwOnError: false
-  }});">
-</script>
 <script src="{mermaid_js}"></script>
 <script>
   document.addEventListener('DOMContentLoaded', function() {{
@@ -288,8 +362,19 @@ _HTML_TEMPLATE = """\
   li {{ margin: 3px 0; }}
   hr {{ border: none; border-top: 1px solid rgba(60,90,180,0.4); margin: 10px 0; }}
   img {{ max-width: 100%; }}
-  .katex-display {{ margin: 12px 0; overflow-x: auto; }}
-  .katex {{ font-size: 1.05em; }}
+  /* Pre-rendered math images */
+  .math-display {{
+    text-align: center; margin: 12px 0; overflow-x: auto;
+  }}
+  .math-img {{
+    vertical-align: middle; max-width: 100%;
+    /* Keep transparent PNG background on dark theme */
+    filter: brightness(1.0);
+  }}
+  .math-inline {{
+    display: inline; vertical-align: middle;
+    margin: 0 2px;
+  }}
   .chart-wrap {{ text-align: center; margin: 10px 0; }}
   .chart-wrap img {{ max-width: 100%; border-radius: 8px; }}
   .err {{
@@ -309,12 +394,28 @@ _HTML_TEMPLATE = """\
 
 
 def build_rich_html(markdown_text: str) -> str:
-    """Return a full HTML page with KaTeX math + Mermaid diagrams + chart images."""
-    body_html = _md_to_html(markdown_text)
+    """Return a fully self-contained HTML page.
+
+    Math is pre-rendered to PNG offline (no KaTeX CDN needed).
+    Charts are pre-rendered to PNG offline.
+    Mermaid diagrams use CDN (optional; graceful fallback if offline).
+    """
+    # 1. Normalise math delimiters (\[..\] etc → $$ / $)
+    text = preprocess_math(markdown_text)
+
+    # 2. Replace ```chart blocks with rendered <img>
+    text = _CHART_BLOCK_RE.sub(lambda m: _render_chart_block(m.group(1)), text)
+
+    # 3. Replace ```mermaid blocks with <div class="mermaid">
+    text = _MERMAID_BLOCK_RE.sub(lambda m: _render_mermaid_block(m.group(1)), text)
+
+    # 4. Pre-render all $$...$$ and $...$ to PNG <img> tags (fully offline)
+    text = _prerender_math_in_text(text)
+
+    # 5. Convert remaining markdown to HTML (math already replaced, no nl2br)
+    body_html = _md_to_html(text)
+
     return _HTML_TEMPLATE.format(
-        katex_css=f"{_KATEX_CDN}/katex.min.css",
-        katex_js=f"{_KATEX_CDN}/katex.min.js",
-        auto_render_js=f"{_KATEX_CDN}/contrib/auto-render.min.js",
         mermaid_js=_MERMAID_CDN,
         body=body_html,
     )

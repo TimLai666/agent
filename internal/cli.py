@@ -1,5 +1,6 @@
 from typing import Literal, Callable, Optional
 import io
+import re
 import threading
 
 from internal.logger import logger
@@ -33,6 +34,10 @@ _confirm_lock = threading.Lock()
 _gui_question_handler: Optional[Callable[[str, list[str], bool], str]] = None
 _question_lock = threading.Lock()
 
+# Global render handler for GUI mode (RenderRich tool)
+_gui_render_handler: Optional[Callable[[str], None]] = None
+_render_lock = threading.Lock()
+
 
 def set_gui_confirm_handler(handler: Optional[Callable[[str, str], bool]]) -> None:
     """
@@ -46,6 +51,52 @@ def set_gui_confirm_handler(handler: Optional[Callable[[str, str], bool]]) -> No
     with _confirm_lock:
         _gui_confirm_handler = handler
         logger.info(f"GUI confirm handler {'set' if handler else 'cleared'}")
+
+
+def set_gui_render_handler(handler: Optional[Callable[[str], None]]) -> None:
+    """Set the GUI render handler for the RenderRich tool.
+
+    Args:
+        handler: A function that takes (content: str) and renders it in the GUI.
+                 Set to None to use CLI mode (plain-text print).
+    """
+    global _gui_render_handler
+    with _render_lock:
+        _gui_render_handler = handler
+        logger.info(f"GUI render handler {'set' if handler else 'cleared'}")
+
+
+def render_rich(content: str) -> str:
+    """Render rich content (math/charts/mermaid).
+
+    In GUI mode, calls the registered render handler which displays a rich bubble.
+    In CLI mode, strips math delimiters and chart/mermaid blocks, then prints plain text.
+
+    Returns a confirmation string for the agent.
+    """
+    with _render_lock:
+        handler = _gui_render_handler
+
+    if handler is not None:
+        try:
+            handler(content)
+            logger.info("render_rich: GUI handler called successfully")
+        except Exception as exc:
+            logger.warning("render_rich: GUI handler error: %s", exc)
+        return "(Rich content rendered in GUI)"
+
+    # CLI fallback: strip special syntax and print readable text
+    plain = content
+    # Remove $$ display math delimiters (keep the formula)
+    plain = re.sub(r'\$\$([\s\S]+?)\$\$', lambda m: f"\n[math: {m.group(1).strip()}]\n", plain)
+    # Remove $ inline math delimiters (keep the formula)
+    plain = re.sub(r'\$([^$\n]+?)\$', lambda m: m.group(1), plain)
+    # Replace chart blocks
+    plain = re.sub(r'```chart[\s\S]*?```', '[chart]', plain, flags=re.IGNORECASE)
+    # Replace mermaid blocks
+    plain = re.sub(r'```mermaid[\s\S]*?```', '[diagram]', plain, flags=re.IGNORECASE)
+    print(plain)
+    return "(Rich content displayed as plain text in CLI)"
 
 
 def set_gui_question_handler(handler: Optional[Callable[[str, list[str], bool], str]]) -> None:
