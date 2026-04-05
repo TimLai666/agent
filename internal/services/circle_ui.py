@@ -4351,8 +4351,9 @@ class _MemoryViewerDialog(QDialog):
 class ChatWindow(QMainWindow):
     """Chat-style interface — full conversation history, same features as circle mode."""
 
-    switch_to_circle = Signal()   # emitted when user clicks "切換圓圈"
-    typing = Signal()             # API compat with MainWindow
+    switch_to_circle = Signal()            # emitted when user clicks "切換圓圈"
+    switch_to_circle_collapsed = Signal()  # emitted when user closes chat (X) — collapse to edge ball
+    typing = Signal()                      # API compat with MainWindow
     collapse_state_changed = Signal(bool)  # API compat (always emits False)
 
     # Thread-safe dialog signals (same pattern as MainWindow)
@@ -4373,7 +4374,7 @@ class ChatWindow(QMainWindow):
     def __init__(self):
         super().__init__(None)
         self.setWindowTitle("AI Assistant — Chat")
-        self.resize(680, 860)
+        self.resize(860, 560)
         self.setWindowFlags(Qt.WindowType.Window)
         self.setStyleSheet("QMainWindow { background: rgb(12,14,24); }")
 
@@ -4846,7 +4847,7 @@ class ChatWindow(QMainWindow):
                 self._ensure_live_agent_bubble()
                 if self._live_agent_bubble:
                     self._live_agent_bubble.set_stream_content(text)
-                    QTimer.singleShot(0, self._scroll_to_bottom)
+                    QTimer.singleShot(30, self._scroll_to_bottom)
 
     def _ensure_live_user_bubble(self, user_msg: str) -> None:
         """Create or update the live user bubble at the bottom of the chat."""
@@ -4867,7 +4868,7 @@ class ChatWindow(QMainWindow):
             self._live_agent_bubble = _AgentBubble()
             count = self._chat_layout.count()
             self._chat_layout.insertWidget(count - 1, self._live_agent_bubble)
-            QTimer.singleShot(0, self._scroll_to_bottom)
+            QTimer.singleShot(30, self._scroll_to_bottom)
 
     def start_agent_animation(self) -> None:
         self._ensure_live_agent_bubble()
@@ -4908,6 +4909,8 @@ class ChatWindow(QMainWindow):
             self._live_agent_bubble = None
             self._live_user_text = ""
             self._live_agent_text = ""
+            # Scroll after layout settles from final content render
+            QTimer.singleShot(120, self._scroll_to_bottom)
 
     def set_compact_indicator(self, active: bool) -> None:
         if active:
@@ -5074,6 +5077,8 @@ class ChatWindow(QMainWindow):
     def _scroll_to_bottom(self) -> None:
         sb = self._scroll.verticalScrollBar()
         sb.setValue(sb.maximum())
+        # Second pass: layout may still be settling; fire again after one more cycle
+        QTimer.singleShot(80, lambda: sb.setValue(sb.maximum()))
 
     # ── Bypass mode ──────────────────────────────���────────────────────────
 
@@ -5355,6 +5360,11 @@ class ChatWindow(QMainWindow):
         self.question_requested.emit(question, options, multi, rc)
         rc.done.wait(timeout=300)
         return rc.result
+
+    def closeEvent(self, event) -> None:
+        """Closing the chat window collapses to the edge ball instead of quitting."""
+        event.ignore()
+        self.switch_to_circle_collapsed.emit()
 
 
 class ConfigWebViewWindow(QMainWindow):

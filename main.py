@@ -542,6 +542,7 @@ class GUIAgentApp(QObject):
         self.chat_window.set_bypass_callback(self._on_bypass_changed)
         self.chat_window.set_voice_callback(self._on_voice_event)
         self.chat_window.switch_to_circle.connect(self._switch_to_circle)
+        self.chat_window.switch_to_circle_collapsed.connect(self._switch_to_circle_collapsed)
         try:
             self.chat_window.typing.connect(self._reset_idle_timer)
         except Exception:
@@ -640,6 +641,14 @@ class GUIAgentApp(QObject):
             self.main_window.update_speech_bubble(
                 f"You: {self._last_user_input}\n\n{self._waiting_status}"
             )
+
+    def _switch_to_circle_collapsed(self) -> None:
+        """Switch from chat mode to circle mode, then immediately collapse to the edge ball."""
+        self._switch_to_circle()
+        try:
+            self.main_window.collapse_to_edge()
+        except Exception:
+            pass
 
     # ── Voice mode handlers ───────────────────────────────────────────────
 
