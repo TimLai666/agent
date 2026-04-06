@@ -71,7 +71,7 @@ uv run main.py --gui
 ```python
 import asyncio
 
-from agent import Agent, OpenAICompatibleModel
+from sdk import Agent, OpenAICompatibleModel
 
 
 async def main() -> None:
@@ -140,7 +140,7 @@ Agent(memory_system=MemoryManager(memory_dir="/shared/memory"))
 ```python
 import asyncio
 
-from agent import Agent
+from sdk import Agent
 
 
 async def main() -> None:

@@ -44,31 +44,6 @@ COMMAND_PREFIX = "/"
 GUI_CHUNK_EMIT_SIZE = 2000
 
 
-def _RUNTIME_MODE_PROMPT(mode: str) -> str:
-    """Return a system-prompt snippet that tells the model its runtime context."""
-    _MODE_DESCRIPTIONS = {
-        "gui": (
-            "GUI (graphical interface with a chat window). "
-            "You have access to the **`RenderRich`** tool to render math, charts, and Mermaid diagrams. "
-            "Use it whenever you want to display formulas or visualisations — do NOT write raw `$...$` in plain text replies."
-        ),
-        "cli": (
-            "CLI (terminal / command-line interface). "
-            "There is no graphical rendering. "
-            "The **`RenderRich`** tool is available but will only print plain text. "
-            "For math, write formulas inline in plain text (e.g. 'E = mc^2'). "
-            "For charts or diagrams, describe them textually or use ASCII art."
-        ),
-        "sdk": (
-            "SDK (programmatic API access, no user terminal). "
-            "There is no graphical rendering. "
-            "The **`RenderRich`** tool is available but will only emit plain text. "
-            "Return math and structured data as plain text or JSON, not as LaTeX or chart specs."
-        ),
-    }
-    desc = _MODE_DESCRIPTIONS.get(mode, mode)
-    return f"## Runtime Environment\n\nYou are running in **{mode.upper()}** mode: {desc}"
-
 
 class AgentRuntime(QThread):
     ready = Signal()
@@ -149,7 +124,7 @@ class AgentRuntime(QThread):
                 self.http_client,
                 skill_root_dirs=self.skill_root_dirs,
                 memory_manager=MemoryManager(),
-                system_prompt_append=_RUNTIME_MODE_PROMPT("gui"),
+                runtime_mode="gui",
             )
 
             def _reload_skills_from_webui() -> dict[str, object]:

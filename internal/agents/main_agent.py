@@ -253,6 +253,31 @@ class MainAgent:
             variables=variables,
         )
 
+    # Runtime mode prompt snippets injected into the system prompt at create() time.
+    _RUNTIME_MODE_PROMPTS: dict[str, str] = {
+        "gui": (
+            "## Runtime Environment\n\n"
+            "You are running in **GUI** mode (graphical chat window). "
+            "Use the **`RenderRich`** tool to display math formulas, charts, and Mermaid diagrams — "
+            "it renders a live rich bubble with KaTeX math (selectable text) and SVG diagrams. "
+            "**Do NOT write raw `$...$` in your plain-text reply** — use `RenderRich` instead."
+        ),
+        "cli": (
+            "## Runtime Environment\n\n"
+            "You are running in **CLI** mode (terminal / command-line). "
+            "There is no graphical rendering. "
+            "The **`RenderRich`** tool is available but will only print plain text. "
+            "Write math inline as plain text (e.g. 'E = mc^2'); describe charts textually."
+        ),
+        "sdk": (
+            "## Runtime Environment\n\n"
+            "You are running in **SDK** mode (programmatic API — no user terminal or GUI). "
+            "There is no graphical rendering. "
+            "Do not call **`RenderRich`** unless the caller has registered a render handler. "
+            "Return math and structured data as plain text or in the format the caller requested."
+        ),
+    }
+
     @classmethod
     def create(
         cls,
@@ -275,7 +300,14 @@ class MainAgent:
         memory_manager: MemoryManager | None = None,
         disabled_skills: list[str] | None = None,
         extra_mcp_servers: list[Any] | None = None,
+        runtime_mode: str = "sdk",
     ) -> "MainAgent":
+        # Prepend runtime-mode context to any caller-supplied system_prompt_append
+        mode_prompt = cls._RUNTIME_MODE_PROMPTS.get(runtime_mode, cls._RUNTIME_MODE_PROMPTS["sdk"])
+        if system_prompt_append:
+            system_prompt_append = mode_prompt + "\n\n" + system_prompt_append
+        else:
+            system_prompt_append = mode_prompt
         # Load skills first
         if skills is None:
             try:

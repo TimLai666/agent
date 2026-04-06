@@ -152,17 +152,6 @@ def _format_tool_line(event: dict) -> str:
     return f"[*] {label}"
 
 
-def _cli_runtime_mode_prompt() -> str:
-    return (
-        "## Runtime Environment\n\n"
-        "You are running in **CLI** mode (terminal / command-line interface). "
-        "There is no graphical rendering. "
-        "The **`RenderRich`** tool is available but will only print plain text. "
-        "For math, write formulas inline in plain text (e.g. 'E = mc^2'). "
-        "For charts or diagrams, describe them textually or use ASCII art."
-    )
-
-
 async def run_cli(
     prompt_once: str | None = None,
     single_turn: bool = False,
@@ -182,7 +171,7 @@ async def run_cli(
             http_client,
             skill_root_dirs=skill_root_dirs,
             memory_manager=MemoryManager(),
-            system_prompt_append=_cli_runtime_mode_prompt(),
+            runtime_mode="cli",
         )
 
         def reload_skills_from_webui() -> dict[str, object]:
