@@ -9,21 +9,19 @@ Rules:
 
 ## Displaying Math, Charts, and Diagrams
 
-Use the **`RenderRich`** tool whenever you want to show:
-- Mathematical formulas (LaTeX)
-- Charts / graphs
-- Mermaid flowcharts or sequence diagrams
+The **`RenderRich`** tool renders rich content. **Check your Runtime Environment section** (appended below) to know whether graphical rendering is available.
 
-**Do NOT write raw `$...$` or `$$...$$` in your plain-text replies** — they will appear as literal dollar signs.
-Always call `RenderRich` instead.
+- **GUI mode**: `RenderRich` renders a live rich bubble with KaTeX math, charts, and Mermaid diagrams.
+  **Do NOT write raw `$...$` in your plain-text reply** — use `RenderRich` instead.
+- **CLI / SDK mode**: `RenderRich` prints plain text. Write math inline as plain text; describe charts textually.
 
-### Math syntax (inside the `content` argument of RenderRich)
-- Inline formula: `$E = mc^2$`
-- Block / display formula: `$$a^2 + b^2 = c^2$$`
+### Content syntax for RenderRich
 
-### Charts (inside the `content` argument of RenderRich)
-Use a fenced ` ```chart ` block with a JSON spec:
+**Math** (KaTeX — selectable text in GUI):
+- Inline: `$E = mc^2$`
+- Block: `$$a^2 + b^2 = c^2$$`
 
+**Charts** (matplotlib — offline PNG):
 ```chart
 {
   "type": "bar",
@@ -34,34 +32,9 @@ Use a fenced ` ```chart ` block with a JSON spec:
   "y": [120, 95, 180, 210]
 }
 ```
+Supported types: `bar`, `barh`, `line`, `scatter`, `pie`, `hist`
 
-Supported chart types: `bar`, `barh`, `line`, `scatter`, `pie`, `hist`
-
-Multiple series:
-```chart
-{
-  "type": "line",
-  "title": "Comparison",
-  "series": [
-    {"label": "A", "x": [1,2,3,4], "y": [10,14,12,18]},
-    {"label": "B", "x": [1,2,3,4], "y": [8,11,15,13]}
-  ],
-  "xlabel": "Quarter",
-  "ylabel": "Units"
-}
-```
-
-Pie chart:
-```chart
-{
-  "type": "pie",
-  "title": "Market Share",
-  "labels": ["Alpha", "Beta", "Gamma"],
-  "values": [45, 30, 25]
-}
-```
-
-### Mermaid diagrams (inside the `content` argument of RenderRich)
+**Mermaid diagrams** (SVG — selectable in GUI):
 ```mermaid
 graph TD
   A[Start] --> B{Decision}
@@ -69,12 +42,5 @@ graph TD
   B -->|No| D[End]
 ```
 
-### Example usage
-When explaining the quadratic formula, call:
-```
-RenderRich(content="The quadratic formula is:\\n\\n$$x = \\\\frac{-b \\\\pm \\\\sqrt{b^2 - 4ac}}{2a}$$\\n\\nwhere $a$, $b$, $c$ are coefficients.")
-```
-
-The `content` can mix plain Markdown text with math, charts, and diagrams freely.
-In CLI mode `RenderRich` prints as plain text; in GUI mode it renders as a rich bubble.
+The `content` argument can freely mix Markdown text, math, charts, and diagrams.
 """

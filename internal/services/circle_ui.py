@@ -4124,9 +4124,6 @@ class _AgentBubble(QFrame):
         self._full_bubble.hide()
         self._stack.addWidget(self._full_bubble)
 
-        # ── Phase 2b: WebView for rich content (math / charts) ────────
-        self._rich_view: QWebEngineView | None = None  # created lazily
-
         # ── Tool log (compact, shown above text, hidden until events arrive) ──
         self._tool_lines: list[str] = []
         self._tool_log_browser = AutoWrapTextBrowser()
@@ -4263,77 +4260,12 @@ class _AgentBubble(QFrame):
     # ── Final render phase ─────────────────────────────────────────────
 
     def set_content(self, text: str) -> None:
-        """Full render — switch to SiriResponseBubble or rich WebView. Called once on completion."""
+        """Full render — switch to SiriResponseBubble. Called once on completion."""
         self._finalized = True
         self._stream_browser.hide()
-
-        try:
-            from internal.services.rich_render import has_rich_content, build_rich_html
-            if HAS_WEBENGINE and has_rich_content(text):
-                self._render_rich(text)
-                return
-        except Exception:
-            pass  # fall through to normal rendering
-
         self._full_bubble.set_content(text)
         self._full_bubble.show()
         QTimer.singleShot(80, self._resize_full)
-
-    def _render_rich(self, text: str) -> None:
-        """Render math/chart/mermaid content via QWebEngineView."""
-        from PySide6.QtCore import QUrl
-        from internal.services.rich_render import build_rich_html
-
-        if self._rich_view is None:
-            from PySide6.QtWebEngineCore import QWebEngineSettings
-            self._rich_view = QWebEngineView()
-            self._rich_view.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-            self._rich_view.setMinimumHeight(80)
-            self._rich_view.page().setBackgroundColor(QColor(0, 0, 0, 0))
-            self._rich_view.setStyleSheet("background: transparent;")
-            # Allow loading CDN resources from what Qt treats as a local page
-            self._rich_view.settings().setAttribute(
-                QWebEngineSettings.WebAttribute.LocalContentCanAccessRemoteUrls, True
-            )
-            self._stack.addWidget(self._rich_view)
-
-        html_content = build_rich_html(text)
-        # Pass CDN origin as base URL so the page may fetch CDN scripts
-        self._rich_view.setHtml(html_content, QUrl("https://cdn.jsdelivr.net/"))
-        self._rich_view.show()
-
-        # Wait for page + KaTeX/Mermaid JS to finish rendering before measuring height.
-        # loadFinished fires when HTML is parsed; JS rendering takes an extra moment.
-        def _on_load_finished(ok):
-            # Give KaTeX / Mermaid 800 ms to render, then measure
-            QTimer.singleShot(800, self._resize_rich)
-
-        try:
-            self._rich_view.loadFinished.disconnect()
-        except Exception:
-            pass
-        self._rich_view.loadFinished.connect(_on_load_finished)
-
-    def _resize_rich(self) -> None:
-        """Adjust WebView height to fit rendered content."""
-        if self._rich_view is None:
-            return
-
-        def _apply_height(h):
-            try:
-                target = max(80, int(h) + 24)
-                self._rich_view.setMinimumHeight(target)
-                self._rich_view.setMaximumHeight(target)
-            except Exception:
-                pass
-
-        try:
-            self._rich_view.page().runJavaScript(
-                "Math.max(document.body.scrollHeight, document.documentElement.scrollHeight)",
-                _apply_height,
-            )
-        except Exception:
-            pass
 
     def _resize_full(self) -> None:
         try:

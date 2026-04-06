@@ -44,6 +44,32 @@ COMMAND_PREFIX = "/"
 GUI_CHUNK_EMIT_SIZE = 2000
 
 
+def _RUNTIME_MODE_PROMPT(mode: str) -> str:
+    """Return a system-prompt snippet that tells the model its runtime context."""
+    _MODE_DESCRIPTIONS = {
+        "gui": (
+            "GUI (graphical interface with a chat window). "
+            "You have access to the **`RenderRich`** tool to render math, charts, and Mermaid diagrams. "
+            "Use it whenever you want to display formulas or visualisations — do NOT write raw `$...$` in plain text replies."
+        ),
+        "cli": (
+            "CLI (terminal / command-line interface). "
+            "There is no graphical rendering. "
+            "The **`RenderRich`** tool is available but will only print plain text. "
+            "For math, write formulas inline in plain text (e.g. 'E = mc^2'). "
+            "For charts or diagrams, describe them textually or use ASCII art."
+        ),
+        "sdk": (
+            "SDK (programmatic API access, no user terminal). "
+            "There is no graphical rendering. "
+            "The **`RenderRich`** tool is available but will only emit plain text. "
+            "Return math and structured data as plain text or JSON, not as LaTeX or chart specs."
+        ),
+    }
+    desc = _MODE_DESCRIPTIONS.get(mode, mode)
+    return f"## Runtime Environment\n\nYou are running in **{mode.upper()}** mode: {desc}"
+
+
 class AgentRuntime(QThread):
     ready = Signal()
     chunk_ready = Signal(int, str)
@@ -123,6 +149,7 @@ class AgentRuntime(QThread):
                 self.http_client,
                 skill_root_dirs=self.skill_root_dirs,
                 memory_manager=MemoryManager(),
+                system_prompt_append=_RUNTIME_MODE_PROMPT("gui"),
             )
 
             def _reload_skills_from_webui() -> dict[str, object]:
@@ -603,6 +630,8 @@ class GUIAgentApp(QObject):
         self.chat_window.show()
         self.chat_window.raise_()
         self.chat_window.activateWindow()
+        # Chat mode: no idle-collapse; stop the timer so it can't fire while hidden.
+        self._idle_timer.stop()
 
     def _switch_to_circle(self) -> None:
         """Switch from chat mode to circle mode."""
@@ -645,6 +674,9 @@ class GUIAgentApp(QObject):
             self.main_window.update_speech_bubble(
                 f"You: {self._last_user_input}\n\n{self._waiting_status}"
             )
+        # Circle mode: re-enable idle-collapse timer (guard inside _reset_idle_timer
+        # already skips when running or collapsed, so this is always safe).
+        self._reset_idle_timer()
 
     def _switch_to_circle_collapsed(self) -> None:
         """Switch from chat mode to circle mode, then immediately collapse to the edge ball."""
