@@ -300,14 +300,16 @@ class MainAgent:
         memory_manager: MemoryManager | None = None,
         disabled_skills: list[str] | None = None,
         extra_mcp_servers: list[Any] | None = None,
-        runtime_mode: str = "sdk",
+        runtime_mode: str | None = None,
     ) -> "MainAgent":
-        # Prepend runtime-mode context to any caller-supplied system_prompt_append
-        mode_prompt = cls._RUNTIME_MODE_PROMPTS.get(runtime_mode, cls._RUNTIME_MODE_PROMPTS["sdk"])
-        if system_prompt_append:
-            system_prompt_append = mode_prompt + "\n\n" + system_prompt_append
-        else:
-            system_prompt_append = mode_prompt
+        # Prepend runtime-mode context only when explicitly specified
+        if runtime_mode is not None:
+            mode_prompt = cls._RUNTIME_MODE_PROMPTS.get(runtime_mode, "")
+            if mode_prompt:
+                if system_prompt_append:
+                    system_prompt_append = mode_prompt + "\n\n" + system_prompt_append
+                else:
+                    system_prompt_append = mode_prompt
         # Load skills first
         if skills is None:
             try:
