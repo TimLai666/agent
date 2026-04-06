@@ -1,6 +1,6 @@
 ---
 name: cinematic-ui
-description: Design and build websites with film-inspired visual systems, director-driven art direction, storyboard-first layout planning, and cinematic motion. Use when the user asks for a cinematic site, movie-style landing page, director-inspired UI, film-noir, sci-fi, romance, thriller, action, animation, or a movie-like website aesthetic, including requests phrased in Chinese. Do not use for generic web design unless the user explicitly wants a film or director reference.
+description: 'Design and build film-inspired visual work — websites AND PowerPoint presentations (.pptx). Use when the user asks for a cinematic site, movie-style landing page, director-inspired UI, film-noir, sci-fi, romance, thriller, action, animation, or a movie-like web aesthetic. Also use when the user asks to redesign a presentation, deck, or 簡報 with a cinematic or editorial visual system, or uses /cinematic-ui before any slide-related request. Trigger on cinematic site, cinematic deck, 電影感簡報, 重新設計簡報, editorial presentation, Wes Anderson slides, noir pptx, or any combination of film language with slides / deck / pptx / 簡報 / 投影片. Do not use for generic web design or generic slide design unless the user explicitly wants a film or director reference.'
 ---
 
 # Cinematic Layout
@@ -41,12 +41,16 @@ Do not confuse the film with the workflow artifact. The film is research input a
 - Mirror the user's language in every question and deliverable.
 - Keep questions short and ask only one blocking question at a time.
 - Run this start questionnaire on every invocation:
-  1. Ask how to start:
+  1. **Ask for output medium** (if not already clear from context):
+  - `Website / Web app` — HTML/CSS/JS output
+  - `Presentation / PPTX` — PowerPoint .pptx output via PptxGenJS
+  - If the user's request clearly implies one medium (e.g. "簡報", "投影片", "slides", "pptx"), record it and skip this question.
+  2. Ask how to start:
   - `Screenshot`: reverse-engineer a visual reference from an image or URL.
   - `Step-by-step`: let the user choose genre, director, and film.
   - `Surprise me`: pick a fresh combination that differs from previous work when project history is available.
-  2. Ask whether the design should include image placeholders.
-  3. Ask for the site's niche and page list before moving into architecture.
+  3. Ask whether the design should include image placeholders. *(Web only — skip for PPTX.)*
+  4. Ask for the site's niche and page list **or** the deck's topic and slide count before moving into architecture.
 - If the environment supports structured questionnaires or forms, use them.
 - If the environment does not support structured questionnaires, ask the same items in plain language.
 - If the user pre-answers some items in the initial request, confirm or record those answers and only ask for the missing items.
@@ -88,9 +92,11 @@ Use four strict phases. Do not skip forward. Keep each phase's output in its own
 
 Inside Phases 2 and 3, follow this order without skipping:
 1. Define the site-wide cinematic grammar.
-2. Write one independent scene thesis for each major page role.
-3. Lock one irreplaceable signature composition per page.
-4. Derive the shared system only after the page compositions are already clear.
+2. Write one independent scene thesis for each major page role (web) or each slide group (pptx).
+3. Lock one irreplaceable signature composition per page / per slide.
+4. Derive the shared system only after the page/slide compositions are already clear.
+
+**If output medium is `pptx`**: after Phase 2, switch to `## PPTX Mode` instead of the standard Phase 3/4.
 
 Read [references/output-templates.md](references/output-templates.md) before creating those files.
 
@@ -225,6 +231,71 @@ Keep `SKILL.md` lean. Load only the references needed for the current phase.
 - Verify the output against the storyboard and compiled spec.
 - Use the Screening Room and Post-Screening Adjustments rules from [references/implementation-guardrails.md](references/implementation-guardrails.md) when refining the result after the first build.
 
+
+## PPTX Mode
+
+When output medium is `pptx`, this section replaces Phase 3 (Compiled Spec) and Phase 4 (Build and Verify). Phases 1 and 2 (decisions + storyboard) run identically — the director and film still drive everything.
+
+### What changes in PPTX mode
+
+| Web mode | PPTX mode |
+|---|---|
+| HTML/CSS/JS output | PptxGenJS `.pptx` output |
+| Page sections | Slides |
+| CSS entrances / animations | Static composition tension (no animation in PPTX) |
+| Navigation bar | Sidebar strip or persistent rule line |
+| Responsive layout | Fixed 16:9 canvas (10" × 5.625") |
+| `compiled-spec.md` | `slide-spec.md` (see below) |
+
+### Phase 3-PPTX: Slide Spec
+
+Read **[references/pptx-cinematic.md](references/pptx-cinematic.md)** before writing any code.
+
+Also read from the standard library only what is needed:
+- `references/data/color-grades.md` — for palette extraction
+- `references/data/typography-cinema.md` — for type direction
+- `references/data/compositions.md` — for slide composition family
+
+Write `slide-spec.md` containing:
+- Director brief (same as web: visual thesis, signature techniques, color tokens, type direction)
+- Composition family selected (from pptx-cinematic.md Composition Families table)
+- Slide sequence with rhythm annotation (spectacle / information / derivation / verdict / summary)
+- Per-slide: composition description, which content goes left vs right, accent color usage, verdict box placement
+
+### Phase 4-PPTX: Build and Verify
+
+1. Read `slide-spec.md` and `references/pptx-cinematic.md` only.
+2. Install dependency: `npm install -g pptxgenjs`
+3. Build with PptxGenJS. Follow all rules in `references/pptx-cinematic.md`:
+   - All tables as shape+text loops — zero `addTable()` calls
+   - `makeShadow()` factory for every shadow
+   - 4-token color palette enforced
+   - Verdict boxes on every decision slide
+   - Footer with slide counter on all non-cover slides
+4. Run QA pipeline:
+   ```bash
+   node deck.js
+   python scripts/office/soffice.py --headless --convert-to pdf output.pptx
+   rm -f slide-*.jpg && pdftoppm -jpeg -r 150 output.pdf slide
+   ```
+5. Visually inspect every slide image. Look for:
+   - Text overflow at slide edges
+   - Table rendering issues (double-text, misaligned columns)
+   - Sidebar rotated text bleed (acceptable in LibreOffice preview; verify spec is correct)
+   - Slides missing structure or accent layer
+6. Fix all issues, re-render, re-inspect. Do not declare done until one full clean pass.
+7. Copy final file to `/mnt/user-data/outputs/` and call `present_files`.
+
+### PPTX Anti-Patterns
+
+- Never use `addTable()` — always shape+text loops.
+- Never overlay a shape on top of `addTable()` to fake a header — this causes double-render.
+- Never reuse a shadow options object across calls — use a `makeShadow()` factory.
+- Never use more than 4 colors in the deck.
+- Never put formula content in a sans-serif font — Courier New is required.
+- Never produce a slide that is only text with no structural or accent layer.
+- Never default to "Title + Bullets" layout — every slide needs a composition reason.
+
 ## Hard Rules
 
 - Preserve the chosen director and film language through color, type, spacing, composition, and motion.
@@ -268,3 +339,4 @@ Keep `SKILL.md` lean. Load only the references needed for the current phase.
 - Use [references/premium-calibration.md](references/premium-calibration.md) to decide what makes the page feel expensive without breaking the cinematic concept.
 - Use [references/reference-protocol.md](references/reference-protocol.md) when the user provides visual references but wants to avoid template copying.
 - Use [references/anti-garbage.md](references/anti-garbage.md) as the final filter before coding.
+- Use [references/pptx-cinematic.md](references/pptx-cinematic.md) for all PPTX-mode builds — PptxGenJS rules, composition families, table patterns, and QA checklist.
