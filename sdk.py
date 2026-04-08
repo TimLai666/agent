@@ -184,6 +184,7 @@ class Agent:
             memory_manager=self._memory_manager,
             disabled_skills=self.disabled_skills,
             extra_mcp_servers=self.extra_mcp_servers,
+            runtime_mode="sdk",
         )
 
         if self.start_mcp_servers:

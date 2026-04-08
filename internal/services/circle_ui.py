@@ -268,18 +268,23 @@ def _make_stop_icon(size: int = 28) -> QIcon:
     return QIcon(px)
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QCompleter,
     QDialog,
     QDialogButtonBox,
     QFrame,
+    QGraphicsDropShadowEffect,
     QHBoxLayout,
     QLabel,
     QFileDialog,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMainWindow,
     QPushButton,
     QScrollArea,
     QSizePolicy,
+    QSplitter,
     QTextBrowser,
     QTextEdit,
     QToolButton,
@@ -2552,7 +2557,9 @@ class MainWindow(QMainWindow):
     # 信号：请求显示确认对话框
     confirm_requested = Signal(str, str, object)  # message, default_choice, result_container
     # 信号：请求显示问题选单对话框
-    question_requested = Signal(str, list, object)  # question, options, result_container
+    question_requested = Signal(str, list, bool, object)  # question, options, multi, result_container
+    # 切換到聊天模式
+    switch_to_chat = Signal()
     collapse_state_changed = Signal(bool)
     # 當使用者正在編輯輸入框（鍵入文字）時發出
     typing = Signal()
@@ -2771,6 +2778,14 @@ class MainWindow(QMainWindow):
         self._bypass_btn.clicked.connect(self._on_bypass_toggled)
         toolbar_layout.addWidget(self._bypass_btn)
 
+        # Chat mode switch button
+        self._chat_switch_btn = QPushButton("💬")
+        self._chat_switch_btn.setToolTip("切換到聊天介面")
+        self._chat_switch_btn.setFixedSize(22, 20)
+        self._chat_switch_btn.setStyleSheet(_tbtn)
+        self._chat_switch_btn.clicked.connect(self.switch_to_chat.emit)
+        toolbar_layout.addWidget(self._chat_switch_btn)
+
         card_vbox.addWidget(toolbar_row)
         outer_vbox.addWidget(self._input_card)
 
@@ -2930,12 +2945,12 @@ class MainWindow(QMainWindow):
         logger.info(f"[工作线程] Dialog closed, returning: {result_container.result}")
         return result_container.result
 
-    @Slot(str, list, object)
-    def _handle_question_request(self, question: str, options: list, result_container: object):
+    @Slot(str, list, bool, object)
+    def _handle_question_request(self, question: str, options: list, multi: bool, result_container: object):
         """槽函數：在主線程中處理問題選單請求"""
         try:
             logger.info(f"[主线程] Creating ChoiceDialog for: {question[:50]}...")
-            dialog = ChoiceDialog(question, options, parent=self)
+            dialog = ChoiceDialog(question, options, multi=multi, parent=self)
             result_container.result = dialog.get_result()
             logger.info(f"[主线程] ChoiceDialog result: {result_container.result!r}")
         except Exception as e:
@@ -2943,7 +2958,7 @@ class MainWindow(QMainWindow):
         finally:
             result_container.done.set()
 
-    def show_question_dialog(self, question: str, options: list[str]) -> str:
+    def show_question_dialog(self, question: str, options: list[str], multi: bool = False) -> str:
         """顯示問題選單對話框（線程安全）— 使用 threading.Event 等待，相容 asyncio 線程"""
         import threading
         logger.info(f"[工作线程] show_question_dialog called: {question[:50]}...")
@@ -2954,7 +2969,7 @@ class MainWindow(QMainWindow):
                 self.done = threading.Event()
 
         result_container = ResultContainer()
-        self.question_requested.emit(question, options, result_container)
+        self.question_requested.emit(question, options, multi, result_container)
         result_container.done.wait(timeout=300)
         logger.info(f"[工作线程] ChoiceDialog closed, returning: {result_container.result!r}")
         return result_container.result
@@ -3609,6 +3624,1866 @@ class MainWindow(QMainWindow):
             logger.error(f"Bubble geometry update error: {e}")
 
 
+# ─────────────────────���───────────────────────────────────────────────────────
+# ChatWindow — chat-style interface that can switch with the circle mode
+# ─────────────────────────────────────────────────────────────────────────────
+
+class _InlineQuestionBubble(QFrame):
+    """Left-aligned inline question bubble shown in chat mode for AskUserQuestion.
+
+    Supports single-choice (default) and multi-choice modes.
+    Both modes include a custom free-text input option.
+    The bubble remains in the chat log after the user answers.
+    """
+    answered = Signal(str)  # emitted (in main thread) when user picks/submits
+
+    _BTN_STYLE = (
+        "QPushButton {"
+        "background: rgba(50,80,160,180); color: #c0d8ff;"
+        "border: 1px solid rgba(100,150,255,100); border-radius: 8px;"
+        "padding: 6px 14px; font-size: 12px; text-align: left;"
+        "}"
+        "QPushButton:hover { background: rgba(70,110,200,210); color: #d8eaff; }"
+        "QPushButton:disabled {"
+        "background: rgba(30,40,60,100); color: rgba(120,140,180,100);"
+        "border-color: rgba(60,80,120,50);"
+        "}"
+    )
+    _CONFIRM_BTN_STYLE = (
+        "QPushButton {"
+        "background: rgba(0,100,200,200); color: #fff;"
+        "border: none; border-radius: 8px;"
+        "padding: 6px 18px; font-size: 12px;"
+        "}"
+        "QPushButton:hover { background: rgba(0,120,240,220); }"
+        "QPushButton:disabled { background: rgba(30,40,60,100); color: rgba(120,140,180,100); }"
+    )
+    _CB_STYLE = (
+        "QCheckBox { color: #c0d8ff; font-size: 12px; background: transparent; spacing: 6px; }"
+        "QCheckBox::indicator { width: 16px; height: 16px; border-radius: 4px;"
+        "border: 1px solid rgba(100,150,255,100); background: rgba(30,50,100,180); }"
+        "QCheckBox::indicator:checked { background: rgba(0,120,220,200);"
+        "border-color: rgba(80,160,255,180); }"
+        "QCheckBox:disabled { color: rgba(120,140,180,100); }"
+    )
+
+    def __init__(self, question: str, options: list[str], multi: bool = False, parent=None):
+        super().__init__(parent)
+        self._done = False
+        self._multi = multi
+        self._option_btns: list[QPushButton] = []
+        self._checkboxes: list[QCheckBox] = []
+        self._custom_input: QLineEdit | None = None
+        self._custom_cb: QCheckBox | None = None
+        self._confirm_btn: QPushButton | None = None
+
+        outer = QHBoxLayout(self)
+        outer.setContentsMargins(8, 4, 60, 4)
+        outer.setSpacing(0)
+
+        card = QWidget()
+        card.setObjectName("IQCard")
+        card.setStyleSheet(
+            "#IQCard {"
+            "background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+            "stop:0 rgba(24,40,80,235),stop:1 rgba(18,32,68,228));"
+            "border: 1px solid rgba(56,190,220,70);"
+            "border-radius: 14px;"
+            "}"
+        )
+        card_vbox = QVBoxLayout(card)
+        card_vbox.setContentsMargins(14, 12, 14, 12)
+        card_vbox.setSpacing(8)
+
+        # Question label
+        header_text = "☑️ 請選擇（可多選）" if multi else "❓ 請選擇"
+        q_lbl = QLabel()
+        q_lbl.setTextFormat(Qt.TextFormat.RichText)
+        q_lbl.setWordWrap(True)
+        q_lbl.setText(
+            f'<span style="color:#38c8d8;font-size:11px;">{header_text}</span><br>'
+            + html.escape(question).replace("\n", "<br>")
+        )
+        q_lbl.setStyleSheet(
+            "QLabel { color: #d8e8ff; font-size: 13px; background: transparent; }"
+        )
+        card_vbox.addWidget(q_lbl)
+
+        if multi:
+            # ── Multi-select: checkboxes ───────────────────────────────
+            for opt in options:
+                cb = QCheckBox(opt)
+                cb.setStyleSheet(self._CB_STYLE)
+                card_vbox.addWidget(cb)
+                self._checkboxes.append(cb)
+
+            # Custom input checkbox + line edit
+            self._custom_cb = QCheckBox("✏️ 自訂輸入…")
+            self._custom_cb.setStyleSheet(self._CB_STYLE)
+            card_vbox.addWidget(self._custom_cb)
+
+            self._custom_input = QLineEdit()
+            self._custom_input.setPlaceholderText("請輸入自訂答案…")
+            self._custom_input.setStyleSheet(
+                "QLineEdit { background: rgba(30,45,90,200); color: #d8e8ff;"
+                "border: 1px solid rgba(100,150,255,80); border-radius: 6px;"
+                "padding: 4px 8px; font-size: 12px; }"
+                "QLineEdit:focus { border-color: rgba(80,160,255,180); }"
+                "QLineEdit:disabled { background: rgba(20,28,55,100); color: rgba(120,140,180,100); }"
+            )
+            self._custom_input.setEnabled(False)
+            self._custom_input.hide()
+            card_vbox.addWidget(self._custom_input)
+            self._custom_cb.toggled.connect(self._on_custom_cb_toggled)
+
+            # Confirm button
+            self._confirm_btn = QPushButton("✓ 確認")
+            self._confirm_btn.setStyleSheet(self._CONFIRM_BTN_STYLE)
+            self._confirm_btn.clicked.connect(self._submit_multi)
+            card_vbox.addWidget(self._confirm_btn, 0, Qt.AlignmentFlag.AlignRight)
+
+        else:
+            # ── Single-select: buttons ─────────────────────────────────
+            for opt in options:
+                btn = QPushButton(opt)
+                btn.setStyleSheet(self._BTN_STYLE)
+                btn.clicked.connect(lambda _checked, o=opt: self._select(o))
+                card_vbox.addWidget(btn)
+                self._option_btns.append(btn)
+
+            # Custom input button
+            custom_btn = QPushButton("✏️ 自訂輸入…")
+            custom_btn.setStyleSheet(self._BTN_STYLE)
+            custom_btn.clicked.connect(self._show_custom_input)
+            card_vbox.addWidget(custom_btn)
+            self._option_btns.append(custom_btn)
+
+            # Hidden custom input row
+            self._custom_input = QLineEdit()
+            self._custom_input.setPlaceholderText("請輸入自訂答案…")
+            self._custom_input.setStyleSheet(
+                "QLineEdit { background: rgba(30,45,90,200); color: #d8e8ff;"
+                "border: 1px solid rgba(100,150,255,80); border-radius: 6px;"
+                "padding: 4px 8px; font-size: 12px; }"
+                "QLineEdit:focus { border-color: rgba(80,160,255,180); }"
+            )
+            self._custom_input.returnPressed.connect(self._submit_custom)
+            self._custom_input.hide()
+
+            self._confirm_btn = QPushButton("✓ 確認")
+            self._confirm_btn.setStyleSheet(self._CONFIRM_BTN_STYLE)
+            self._confirm_btn.clicked.connect(self._submit_custom)
+            self._confirm_btn.hide()
+
+            card_vbox.addWidget(self._custom_input)
+            card_vbox.addWidget(self._confirm_btn, 0, Qt.AlignmentFlag.AlignRight)
+
+        # Answer label (hidden until answered)
+        self._answer_lbl = QLabel()
+        self._answer_lbl.setStyleSheet(
+            "QLabel { color: #7ddfb0; font-size: 12px; background: transparent; }"
+        )
+        self._answer_lbl.hide()
+        card_vbox.addWidget(self._answer_lbl)
+
+        outer.addWidget(card, 1)
+
+    # ── single-select helpers ──────────────────────────────────────────────
+
+    def _show_custom_input(self) -> None:
+        if self._done:
+            return
+        for btn in self._option_btns:
+            btn.hide()
+        self._custom_input.show()
+        self._confirm_btn.show()
+        self._custom_input.setFocus()
+
+    def _submit_custom(self) -> None:
+        text = (self._custom_input.text() or "").strip()
+        if not text:
+            return
+        self._finish(text)
+
+    def _select(self, option: str) -> None:
+        if self._done:
+            return
+        for btn in self._option_btns:
+            btn.setEnabled(False)
+            if btn.text() == option:
+                btn.setStyleSheet(
+                    btn.styleSheet()
+                    + "QPushButton:disabled {"
+                    "background: rgba(40,90,60,160); color: #90e8b8;"
+                    "border-color: rgba(80,200,120,120);"
+                    "}"
+                )
+        self._finish(option)
+
+    # ── multi-select helpers ───────────────────────────────────────────────
+
+    def _on_custom_cb_toggled(self, checked: bool) -> None:
+        self._custom_input.setEnabled(checked)
+        if checked:
+            self._custom_input.show()
+            self._custom_input.setFocus()
+        else:
+            self._custom_input.hide()
+
+    def _submit_multi(self) -> None:
+        if self._done:
+            return
+        selected = [cb.text() for cb in self._checkboxes if cb.isChecked()]
+        if self._custom_cb and self._custom_cb.isChecked():
+            custom_text = (self._custom_input.text() or "").strip() if self._custom_input else ""
+            if custom_text:
+                selected.append(custom_text)
+        if not selected:
+            return
+        # Disable all controls
+        for cb in self._checkboxes:
+            cb.setEnabled(False)
+        if self._custom_cb:
+            self._custom_cb.setEnabled(False)
+        if self._custom_input:
+            self._custom_input.setEnabled(False)
+        if self._confirm_btn:
+            self._confirm_btn.setEnabled(False)
+        self._finish(", ".join(selected))
+
+    # ── common ────────────────────────────────────────────────────────────
+
+    def _finish(self, result: str) -> None:
+        self._done = True
+        self._answer_lbl.setText(f"✓ 已選擇：{result}")
+        self._answer_lbl.show()
+        self.answered.emit(result)
+
+
+class _InlineConfirmBubble(QFrame):
+    """Left-aligned inline permission-confirm bubble for chat mode."""
+
+    answered = Signal(bool)  # True = allow, False = deny
+
+    _DANGER_KEYWORDS = {"delete", "remove", "rm ", "drop", "kill", "truncate", "format", "wipe"}
+
+    def __init__(self, message: str, default_choice: str = '', parent=None):
+        super().__init__(parent)
+        self._done = False
+
+        is_danger = any(kw in message.lower() for kw in self._DANGER_KEYWORDS)
+        icon_char = "⚠️" if is_danger else "🔧"
+
+        outer = QHBoxLayout(self)
+        outer.setContentsMargins(8, 4, 60, 4)
+        outer.setSpacing(0)
+
+        card = QWidget()
+        card.setObjectName("ICCard")
+        _border = "rgba(220,100,80,80)" if is_danger else "rgba(150,100,240,70)"
+        card.setStyleSheet(
+            "#ICCard {"
+            "background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+            "stop:0 rgba(28,22,52,235),stop:1 rgba(22,18,44,228));"
+            f"border: 1px solid {_border};"
+            "border-radius: 14px;"
+            "}"
+        )
+        vbox = QVBoxLayout(card)
+        vbox.setContentsMargins(14, 12, 14, 12)
+        vbox.setSpacing(8)
+
+        # Header
+        hdr = QHBoxLayout()
+        hdr.setSpacing(8)
+        icon_lbl = QLabel(icon_char)
+        icon_lbl.setStyleSheet("font-size: 18px; background: transparent;")
+        icon_lbl.setFixedWidth(28)
+        title_lbl = QLabel("工具執行請求")
+        title_lbl.setStyleSheet(
+            "QLabel { color: #d0b0ff; font-size: 13px; font-weight: bold; background: transparent; }"
+        )
+        hdr.addWidget(icon_lbl)
+        hdr.addWidget(title_lbl, 1)
+        vbox.addLayout(hdr)
+
+        # Message body
+        body_lbl = QLabel()
+        body_lbl.setTextFormat(Qt.TextFormat.PlainText)
+        body_lbl.setWordWrap(True)
+        body_lbl.setText(message)
+        body_lbl.setStyleSheet(
+            "QLabel { color: #b0b8d8; font-size: 12px; background: transparent; }"
+        )
+        vbox.addWidget(body_lbl)
+
+        # Buttons
+        _allow_style = (
+            "QPushButton {"
+            "background: rgba(0,100,200,180); color: #c8dfff;"
+            "border: 1px solid rgba(80,160,255,120); border-radius: 8px;"
+            "padding: 7px 14px; font-size: 12px; text-align: left;"
+            "}"
+            "QPushButton:hover { background: rgba(0,120,240,210); }"
+            "QPushButton:disabled {"
+            "background: rgba(20,30,50,100); color: rgba(80,120,180,100);"
+            "border-color: rgba(40,60,120,50);"
+            "}"
+        )
+        _deny_style = (
+            "QPushButton {"
+            "background: rgba(60,60,80,180); color: #c0c0cc;"
+            "border: 1px solid rgba(255,255,255,40); border-radius: 8px;"
+            "padding: 7px 14px; font-size: 12px; text-align: left;"
+            "}"
+            "QPushButton:hover { background: rgba(80,80,100,210); }"
+            "QPushButton:disabled {"
+            "background: rgba(30,30,40,80); color: rgba(100,100,120,80);"
+            "border-color: rgba(60,60,80,40);"
+            "}"
+        )
+
+        self._allow_btn = QPushButton("  ✅ 允許執行  (Y)")
+        self._allow_btn.setStyleSheet(_allow_style)
+        self._allow_btn.clicked.connect(lambda: self._select(True))
+        vbox.addWidget(self._allow_btn)
+
+        self._deny_btn = QPushButton("  ❌ 拒絕  (N)")
+        self._deny_btn.setStyleSheet(_deny_style)
+        self._deny_btn.clicked.connect(lambda: self._select(False))
+        vbox.addWidget(self._deny_btn)
+
+        # Result label (hidden until answered)
+        self._result_lbl = QLabel()
+        self._result_lbl.setStyleSheet(
+            "QLabel { font-size: 12px; background: transparent; }"
+        )
+        self._result_lbl.hide()
+        vbox.addWidget(self._result_lbl)
+
+        if default_choice.upper() == 'Y':
+            self._allow_btn.setFocus()
+        else:
+            self._deny_btn.setFocus()
+
+        outer.addWidget(card, 1)
+
+    def _select(self, allow: bool) -> None:
+        if self._done:
+            return
+        self._done = True
+        self._allow_btn.setEnabled(False)
+        self._deny_btn.setEnabled(False)
+        if allow:
+            self._result_lbl.setStyleSheet(
+                "QLabel { color: #7ddfb0; font-size: 12px; background: transparent; }"
+            )
+            self._result_lbl.setText("✓ 已允許")
+        else:
+            self._result_lbl.setStyleSheet(
+                "QLabel { color: #df7d7d; font-size: 12px; background: transparent; }"
+            )
+            self._result_lbl.setText("✗ 已拒絕")
+        self._result_lbl.show()
+        self.answered.emit(allow)
+
+
+class _UserBubble(QFrame):
+    """Right-aligned user message bubble."""
+    def __init__(self, text: str, image_count: int = 0, parent=None):
+        super().__init__(parent)
+        row = QHBoxLayout(self)
+        row.setContentsMargins(60, 2, 8, 2)
+        row.setSpacing(0)
+        row.addStretch(1)
+
+        # Vertical column so image chip can appear above text
+        col_w = QWidget()
+        col_w.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        col = QVBoxLayout(col_w)
+        col.setContentsMargins(0, 0, 0, 0)
+        col.setSpacing(4)
+
+        if image_count > 0:
+            chip_text = f"🖼 {image_count} 張圖片" if image_count > 1 else "🖼 圖片"
+            img_chip = QLabel(chip_text)
+            img_chip.setStyleSheet(
+                "QLabel { background: rgba(30,60,120,180); color: #a0c8ff; "
+                "border: 1px solid rgba(80,130,220,100); border-radius: 8px; "
+                "padding: 2px 8px; font-size: 11px; }"
+            )
+            img_chip.setAlignment(Qt.AlignmentFlag.AlignRight)
+            col.addWidget(img_chip, 0, Qt.AlignmentFlag.AlignRight)
+
+        self._text_label = QLabel()
+        self._text_label.setTextFormat(Qt.TextFormat.RichText)
+        self._text_label.setWordWrap(True)
+        self._text_label.setText(html.escape(text).replace("\n", "<br>"))
+        self._text_label.setStyleSheet(
+            "QLabel {"
+            "background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+            "stop:0 rgba(55,100,200,230),stop:1 rgba(38,78,168,225));"
+            "color: #e8f4ff;"
+            "border-radius: 14px;"
+            "padding: 8px 12px;"
+            "font-size: 13px;"
+            "}"
+        )
+        self._text_label.setMaximumWidth(460)
+        col.addWidget(self._text_label, 0, Qt.AlignmentFlag.AlignRight)
+        col_w.setMaximumWidth(480)
+        row.addWidget(col_w)
+
+    def update_text(self, text: str) -> None:
+        self._text_label.setText(html.escape(text).replace("\n", "<br>"))
+
+
+class _AgentBubble(QFrame):
+    """Left-aligned agent message bubble.
+
+    Two-phase rendering:
+    - Streaming: lightweight QTextBrowser updated in-place (fast, cheap).
+    - Final:     SiriResponseBubble for full markdown / code-block / collapsible rendering.
+    """
+
+    _CARD_STYLE = (
+        "#ABCard {"
+        "background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+        "stop:0 rgba(28,34,62,218),stop:1 rgba(20,26,52,212));"
+        "border: 1px solid rgba(60,110,230,42);"
+        "border-radius: 14px;"
+        "}"
+    )
+    _STREAM_BROWSER_STYLE = (
+        "QTextBrowser {"
+        "background: transparent; border: none;"
+        "color: #dde8f8; font-size: 13px; font-family: 'Segoe UI', 'Microsoft JhengHei', sans-serif;"
+        "}"
+        "QTextBrowser::viewport { background: transparent; }"
+    )
+    # Regex to strip ALL special XML blocks that appear in _display_text during streaming
+    _TAG_RE = re.compile(
+        r'<(tool-execution|plan-suggestion|discussion)>.*?</\1>',
+        re.DOTALL,
+    )
+    # Also strip incomplete opening tags that haven't closed yet
+    _OPEN_TAG_RE = re.compile(
+        r'<(tool-execution|plan-suggestion|discussion)>.*$',
+        re.DOTALL,
+    )
+
+    # Tool icon map (subset)
+    _TOOL_ICONS: dict[str, str] = {
+        "bash": "⬛", "read": "📄", "write": "✏️", "edit": "✏️",
+        "glob": "🔍", "grep": "🔍", "web": "🌐", "fetch": "🌐",
+        "search": "🔍", "skill": "⚡", "agent": "🤖", "subagent": "🤖",
+        "todo": "📋",
+    }
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        outer = QHBoxLayout(self)
+        outer.setContentsMargins(8, 2, 20, 2)
+        outer.setSpacing(0)
+
+        # Wrapper card
+        self._card = QWidget()
+        self._card.setObjectName("ABCard")
+        self._card.setStyleSheet(self._CARD_STYLE)
+        self._card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self._card.setMinimumWidth(180)
+
+        self._stack = QVBoxLayout(self._card)
+        self._stack.setContentsMargins(12, 10, 12, 10)
+        self._stack.setSpacing(0)
+
+        # ── Phase 1: streaming browser ─────────────────────────────────
+        self._stream_browser = AutoWrapTextBrowser()
+        self._stream_browser.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
+        self._stream_browser.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._stream_browser.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._stream_browser.setFrameShape(QFrame.Shape.NoFrame)
+        self._stream_browser.setOpenExternalLinks(True)
+        self._stream_browser.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
+        self._stream_browser.setStyleSheet(self._STREAM_BROWSER_STYLE)
+        self._stream_browser.setViewportMargins(0, 0, 0, 0)
+        self._stream_browser.setContentsMargins(0, 0, 0, 0)
+        self._stream_browser.document().setDocumentMargin(0)
+        self._stream_browser.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self._stack.addWidget(self._stream_browser)
+
+        # ── Phase 2a: full SiriResponseBubble (hidden until finalized) ──
+        self._full_bubble = SiriResponseBubble()
+        self._full_bubble.setStyleSheet(
+            "SiriResponseBubble { background: transparent; border: none; }"
+            "QTextBrowser { background: transparent; border: none; }"
+            "QTextBrowser::viewport { padding: 0px; margin: 0px; border: none; }"
+        )
+        self._full_bubble.scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._full_bubble.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self._full_bubble.hide()
+        self._stack.addWidget(self._full_bubble)
+
+        # ── Tool log (compact, shown above text, hidden until events arrive) ──
+        self._tool_lines: list[str] = []
+        self._tool_log_browser = AutoWrapTextBrowser()
+        self._tool_log_browser.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._tool_log_browser.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._tool_log_browser.setFrameShape(QFrame.Shape.NoFrame)
+        self._tool_log_browser.setStyleSheet(
+            "QTextBrowser { background: transparent; border: none; }"
+            "QTextBrowser::viewport { background: transparent; }"
+        )
+        self._tool_log_browser.setFixedHeight(0)
+        self._tool_log_browser.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self._stack.insertWidget(0, self._tool_log_browser)  # above stream/full
+
+        self._finalized = False
+        self._tool_log_dirty = False
+        outer.addWidget(self._card, 1)
+
+        # ── Glow animation (streaming indicator) ──────────────────────────
+        self._glow = QGraphicsDropShadowEffect()
+        self._glow.setBlurRadius(0)
+        self._glow.setColor(QColor(80, 140, 255, 0))
+        self._glow.setOffset(0, 0)
+        self._card.setGraphicsEffect(self._glow)
+        self._pulse_timer = QTimer(self)
+        self._pulse_timer.setInterval(700)
+        self._pulse_timer.timeout.connect(self._pulse_card)
+        self._pulse_phase = 0
+
+        # Resize stream browser once laid out
+        try:
+            self._stream_browser.document().contentsChanged.connect(self._resize_stream)
+        except Exception:
+            pass
+
+    # ── Tool events ────────────────────────────────────────────────────
+
+    def _tool_icon(self, label: str) -> str:
+        low = label.lower()
+        for key, icon in self._TOOL_ICONS.items():
+            if key in low:
+                return icon
+        return "🔧"
+
+    def add_tool_event(self, line: str) -> None:
+        """Append a tool event line and refresh the compact log."""
+        if not line:
+            return
+        self._tool_lines.append(line)
+        if len(self._tool_lines) > 20:
+            self._tool_lines = self._tool_lines[-20:]
+        self._tool_log_dirty = True
+        QTimer.singleShot(0, self._refresh_tool_log)
+
+    def _refresh_tool_log(self) -> None:
+        if not self._tool_log_dirty:
+            return
+        self._tool_log_dirty = False
+        esc = html.escape
+        rows: list[str] = []
+        in_flight: list[str] = []
+        for line in self._tool_lines:
+            if line.startswith("[>] "):
+                label = line[4:]
+                in_flight.append(label)
+                icon = self._tool_icon(label)
+                rows.append(
+                    f'<div style="color:#6eaee8;font-size:10px;font-family:monospace;'
+                    f'white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">'
+                    f'▶ {icon} {esc(label)}</div>'
+                )
+            elif line.startswith("[OK]"):
+                if in_flight:
+                    label = in_flight.pop(0)
+                    icon = self._tool_icon(label)
+                    # Replace the last ▶ with ✓ — just append a completion row
+                    rows.append(
+                        f'<div style="color:#4db87a;font-size:10px;font-family:monospace;">'
+                        f'✓ {icon} {esc(label)}</div>'
+                    )
+                    # Remove the matching ▶ row (last added for this label)
+                    for i in reversed(range(len(rows) - 1)):
+                        if esc(label) in rows[i] and "▶" in rows[i]:
+                            rows.pop(i)
+                            break
+            elif line.startswith("[ERR] "):
+                err = line[6:]
+                label = in_flight.pop(0) if in_flight else err
+                rows.append(
+                    f'<div style="color:#f06b6b;font-size:10px;font-family:monospace;">'
+                    f'✗ {esc(label)}</div>'
+                )
+            elif line.startswith("[SKILL] "):
+                label = line[8:]
+                rows.append(
+                    f'<div style="color:#c792ea;font-size:10px;">'
+                    f'⚡ {esc(label)}</div>'
+                )
+        if not rows:
+            self._tool_log_browser.setFixedHeight(0)
+            return
+        inner = "\n".join(rows[-10:])  # show last 10 completed events
+        self._tool_log_browser.setHtml(
+            f'<div style="margin:0;padding:0;background:transparent;">{inner}</div>'
+        )
+        line_count = min(len(rows), 10)
+        self._tool_log_browser.setFixedHeight(min(14 * line_count + 6, 140))
+
+    # ── Streaming phase ────────────────────────────────────────────────
+
+    def set_stream_content(self, text: str) -> None:
+        """Fast in-place update during streaming — does NOT re-create widgets."""
+        if self._finalized:
+            return
+        # Strip complete <tool-execution> / <plan-suggestion> / <discussion> blocks
+        clean = self._TAG_RE.sub('', text)
+        # Also strip any incomplete block (opening tag with no closing tag yet)
+        clean = self._OPEN_TAG_RE.sub('', clean).strip()
+        self._stream_browser.setMarkdown(_prepare_markdown(clean) if clean else '')
+        QTimer.singleShot(0, self._resize_stream)
+
+    def _resize_stream(self) -> None:
+        try:
+            self._stream_browser.update_wrap_width(
+                max(1, self._card.width() - 24)
+            )
+            doc_h = self._stream_browser.document().documentLayout().documentSize().height()
+            h = max(32, int(doc_h) + 4)
+            self._stream_browser.setMinimumHeight(h)
+            self._stream_browser.setMaximumHeight(h)
+        except Exception:
+            pass
+
+    # ── Final render phase ─────────────────────────────────────────────
+
+    def set_content(self, text: str) -> None:
+        """Full render — switch to SiriResponseBubble. Called once on completion."""
+        self._finalized = True
+        self._stream_browser.hide()
+        self._full_bubble.set_content(text)
+        self._full_bubble.show()
+        QTimer.singleShot(80, self._resize_full)
+
+    def _resize_full(self) -> None:
+        try:
+            QApplication.processEvents()
+            h = self._full_bubble.content_height()
+            target = max(54, h + 28)
+            self._full_bubble.setMinimumHeight(target)
+            self._full_bubble.setMaximumHeight(target)
+        except Exception:
+            pass
+
+    def _pulse_card(self) -> None:
+        self._pulse_phase = 1 - self._pulse_phase
+        try:
+            if self._pulse_phase:
+                self._glow.setBlurRadius(16)
+                self._glow.setColor(QColor(80, 140, 255, 130))
+            else:
+                self._glow.setBlurRadius(6)
+                self._glow.setColor(QColor(80, 140, 255, 55))
+        except Exception:
+            pass
+
+    def start_animation(self) -> None:
+        self._pulse_phase = 0
+        self._pulse_timer.start()
+        self._full_bubble.start_animation()
+
+    def stop_animation(self) -> None:
+        self._pulse_timer.stop()
+        try:
+            self._glow.setBlurRadius(0)
+            self._glow.setColor(QColor(80, 140, 255, 0))
+        except Exception:
+            pass
+        self._full_bubble.stop_animation()
+
+
+class _RichBubble(QFrame):
+    """Agent bubble that displays pre-rendered rich content (math/charts/diagrams).
+
+    Used exclusively by the RenderRich tool.  All math and charts are rendered
+    offline by rich_render.build_rich_html(); only Mermaid uses CDN (optional).
+    """
+
+    _CARD_STYLE = (
+        "#RBCard {"
+        "background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+        "stop:0 rgba(22,32,64,220),stop:1 rgba(16,24,52,215));"
+        "border: 1px solid rgba(80,150,240,60);"
+        "border-radius: 14px;"
+        "}"
+    )
+
+    def __init__(self, content: str, parent=None):
+        super().__init__(parent)
+        outer = QHBoxLayout(self)
+        outer.setContentsMargins(8, 2, 20, 2)
+        outer.setSpacing(0)
+
+        self._card = QWidget()
+        self._card.setObjectName("RBCard")
+        self._card.setStyleSheet(self._CARD_STYLE)
+        self._card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self._card.setMinimumWidth(180)
+
+        self._stack = QVBoxLayout(self._card)
+        self._stack.setContentsMargins(12, 10, 12, 10)
+        self._stack.setSpacing(0)
+
+        outer.addWidget(self._card, 1)
+
+        self._view = None
+
+        if HAS_WEBENGINE:
+            self._setup_webview(content)
+        else:
+            # Fallback: render plain text
+            from PySide6.QtWidgets import QLabel
+            lbl = QLabel(content)
+            lbl.setWordWrap(True)
+            lbl.setStyleSheet("QLabel { color: #dde8f8; font-size: 13px; }")
+            self._stack.addWidget(lbl)
+
+    def _setup_webview(self, content: str) -> None:
+        from PySide6.QtCore import QUrl
+        from PySide6.QtWebEngineCore import QWebEngineSettings
+        from internal.services.rich_render import build_rich_html
+
+        view = QWebEngineView()
+        view.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        view.setMinimumHeight(60)
+        view.page().setBackgroundColor(QColor(0, 0, 0, 0))
+        view.setStyleSheet("background: transparent;")
+        view.settings().setAttribute(
+            QWebEngineSettings.WebAttribute.LocalContentCanAccessRemoteUrls, True
+        )
+        self._stack.addWidget(view)
+        self._view = view
+
+        try:
+            html_content = build_rich_html(content)
+        except Exception as exc:
+            logger.warning("_RichBubble build_rich_html error: %s", exc)
+            html_content = f"<pre style='color:#dde8f8'>{content}</pre>"
+
+        # CDN base URL so Mermaid.js can load if online
+        view.setHtml(html_content, QUrl("https://cdn.jsdelivr.net/"))
+
+        def _on_load(ok):
+            # Give Mermaid ~600 ms to render, then measure height
+            QTimer.singleShot(600, self._resize_view)
+
+        view.loadFinished.connect(_on_load)
+
+    def _resize_view(self) -> None:
+        if self._view is None:
+            return
+
+        def _apply(h):
+            try:
+                target = max(60, int(h) + 24)
+                self._view.setMinimumHeight(target)
+                self._view.setMaximumHeight(target)
+                # Notify parent scroll area to update
+                p = self.parent()
+                if p is not None:
+                    p.updateGeometry()
+            except Exception:
+                pass
+
+        try:
+            self._view.page().runJavaScript(
+                "Math.max(document.body.scrollHeight, document.documentElement.scrollHeight)",
+                _apply,
+            )
+        except Exception:
+            pass
+
+
+class _MemoryViewerDialog(QDialog):
+    """Simple read-only viewer for a memory .md file."""
+
+    def __init__(self, fname: str, label: str, content: str, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"記憶檔案 — {label}")
+        self.resize(720, 380)
+        self.setStyleSheet(
+            "QDialog { background: rgb(18,20,30); }"
+            "QTextBrowser { background: rgb(22,24,36); border: 1px solid rgba(255,255,255,18); "
+            "border-radius: 8px; color: #d0dff0; font-size: 12px; padding: 6px; }"
+            "QTextBrowser::viewport { background: transparent; }"
+        )
+        v = QVBoxLayout(self)
+        v.setContentsMargins(12, 12, 12, 12)
+        v.setSpacing(8)
+
+        hdr = QLabel(f"<b style='color:#90b0e0'>{html.escape(label)}</b>"
+                     f"<span style='color:#506070;font-size:10px;'> ({html.escape(fname)})</span>")
+        hdr.setTextFormat(Qt.TextFormat.RichText)
+        v.addWidget(hdr)
+
+        browser = QTextBrowser()
+        browser.setOpenExternalLinks(False)
+        if content:
+            try:
+                browser.setMarkdown(content)
+            except Exception:
+                browser.setPlainText(content)
+        else:
+            browser.setPlaceholderText("（此檔案為空）")
+        v.addWidget(browser, 1)
+
+        close_btn = QPushButton("關閉")
+        close_btn.setFixedHeight(28)
+        close_btn.setStyleSheet(
+            "QPushButton { background: rgba(50,65,100,200); color: #90b0e0; "
+            "border: 1px solid rgba(90,130,200,60); border-radius: 8px; font-size: 11px; padding: 0 16px; }"
+            "QPushButton:hover { background: rgba(65,85,130,230); }"
+        )
+        close_btn.clicked.connect(self.accept)
+        v.addWidget(close_btn, 0, Qt.AlignmentFlag.AlignRight)
+
+
+class ChatWindow(QMainWindow):
+    """Chat-style interface — full conversation history, same features as circle mode."""
+
+    switch_to_circle = Signal()            # emitted when user clicks "切換圓圈"
+    switch_to_circle_collapsed = Signal()  # emitted when user closes chat (X) — collapse to edge ball
+    typing = Signal()                      # API compat with MainWindow
+    collapse_state_changed = Signal(bool)  # API compat (always emits False)
+
+    # Thread-safe dialog signals (same pattern as MainWindow)
+    confirm_requested = Signal(str, str, object)
+    question_requested = Signal(str, list, bool, object)  # question, options, multi, result_container
+    render_rich_requested = Signal(str)  # content — insert a _RichBubble into chat
+
+    _CHIP_STYLE = (
+        "QLabel { background: rgba(45,55,80,200); color: #a8d4ff; "
+        "border: 1px solid rgba(90,140,220,100); border-radius: 8px; "
+        "padding: 2px 8px; font-size: 11px; }"
+    )
+    _CHIP_CLOSE_STYLE = (
+        "QPushButton { background: transparent; color: rgba(160,170,200,160); "
+        "border: none; font-size: 9px; padding: 0; } "
+        "QPushButton:hover { color: #ff6b6b; }"
+    )
+
+    def __init__(self):
+        super().__init__(None)
+        self.setWindowTitle("AI Assistant — Chat")
+        self.resize(860, 560)
+        self.setWindowFlags(Qt.WindowType.Window)
+        self.setStyleSheet("QMainWindow { background: rgb(12,14,24); }")
+
+        # ── Internal state ─────────────────���──────────────────────────────
+        self._bypass_mode: bool = False
+        self._bypass_callback = None
+        self._stop_callback = None
+        self._voice_callback = None
+        self._input_callback = None
+        self._is_running: bool = False
+        self._attached_file_path: str = ""
+        self._attached_images: list[bytes] = []
+        self._voice_active: bool = False
+        self.config_webview_window = None
+
+        # Live exchange tracking
+        self._live_user_bubble: _UserBubble | None = None
+        self._live_agent_bubble: _AgentBubble | None = None
+        self._live_user_text: str = ""
+        self._live_agent_text: str = ""
+
+        # Image tracking: count of images attached to the next user message
+        self._last_user_image_count: int = 0
+
+        # Todo panel refs (built in _build_ui)
+        self._todo_panel: QWidget | None = None
+        self._todo_browser: QTextBrowser | None = None
+
+        # Build UI
+        self._build_ui()
+
+        # Thread-safe dialogs
+        self.confirm_requested.connect(self._handle_confirm_request)
+        self.question_requested.connect(self._handle_question_request)
+        self.render_rich_requested.connect(self.insert_rich_content)
+
+    # ── UI construction ───────────────────────────────────────────────────
+
+    def _build_ui(self) -> None:
+        central = QWidget()
+        central.setStyleSheet("background: rgb(12,14,24);")
+        self.setCentralWidget(central)
+        vbox = QVBoxLayout(central)
+        vbox.setContentsMargins(0, 0, 0, 0)
+        vbox.setSpacing(0)
+
+        # Top bar
+        top_bar = self._build_top_bar()
+        vbox.addWidget(top_bar)
+
+        # Separator
+        sep = QWidget()
+        sep.setFixedHeight(1)
+        sep.setStyleSheet(
+            "background: qlineargradient(x1:0,y1:0,x2:1,y2:0,"
+            "stop:0 rgba(60,100,255,50),stop:0.5 rgba(120,70,220,60),stop:1 rgba(30,150,200,40));"
+        )
+        vbox.addWidget(sep)
+
+        # Chat scroll area
+        self._scroll = QScrollArea()
+        self._scroll.setWidgetResizable(True)
+        self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._scroll.setStyleSheet(
+            "QScrollArea { background: rgb(12,14,24); border: none; }"
+            "QScrollBar:vertical { width: 6px; background: transparent; }"
+            "QScrollBar::handle:vertical { background: rgba(80,110,200,80); border-radius: 3px; }"
+            "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; }"
+        )
+        self._chat_container = QWidget()
+        self._chat_container.setStyleSheet("background: transparent;")
+        self._chat_layout = QVBoxLayout(self._chat_container)
+        self._chat_layout.setContentsMargins(12, 16, 12, 16)
+        self._chat_layout.setSpacing(12)
+        self._chat_layout.addStretch(1)   # keeps messages pushed to top
+        self._scroll.setWidget(self._chat_container)
+
+        # Body row: chat area (left) + todo sidebar (right, hidden by default)
+        body_row = QWidget()
+        body_row.setStyleSheet("background: transparent;")
+        body_h = QHBoxLayout(body_row)
+        body_h.setContentsMargins(0, 0, 0, 0)
+        body_h.setSpacing(0)
+        body_h.addWidget(self._scroll, 1)
+        self._todo_panel = self._build_todo_panel()
+        body_h.addWidget(self._todo_panel)
+        vbox.addWidget(body_row, 1)
+
+        # Input area
+        sep2 = QWidget()
+        sep2.setFixedHeight(1)
+        sep2.setStyleSheet("background: rgba(255,255,255,12);")
+        vbox.addWidget(sep2)
+        self._build_input_area(vbox)
+
+    def _build_todo_panel(self) -> QWidget:
+        """Build the right-side sidebar: top = todo, bottom = memory file list."""
+        _PANEL_STYLE = (
+            "background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+            "stop:0 rgba(16,18,40,245),stop:1 rgba(14,16,36,245));"
+            "border-left: 1px solid rgba(80,100,200,30);"
+        )
+        _BROWSER_STYLE = (
+            "QTextBrowser { background: transparent; border: none; "
+            "color: #b8cce4; font-size: 11px; }"
+            "QTextBrowser::viewport { background: transparent; padding: 0; }"
+            "QScrollBar:vertical { width: 4px; background: transparent; }"
+            "QScrollBar::handle:vertical { background: rgba(80,110,200,80); border-radius: 2px; }"
+            "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; }"
+        )
+        _HDR_STYLE = (
+            "QLabel { font-size: 11px; font-weight: bold; "
+            "border: none; background: transparent; padding: 2px 0; }"
+        )
+        _SEP_STYLE = "background: rgba(80,100,200,25);"
+
+        panel = QWidget()
+        panel.setFixedWidth(220)
+        panel.setStyleSheet(_PANEL_STYLE)
+
+        outer = QVBoxLayout(panel)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        splitter = QSplitter(Qt.Orientation.Vertical)
+        splitter.setHandleWidth(4)
+        splitter.setStyleSheet(
+            "QSplitter::handle { background: rgba(255,255,255,20); }"
+        )
+        outer.addWidget(splitter)
+
+        # ── Top pane: Todo ────────────────────────────────────────────────
+        top = QWidget()
+        top.setStyleSheet("background: transparent;")
+        top_v = QVBoxLayout(top)
+        top_v.setContentsMargins(8, 8, 8, 4)
+        top_v.setSpacing(4)
+
+        todo_hdr = QLabel("📋 待辦事項")
+        todo_hdr.setStyleSheet(_HDR_STYLE + "color: #38c8d8;")
+        top_v.addWidget(todo_hdr)
+
+        sep1 = QWidget(); sep1.setFixedHeight(1); sep1.setStyleSheet(_SEP_STYLE)
+        top_v.addWidget(sep1)
+
+        self._todo_browser = QTextBrowser()
+        self._todo_browser.setStyleSheet(_BROWSER_STYLE)
+        self._todo_browser.setOpenExternalLinks(False)
+        self._todo_browser.setReadOnly(True)
+        self._todo_browser.setPlaceholderText("暫無待辦事項")
+        top_v.addWidget(self._todo_browser, 1)
+
+        splitter.addWidget(top)
+
+        # ── Bottom pane: Memory files ─────────────────────────────────────
+        bot = QWidget()
+        bot.setStyleSheet("background: transparent;")
+        bot_v = QVBoxLayout(bot)
+        bot_v.setContentsMargins(8, 4, 8, 8)
+        bot_v.setSpacing(4)
+
+        mem_hdr = QLabel("🧠 記憶檔案")
+        mem_hdr.setStyleSheet(_HDR_STYLE + "color: #b078f0;")
+        bot_v.addWidget(mem_hdr)
+
+        sep2 = QWidget(); sep2.setFixedHeight(1); sep2.setStyleSheet(_SEP_STYLE)
+        bot_v.addWidget(sep2)
+
+        self._mem_list = QListWidget()
+        self._mem_list.setStyleSheet(
+            "QListWidget { background: transparent; border: none; color: #b0c8e8; font-size: 11px; }"
+            "QListWidget::item { padding: 4px 2px; border-radius: 4px; }"
+            "QListWidget::item:hover { background: rgba(80,110,180,60); }"
+            "QListWidget::item:selected { background: rgba(60,90,160,100); }"
+            "QScrollBar:vertical { width: 4px; background: transparent; }"
+            "QScrollBar::handle:vertical { background: rgba(100,120,180,90); border-radius: 2px; }"
+            "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; }"
+        )
+        self._mem_list.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self._mem_list.itemDoubleClicked.connect(self._open_memory_file)
+        self._mem_list.itemClicked.connect(self._open_memory_file)
+        self._populate_memory_list()
+        bot_v.addWidget(self._mem_list, 1)
+
+        splitter.addWidget(bot)
+        splitter.setSizes([240, 160])  # default: todo taller
+
+        return panel
+
+    def _populate_memory_list(self) -> None:
+        """Fill the memory file list widget."""
+        try:
+            from internal.memory import MEMORY_FILES, _FILE_LABELS
+            self._mem_list.clear()
+            for fname in MEMORY_FILES:
+                label = _FILE_LABELS.get(fname, fname)
+                item = QListWidgetItem(f"  {fname}")
+                item.setToolTip(label)
+                item.setData(Qt.ItemDataRole.UserRole, fname)
+                self._mem_list.addItem(item)
+        except Exception as exc:
+            logger.warning(f"Memory list populate failed: {exc}")
+
+    def _open_memory_file(self, item: QListWidgetItem) -> None:
+        """Open a memory file in a viewer dialog."""
+        try:
+            from internal.memory import MemoryManager, _FILE_LABELS
+            fname = item.data(Qt.ItemDataRole.UserRole) or item.text().strip()
+            mm = MemoryManager()
+            content = mm.read_file(fname)
+            label = _FILE_LABELS.get(fname, fname)
+            dlg = _MemoryViewerDialog(fname, label, content, parent=self)
+            dlg.exec()
+            self._mem_list.clearSelection()
+        except Exception as exc:
+            logger.warning(f"Open memory file failed: {exc}")
+
+    def _build_top_bar(self) -> QWidget:
+        bar = QWidget()
+        bar.setFixedHeight(44)
+        bar.setStyleSheet(
+            "background: qlineargradient(x1:0,y1:0,x2:1,y2:0,"
+            "stop:0 rgba(18,22,50,255),stop:0.5 rgba(22,18,44,255),stop:1 rgba(16,20,42,255));"
+        )
+        h = QHBoxLayout(bar)
+        h.setContentsMargins(14, 0, 10, 0)
+        h.setSpacing(8)
+
+        # Glowing dot indicator
+        dot = QLabel("●")
+        dot.setStyleSheet("color: #38c8e0; font-size: 10px;")
+        h.addWidget(dot)
+
+        title = QLabel("AI Assistant")
+        title.setStyleSheet(
+            "color: #c8deff; font-size: 14px; font-weight: bold; letter-spacing: 0.5px;"
+        )
+        h.addWidget(title)
+        h.addStretch(1)
+
+        # Compact indicator
+        self._compact_label = QLabel("✂ 壓縮記憶中…")
+        self._compact_label.setFixedHeight(22)
+        self._compact_label.setStyleSheet(
+            "QLabel { background: rgba(90,60,160,210); color: #ddc8ff; "
+            "border: 1px solid rgba(180,140,255,120); border-radius: 11px; "
+            "font-size: 10px; padding: 0 10px; }"
+        )
+        self._compact_label.hide()
+        self._compact_pulse_timer = QTimer(self)
+        self._compact_pulse_timer.setInterval(500)
+        self._compact_pulse_timer.timeout.connect(self._pulse_compact_label)
+        self._compact_pulse_phase = 0
+        h.addWidget(self._compact_label)
+
+        switch_btn = QPushButton("⭕ 切換圓圈")
+        switch_btn.setFixedHeight(26)
+        switch_btn.setStyleSheet(
+            "QPushButton { background: rgba(36,48,90,210); color: #88c0f0; "
+            "border: 1px solid rgba(70,110,220,80); border-radius: 8px; "
+            "font-size: 11px; padding: 0 12px; }"
+            "QPushButton:hover { background: rgba(50,68,120,235); color: #b8d8ff; "
+            "border: 1px solid rgba(90,140,255,120); }"
+        )
+        switch_btn.clicked.connect(self.switch_to_circle.emit)
+        h.addWidget(switch_btn)
+        return bar
+
+    def _build_input_area(self, parent_layout: QVBoxLayout) -> None:
+        wrapper = QWidget()
+        wrapper.setStyleSheet("background: rgb(14,16,30);")
+        wrapper_vbox = QVBoxLayout(wrapper)
+        wrapper_vbox.setContentsMargins(10, 8, 10, 10)
+        wrapper_vbox.setSpacing(0)
+
+        # Unified card
+        card = QWidget()
+        card.setObjectName("ChatInputCard")
+        card.setStyleSheet(
+            "#ChatInputCard {"
+            "background: rgba(22,26,52,235);"
+            "border: 1px solid rgba(70,110,220,65);"
+            "border-radius: 18px;"
+            "}"
+        )
+        card_vbox = QVBoxLayout(card)
+        card_vbox.setContentsMargins(8, 6, 8, 6)
+        card_vbox.setSpacing(4)
+
+        # Chip row
+        self._attach_row = QWidget()
+        self._attach_row.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self._attach_chips_layout = QHBoxLayout(self._attach_row)
+        self._attach_chips_layout.setContentsMargins(2, 0, 2, 0)
+        self._attach_chips_layout.setSpacing(5)
+        self._attach_chips_layout.addStretch(1)
+        self._attach_row.setFixedHeight(26)
+        self._attach_row.hide()
+        card_vbox.addWidget(self._attach_row)
+
+        # Input row
+        input_row_w = QWidget()
+        input_row_w.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        input_row = QHBoxLayout(input_row_w)
+        input_row.setContentsMargins(0, 0, 0, 0)
+        input_row.setSpacing(4)
+
+        self._voice_btn_idle_style = (
+            "QPushButton { background: transparent; color: rgba(200,200,220,190); "
+            "border: none; font-size: 14px; border-radius: 14px; }"
+            "QPushButton:hover { background: rgba(255,255,255,12); }"
+        )
+        self._voice_btn_cancel_style = (
+            "QPushButton { background: rgba(180,40,40,200); color: #fff; "
+            "border: none; font-size: 13px; border-radius: 14px; }"
+            "QPushButton:hover { background: rgba(210,55,55,230); }"
+        )
+
+        self.voice_button = QPushButton("🎤")
+        self.voice_button.setFixedSize(28, 28)
+        self.voice_button.setStyleSheet(self._voice_btn_idle_style)
+        self.voice_button.clicked.connect(self.on_voice_requested)
+
+        self.input_field = CommandLineEdit()
+        self.input_field.setPlaceholderText("輸入文字、指令或按🎤啟動語音...")
+        self.input_field.setStyleSheet(
+            "QLineEdit { background: transparent; color: #e8eaf0; "
+            "border: none; padding: 2px 4px; font-size: 12px; }"
+        )
+        self.input_field.returnPressed.connect(self.on_input_submitted)
+        try:
+            self.input_field.textEdited.connect(self._handle_user_typing)
+        except Exception:
+            self.input_field.textChanged.connect(self._handle_user_typing)
+
+        self._waveform = WaveformWidget()
+        self._waveform.hide()
+
+        self._send_btn_send_style = (
+            "QPushButton { background: #2FBF71; color: #fff; border: none; "
+            "border-radius: 12px; font-weight: bold; font-size: 12px; }"
+            "QPushButton:hover { background: #28A862; }"
+        )
+        self._send_btn_stop_style = (
+            "QPushButton { background: rgba(210,55,55,220); color: #fff; border: none; "
+            "border-radius: 12px; font-size: 11px; padding: 0 0 1px 0; }"
+            "QPushButton:hover { background: rgba(230,70,70,240); }"
+        )
+
+        self.send_button = QPushButton("發送")
+        self.send_button.setFixedSize(52, 28)
+        self.send_button.setStyleSheet(self._send_btn_send_style)
+        self.send_button.clicked.connect(self.on_input_submitted)
+
+        input_row.addWidget(self.voice_button)
+        input_row.addWidget(self.input_field, 1)
+        input_row.addWidget(self._waveform, 1)
+        input_row.addWidget(self.send_button)
+        card_vbox.addWidget(input_row_w)
+
+        # Separator
+        sep = QWidget()
+        sep.setFixedHeight(1)
+        sep.setStyleSheet("QWidget { background: rgba(255,255,255,18); border: none; }")
+        card_vbox.addWidget(sep)
+
+        # Toolbar row
+        _tbtn = (
+            "QPushButton { background: transparent; color: rgba(150,165,185,160); "
+            "border: none; font-size: 12px; padding: 0 4px; border-radius: 4px; } "
+            "QPushButton:hover { color: rgba(210,225,255,220); background: rgba(255,255,255,8); }"
+        )
+        _tlbl = "QLabel { color: rgba(140,158,180,150); font-size: 10px; background: transparent; }"
+
+        toolbar_row = QWidget()
+        toolbar_row.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        toolbar_layout = QHBoxLayout(toolbar_row)
+        toolbar_layout.setContentsMargins(2, 0, 2, 0)
+        toolbar_layout.setSpacing(2)
+
+        attach_btn = QPushButton("＋")
+        attach_btn.setToolTip("附加檔案")
+        attach_btn.setFixedSize(22, 20)
+        attach_btn.setStyleSheet(_tbtn)
+        attach_btn.clicked.connect(self._on_attach_file)
+        toolbar_layout.addWidget(attach_btn)
+
+        slash_btn = QPushButton("／")
+        slash_btn.setToolTip("插入 /指令")
+        slash_btn.setFixedSize(22, 20)
+        slash_btn.setStyleSheet(_tbtn)
+        slash_btn.clicked.connect(self._on_slash_shortcut)
+        toolbar_layout.addWidget(slash_btn)
+
+        self._total_tok_label = QLabel("Σ —")
+        self._total_tok_label.setStyleSheet(_tlbl)
+        self._total_tok_label.setToolTip("本次對話累計消耗 token 數")
+        toolbar_layout.addWidget(self._total_tok_label)
+
+        self._ctx_label = QLabel("ctx —")
+        self._ctx_label.setStyleSheet(_tlbl)
+        self._ctx_label.setToolTip("目前 context 窗口用量 / 最大值")
+        toolbar_layout.addWidget(self._ctx_label)
+
+        toolbar_layout.addStretch(1)
+
+        self._bypass_btn = QPushButton("🔒")
+        self._bypass_btn.setToolTip("全開模式：自動允許所有工具執行（再按恢復）")
+        self._bypass_btn.setFixedSize(22, 20)
+        self._bypass_btn.setCheckable(True)
+        self._bypass_btn.setStyleSheet(_tbtn)
+        self._bypass_btn.clicked.connect(self._on_bypass_toggled)
+        toolbar_layout.addWidget(self._bypass_btn)
+
+        card_vbox.addWidget(toolbar_row)
+        wrapper_vbox.addWidget(card)
+        parent_layout.addWidget(wrapper)
+
+    # ── Public API (same interface as MainWindow) ─────────────────────────
+
+    def set_input_callback(self, callback) -> None:
+        self._input_callback = callback
+
+    def set_stop_callback(self, callback) -> None:
+        self._stop_callback = callback
+
+    def set_bypass_callback(self, callback) -> None:
+        self._bypass_callback = callback
+
+    def set_voice_callback(self, cb) -> None:
+        self._voice_callback = cb
+
+    def show_input_container(self) -> None:
+        pass  # input is always visible in chat mode
+
+    def is_bypass_mode(self) -> bool:
+        return self._bypass_mode
+
+    def collapse_to_edge(self) -> None:
+        pass  # no-op for chat window
+
+    def expand_from_edge(self) -> None:
+        pass  # no-op for chat window
+
+    # ── update_speech_bubble: maps circle-mode text to chat bubbles ───────
+
+    def update_speech_bubble(self, text: str) -> None:
+        """Route circle-mode text updates to chat bubbles.
+
+        "You: xxx"        → create/update user bubble (user echo line)
+        "You: xxx\\n\\nyyy" → user bubble + status hint
+        anything else     → update/create live agent bubble
+        """
+        if not isinstance(text, str):
+            return
+
+        if text.startswith("You: "):
+            # Extract user message part (may have "\n\nstatus" appended)
+            body = text[5:]
+            if "\n\n" in body:
+                user_msg = body[: body.index("\n\n")]
+            else:
+                user_msg = body
+            if user_msg and user_msg != self._live_user_text:
+                self._live_user_text = user_msg
+                self._ensure_live_user_bubble(user_msg)
+        else:
+            # Agent response content — use fast streaming path
+            if text and text != self._live_agent_text:
+                self._live_agent_text = text
+                self._ensure_live_agent_bubble()
+                if self._live_agent_bubble:
+                    self._live_agent_bubble.set_stream_content(text)
+                    QTimer.singleShot(30, self._scroll_to_bottom)
+
+    def _ensure_live_user_bubble(self, user_msg: str) -> None:
+        """Create or update the live user bubble at the bottom of the chat."""
+        if self._live_user_bubble is None:
+            img_count = self._last_user_image_count
+            self._last_user_image_count = 0
+            self._live_user_bubble = _UserBubble(user_msg, image_count=img_count)
+            # Insert before the last stretch item
+            count = self._chat_layout.count()
+            self._chat_layout.insertWidget(count - 1, self._live_user_bubble)
+            self._scroll_to_bottom()
+        else:
+            self._live_user_bubble.update_text(user_msg)
+
+    def _ensure_live_agent_bubble(self) -> None:
+        """Create the live agent bubble if it doesn't exist yet."""
+        if self._live_agent_bubble is None:
+            self._live_agent_bubble = _AgentBubble()
+            count = self._chat_layout.count()
+            self._chat_layout.insertWidget(count - 1, self._live_agent_bubble)
+            QTimer.singleShot(30, self._scroll_to_bottom)
+
+    def insert_rich_content(self, content: str) -> None:
+        """Insert a _RichBubble with pre-rendered math/chart/mermaid into the chat.
+
+        Called (on the main thread via Signal) when the agent uses the RenderRich tool.
+        """
+        try:
+            bubble = _RichBubble(content)
+            count = self._chat_layout.count()
+            self._chat_layout.insertWidget(count - 1, bubble)
+            QTimer.singleShot(200, self._scroll_to_bottom)
+        except Exception as exc:
+            logger.error(f"insert_rich_content error: {exc}", exc_info=True)
+
+    def start_agent_animation(self) -> None:
+        self._ensure_live_agent_bubble()
+        if self._live_agent_bubble:
+            self._live_agent_bubble.start_animation()
+
+    def stop_agent_animation(self) -> None:
+        if self._live_agent_bubble:
+            self._live_agent_bubble.stop_animation()
+
+    def set_running(self, running: bool) -> None:
+        self._is_running = running
+        if running:
+            self.send_button.setText("")
+            self.send_button.setIcon(_make_stop_icon(20))
+            self.send_button.setIconSize(QSize(20, 20))
+            self.send_button.setStyleSheet(self._send_btn_stop_style)
+            try:
+                self.send_button.clicked.disconnect()
+            except Exception:
+                pass
+            self.send_button.clicked.connect(self._on_stop_requested)
+        else:
+            self.send_button.setIcon(QIcon())
+            self.send_button.setText("發送")
+            self.send_button.setStyleSheet(self._send_btn_send_style)
+            try:
+                self.send_button.clicked.disconnect()
+            except Exception:
+                pass
+            self.send_button.clicked.connect(self.on_input_submitted)
+            # Finalize: stop glow, do full SiriResponseBubble render, then detach refs
+            if self._live_agent_bubble is not None:
+                self._live_agent_bubble.stop_animation()
+                if self._live_agent_text:
+                    self._live_agent_bubble.set_content(self._live_agent_text)
+            self._live_user_bubble = None
+            self._live_agent_bubble = None
+            self._live_user_text = ""
+            self._live_agent_text = ""
+            # Scroll after layout settles from final content render
+            QTimer.singleShot(120, self._scroll_to_bottom)
+
+    def set_compact_indicator(self, active: bool) -> None:
+        if active:
+            self._compact_label.show()
+            self._compact_pulse_phase = 0
+            self._compact_pulse_timer.start()
+        else:
+            self._compact_pulse_timer.stop()
+            self._compact_label.hide()
+
+    def _pulse_compact_label(self) -> None:
+        self._compact_pulse_phase = 1 - self._compact_pulse_phase
+        if self._compact_pulse_phase:
+            self._compact_label.setStyleSheet(
+                "QLabel { background: rgba(110,75,190,230); color: #eedeff; "
+                "border: 1px solid rgba(200,160,255,160); border-radius: 11px; "
+                "font-size: 10px; padding: 0 10px; }"
+            )
+        else:
+            self._compact_label.setStyleSheet(
+                "QLabel { background: rgba(70,45,130,180); color: #c8aaee; "
+                "border: 1px solid rgba(160,120,220,90); border-radius: 11px; "
+                "font-size: 10px; padding: 0 10px; }"
+            )
+
+    def update_context_meter(self, used_tokens: int, max_tokens: int, total_tokens: int = 0) -> None:
+        def _fmt(n: int) -> str:
+            if n >= 1_000_000:
+                return f"{n / 1_000_000:.1f}M"
+            if n >= 1_000:
+                return f"{n / 1_000:.1f}k"
+            return str(n)
+
+        if max_tokens > 0:
+            pct = min(100, round(used_tokens * 100 / max_tokens))
+            ctx_color = "#f06b6b" if pct >= 80 else "#f0c060" if pct >= 50 else "rgba(160,180,200,160)"
+            self._ctx_label.setText(f"ctx {_fmt(used_tokens)}/{_fmt(max_tokens)} ({pct}%)")
+            self._ctx_label.setStyleSheet(f"QLabel {{ color: {ctx_color}; font-size: 10px; }}")
+        if total_tokens > 0:
+            self._total_tok_label.setText(f"Σ {_fmt(total_tokens)}")
+        else:
+            self._total_tok_label.setText("Σ —")
+
+    def update_todo_drawer(self, text: str) -> None:
+        if self._todo_browser is None:
+            return
+        if not text:
+            self._todo_browser.setPlaceholderText("暫無待辦事項")
+            self._todo_browser.clear()
+            return
+        try:
+            self._todo_browser.setMarkdown(text)
+        except Exception:
+            self._todo_browser.setPlainText(text)
+
+    def voice_result_ready(self, text: str | None) -> None:
+        if not self._voice_active:
+            return
+        self._exit_voice_mode()
+        if text:
+            existing = self.input_field.text().strip()
+            sep = " " if existing else ""
+            self.input_field.setText(existing + sep + text)
+            self.input_field.setFocus()
+            self.input_field.setCursorPosition(len(self.input_field.text()))
+
+    def get_attached_file_path(self) -> str:
+        path = self._attached_file_path
+        if path:
+            self._attached_file_path = ""
+            self._clear_attachment()
+        return path
+
+    def pop_attached_images_as_tempfiles(self) -> list[str]:
+        if not self._attached_images:
+            return []
+        # Track count so user bubble can show an image chip
+        self._last_user_image_count = len(self._attached_images)
+        import tempfile, os
+        paths = []
+        for data in self._attached_images:
+            fd, path = tempfile.mkstemp(suffix=".png", prefix="agent_clip_")
+            try:
+                os.write(fd, data)
+            finally:
+                os.close(fd)
+            paths.append(path)
+        self._attached_images = []
+        self._clear_attachment()
+        return paths
+
+    def open_config_webview(self) -> None:
+        try:
+            if not HAS_WEBENGINE:
+                return
+            from internal.services import config_webui
+            url = config_webui.ensure_webui_running()
+            if self.config_webview_window is not None:
+                try:
+                    self.config_webview_window.show()
+                    self.config_webview_window.activateWindow()
+                    self.config_webview_window.raise_()
+                    return
+                except RuntimeError:
+                    self.config_webview_window = None
+            self.config_webview_window = ConfigWebViewWindow(url, parent=None)
+            self.config_webview_window.show()
+        except Exception as exc:
+            logger.error(f"ChatWindow: open_config_webview failed: {exc}")
+
+    # ── Chat history ──────────────────────────────────────────────────────
+
+    def load_history(self, history: list[tuple[str, str]]) -> None:
+        """Populate chat from a list of (user_input, agent_output) pairs.
+
+        Clears existing completed history widgets first, then re-renders.
+        Live widgets (if any) are preserved.
+        """
+        # Remove all non-stretch widgets that are NOT the current live bubbles
+        live_set = {
+            id(self._live_user_bubble),
+            id(self._live_agent_bubble),
+        }
+        for i in reversed(range(self._chat_layout.count())):
+            item = self._chat_layout.itemAt(i)
+            if item is None:
+                continue
+            w = item.widget()
+            if w is not None and id(w) not in live_set:
+                self._chat_layout.removeWidget(w)
+                w.deleteLater()
+
+        # Re-add history pairs (insert before live bubbles / stretch)
+        insert_pos = 0
+        for user_text, agent_text in history:
+            ub = _UserBubble(user_text)
+            ab = _AgentBubble()
+            if agent_text:
+                ab.set_content(agent_text)
+            self._chat_layout.insertWidget(insert_pos, ub)
+            self._chat_layout.insertWidget(insert_pos + 1, ab)
+            insert_pos += 2
+
+        QTimer.singleShot(100, self._scroll_to_bottom)
+
+    def sync_live_state(self, user_text: str, agent_text: str, is_running: bool) -> None:
+        """Sync the live (current) exchange state when switching from circle mode.
+
+        Call this after load_history() so the current in-progress turn is shown.
+        """
+        if user_text:
+            self._live_user_text = user_text
+            self._ensure_live_user_bubble(user_text)
+        if agent_text:
+            self._live_agent_text = agent_text
+            self._ensure_live_agent_bubble()
+            if self._live_agent_bubble:
+                self._live_agent_bubble.set_content(agent_text)
+        if is_running and self._live_agent_bubble:
+            self._live_agent_bubble.start_animation()
+        self.set_running(is_running)
+        QTimer.singleShot(150, self._scroll_to_bottom)
+
+    def _scroll_to_bottom(self) -> None:
+        sb = self._scroll.verticalScrollBar()
+        sb.setValue(sb.maximum())
+        # Second pass: layout may still be settling; fire again after one more cycle
+        QTimer.singleShot(80, lambda: sb.setValue(sb.maximum()))
+
+    # ── Bypass mode ──────────────────────────────���────────────────────────
+
+    def _on_bypass_toggled(self, checked: bool) -> None:
+        self._bypass_mode = checked
+        _on = (
+            "QPushButton { background: rgba(220,120,0,180); color: #ffe0a0; "
+            "border: none; font-size: 12px; padding: 0 4px; border-radius: 4px; } "
+            "QPushButton:hover { background: rgba(240,140,0,210); }"
+        )
+        _off = (
+            "QPushButton { background: transparent; color: rgba(150,165,185,160); "
+            "border: none; font-size: 12px; padding: 0 4px; border-radius: 4px; } "
+            "QPushButton:hover { color: rgba(210,225,255,220); background: rgba(255,255,255,8); }"
+        )
+        if checked:
+            self._bypass_btn.setText("🔓")
+            self._bypass_btn.setToolTip("全開模式已開啟 — 自動允許所有工具（點擊關閉）")
+            self._bypass_btn.setStyleSheet(_on)
+        else:
+            self._bypass_btn.setText("🔒")
+            self._bypass_btn.setToolTip("全開模式：自動允許所有工具執行（再按恢復）")
+            self._bypass_btn.setStyleSheet(_off)
+        cb = getattr(self, "_bypass_callback", None)
+        if cb:
+            cb(checked)
+
+    def sync_bypass_state(self, enabled: bool) -> None:
+        """Called when switching from circle mode to sync bypass toggle state."""
+        if enabled != self._bypass_mode:
+            self._bypass_btn.setChecked(enabled)
+            self._on_bypass_toggled(enabled)
+
+    # ── Stop button ───────────────────────────────────────────────────────
+
+    def _on_stop_requested(self) -> None:
+        if self._stop_callback:
+            self._stop_callback()
+
+    # ── Voice mode ─────────────────────────────────��──────────────────────
+
+    def on_voice_requested(self) -> None:
+        if self._voice_active:
+            self._cancel_voice()
+        else:
+            self._enter_voice_mode()
+
+    def _enter_voice_mode(self) -> None:
+        self._voice_active = True
+        self.input_field.hide()
+        self._waveform.show()
+        self._waveform.start()
+        self.voice_button.setText("✕")
+        self.voice_button.setStyleSheet(self._voice_btn_cancel_style)
+        try:
+            self.send_button.clicked.disconnect()
+        except Exception:
+            pass
+        self.send_button.clicked.connect(self._submit_voice_now)
+        if self._voice_callback:
+            self._voice_callback("__start__")
+
+    def _exit_voice_mode(self) -> None:
+        self._voice_active = False
+        self._waveform.stop()
+        self._waveform.hide()
+        self.input_field.show()
+        self.input_field.setFocus()
+        self.voice_button.setText("🎤")
+        self.voice_button.setStyleSheet(self._voice_btn_idle_style)
+        try:
+            self.send_button.clicked.disconnect()
+        except Exception:
+            pass
+        if self._is_running:
+            self.send_button.clicked.connect(self._on_stop_requested)
+        else:
+            self.send_button.clicked.connect(self.on_input_submitted)
+
+    def _cancel_voice(self) -> None:
+        self._exit_voice_mode()
+        if self._voice_callback:
+            self._voice_callback("__cancel__")
+
+    def _submit_voice_now(self) -> None:
+        self._exit_voice_mode()
+        if self._voice_callback:
+            self._voice_callback("__submit__")
+
+    def set_voice_level(self, level: float) -> None:
+        if self._voice_active:
+            self._waveform.set_level(level)
+
+    # ── Input submission ─────────────────────────────────���────────────────
+
+    def on_input_submitted(self) -> None:
+        text = self.input_field.text().strip()
+        if text and self._input_callback:
+            if isinstance(self.input_field, CommandLineEdit):
+                self.input_field.add_to_history(text)
+            self.input_field.clear()
+            self.input_field.setPlaceholderText("輸入文字、指令或按🎤啟動語音...")
+            self._input_callback(text)
+
+    def _handle_user_typing(self, *_args) -> None:
+        try:
+            self.typing.emit()
+        except Exception:
+            pass
+
+    # ── File attachment ───────────────────────────────────────────────────
+
+    def _on_attach_file(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, "附加檔案", "", "All Files (*.*)")
+        if path:
+            self._attached_file_path = path
+            name = path.split("/")[-1].split("\\")[-1]
+            short = name if len(name) <= 20 else name[:17] + "…"
+
+            def on_remove():
+                self._attached_file_path = ""
+
+            self._add_chip(f"📎 {short}", on_remove)
+
+    def _on_slash_shortcut(self) -> None:
+        if not self.input_field.text():
+            self.input_field.setText("/")
+            self.input_field.setFocus()
+            self.input_field.setCursorPosition(1)
+
+    def _add_chip(self, label: str, on_remove) -> None:
+        chip = QLabel(label)
+        chip.setStyleSheet(self._CHIP_STYLE)
+        chip.setMaximumWidth(200)
+        close_btn = QPushButton("✕")
+        close_btn.setFixedSize(14, 14)
+        close_btn.setStyleSheet(self._CHIP_CLOSE_STYLE)
+
+        def _remove():
+            on_remove()
+            for w in (chip, close_btn):
+                self._attach_chips_layout.removeWidget(w)
+                w.deleteLater()
+            self._refresh_chip_row()
+
+        close_btn.clicked.connect(_remove)
+        insert_pos = max(0, self._attach_chips_layout.count() - 1)
+        self._attach_chips_layout.insertWidget(insert_pos, chip)
+        self._attach_chips_layout.insertWidget(insert_pos + 1, close_btn)
+        self._refresh_chip_row()
+
+    def _refresh_chip_row(self) -> None:
+        has_chips = self._attach_chips_layout.count() > 1
+        if has_chips:
+            self._attach_row.show()
+        else:
+            self._attach_row.hide()
+
+    def _clear_attachment(self) -> None:
+        self._attached_file_path = ""
+        self._attached_images = []
+        while self._attach_chips_layout.count() > 1:
+            item = self._attach_chips_layout.takeAt(0)
+            if item and item.widget():
+                item.widget().deleteLater()
+        self._refresh_chip_row()
+
+    def _show_attach_chip(self, label: str) -> None:
+        idx = len(self._attached_images) - 1
+
+        def on_remove():
+            try:
+                if 0 <= idx < len(self._attached_images):
+                    self._attached_images.pop(idx)
+            except Exception:
+                pass
+
+        self._add_chip(label, on_remove)
+
+    # ── Clipboard paste (images) ───────────��─────────────────────────────
+
+    def keyPressEvent(self, event: QKeyEvent) -> None:
+        if event.key() == Qt.Key.Key_V and (event.modifiers() & Qt.KeyboardModifier.ControlModifier):
+            clipboard = QApplication.clipboard()
+            mime = clipboard.mimeData()
+            if mime and mime.hasImage():
+                image = clipboard.image()
+                if not image.isNull():
+                    ba = QImage.toBytes(image.convertToFormat(QImage.Format.Format_RGBA8888))
+                    # Save as PNG bytes
+                    buf = io.BytesIO()
+                    # Use PIL if available, else raw
+                    if Image is not None:
+                        pil_img = Image.frombytes("RGBA", (image.width(), image.height()), bytes(ba))
+                        pil_img.save(buf, format="PNG")
+                    else:
+                        buf.write(bytes(ba))
+                    self._attached_images.append(buf.getvalue())
+                    self._show_attach_chip(f"🖼 剪貼板圖片 {len(self._attached_images)}")
+                    event.accept()
+                    return
+        super().keyPressEvent(event)
+
+    # ── Thread-safe confirm/question dialogs (same as MainWindow) ─────────
+
+    @Slot(str, str, object)
+    def _handle_confirm_request(self, message: str, default_choice: str, result_container: object) -> None:
+        """In chat mode: insert an inline confirm bubble instead of a popup dialog."""
+        try:
+            bubble = _InlineConfirmBubble(message, default_choice)
+
+            def _on_answered(allow: bool) -> None:
+                result_container.result = allow
+                result_container.done.set()
+                logger.info(f"[ChatWindow inline] confirm answered: {allow}")
+                # Reset live agent bubble so continuation appears BELOW this card
+                self._live_agent_bubble = None
+                self._live_agent_text = ""
+
+            bubble.answered.connect(_on_answered)
+            count = self._chat_layout.count()
+            self._chat_layout.insertWidget(count - 1, bubble)
+            self._scroll_to_bottom()
+        except Exception as exc:
+            logger.error(f"ChatWindow inline confirm error: {exc}", exc_info=True)
+            result_container.done.set()
+
+    def show_confirm_dialog(self, message: str, default_choice: str = '') -> bool:
+        import threading
+
+        class ResultContainer:
+            def __init__(self):
+                self.result = False
+                self.done = threading.Event()
+
+        rc = ResultContainer()
+        self.confirm_requested.emit(message, default_choice, rc)
+        rc.done.wait(timeout=300)
+        return rc.result
+
+    @Slot(str, list, bool, object)
+    def _handle_question_request(self, question: str, options: list, multi: bool, result_container: object) -> None:
+        """In chat mode: insert an inline question bubble instead of a popup dialog.
+
+        We do NOT call result_container.done.set() here — the bubble's `answered`
+        signal does that once the user clicks, keeping the background thread blocked
+        until a choice is made.
+        """
+        try:
+            bubble = _InlineQuestionBubble(question, list(options), multi=multi)
+
+            def _on_answered(option: str) -> None:
+                result_container.result = option
+                result_container.done.set()
+                logger.info(f"[ChatWindow inline] question answered: {option!r}")
+                # Reset live agent bubble so continuation appears BELOW this card
+                self._live_agent_bubble = None
+                self._live_agent_text = ""
+
+            bubble.answered.connect(_on_answered)
+
+            # Insert before the trailing stretch item
+            count = self._chat_layout.count()
+            self._chat_layout.insertWidget(count - 1, bubble)
+            self._scroll_to_bottom()
+        except Exception as exc:
+            logger.error(f"ChatWindow inline question error: {exc}", exc_info=True)
+            result_container.done.set()  # unblock on error
+
+    def show_question_dialog(self, question: str, options: list[str], multi: bool = False) -> str:
+        import threading
+
+        class ResultContainer:
+            def __init__(self):
+                self.result: str = ""
+                self.done = threading.Event()
+
+        rc = ResultContainer()
+        self.question_requested.emit(question, options, multi, rc)
+        rc.done.wait(timeout=300)
+        return rc.result
+
+    def closeEvent(self, event) -> None:
+        """Closing the chat window collapses to the edge ball instead of quitting."""
+        event.ignore()
+        self.switch_to_circle_collapsed.emit()
+
+
 class ConfigWebViewWindow(QMainWindow):
     """配置頁面 WebView 窗口"""
 
@@ -3670,13 +5545,37 @@ class ChoiceDialog(QDialog):
         }
     """
 
-    def __init__(self, question: str, options: list[str], parent=None):
+    _INPUT_STYLE = (
+        "QLineEdit { "
+        "background: rgba(50,52,65,220); color: #e8eaf0; "
+        "border: 1px solid rgba(255,255,255,50); border-radius: 8px; "
+        "padding: 8px 12px; font-size: 13px; "
+        "}"
+        "QLineEdit:focus { border-color: rgba(80,150,255,180); }"
+        "QLineEdit:disabled { background: rgba(30,35,48,180); color: rgba(140,150,170,120); }"
+    )
+    _CB_STYLE = (
+        "QCheckBox { color: #dde8f8; font-size: 13px; spacing: 8px; }"
+        "QCheckBox::indicator { width: 18px; height: 18px; border-radius: 5px;"
+        "border: 1px solid rgba(255,255,255,40); background: rgba(58,58,68,220); }"
+        "QCheckBox::indicator:checked { background: rgba(0,112,240,200);"
+        "border-color: rgba(80,160,255,180); }"
+        "QCheckBox:disabled { color: rgba(140,150,170,120); }"
+    )
+
+    def __init__(self, question: str, options: list[str], multi: bool = False, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Agent 問題")
         self.setModal(True)
         self.setMinimumWidth(440)
         self.setStyleSheet(self._STYLE)
         self._selected: str = ""
+        self._multi = multi
+        self._checkboxes: list[QCheckBox] = []
+        self._custom_cb: QCheckBox | None = None
+        self._text_input: QLineEdit | None = None
+        self._option_btns: list[QPushButton] = []
+        self._custom_input: QLineEdit | None = None
 
         layout = QVBoxLayout(self)
         layout.setSpacing(10)
@@ -3685,7 +5584,8 @@ class ChoiceDialog(QDialog):
         # Header: icon + question text
         header = QHBoxLayout()
         header.setSpacing(10)
-        icon = QLabel("❓")
+        icon_char = "☑️" if multi else "❓"
+        icon = QLabel(icon_char)
         icon.setObjectName("icon")
         icon.setFixedWidth(30)
         icon.setAlignment(Qt.AlignmentFlag.AlignTop)
@@ -3704,55 +5604,143 @@ class ChoiceDialog(QDialog):
         layout.addWidget(sep)
         layout.addSpacing(2)
 
-        # Option buttons OR free-text input
-        if options:
-            for opt in options:
-                btn = QPushButton(f"  {opt}")
-                btn.setObjectName("option")
-                btn.setCursor(Qt.CursorShape.PointingHandCursor)
-                btn.clicked.connect(lambda _checked, o=opt: self._select(o))
-                layout.addWidget(btn)
-        else:
-            # Open-ended: show a text input field + confirm button
+        if not options:
+            # Open-ended: free-text input + confirm
             self._text_input = QLineEdit()
             self._text_input.setPlaceholderText("請輸入回覆…")
-            self._text_input.setStyleSheet(
-                "QLineEdit { "
-                "background: rgba(50,52,65,220); "
-                "color: #e8eaf0; "
-                "border: 1px solid rgba(255,255,255,50); "
-                "border-radius: 8px; "
-                "padding: 8px 12px; "
-                "font-size: 13px; "
-                "}"
-                "QLineEdit:focus { border-color: rgba(80,150,255,180); }"
-            )
+            self._text_input.setStyleSheet(self._INPUT_STYLE)
             self._text_input.returnPressed.connect(self._submit_text)
             layout.addWidget(self._text_input)
             layout.addSpacing(4)
-
             confirm_btn = QPushButton("確認")
             confirm_btn.setObjectName("option")
             confirm_btn.setCursor(Qt.CursorShape.PointingHandCursor)
             confirm_btn.setStyleSheet(
-                "QPushButton { "
-                "background: rgba(0,100,220,200); color: #fff; "
-                "border: none; border-radius: 9px; "
-                "padding: 10px 16px; font-size: 13px; "
-                "}"
+                "QPushButton { background: rgba(0,100,220,200); color: #fff; "
+                "border: none; border-radius: 9px; padding: 10px 16px; font-size: 13px; }"
                 "QPushButton:hover { background: rgba(0,120,255,220); }"
             )
             confirm_btn.clicked.connect(self._submit_text)
             layout.addWidget(confirm_btn)
             QTimer.singleShot(0, self._text_input.setFocus)
 
-    def _submit_text(self) -> None:
-        text = self._text_input.text().strip() if hasattr(self, "_text_input") else ""
+        elif multi:
+            # ── Multi-select: checkboxes ──────────────────────────────
+            for opt in options:
+                cb = QCheckBox(f"  {opt}")
+                cb.setStyleSheet(self._CB_STYLE)
+                cb.setCursor(Qt.CursorShape.PointingHandCursor)
+                layout.addWidget(cb)
+                self._checkboxes.append(cb)
+
+            # Custom input checkbox
+            self._custom_cb = QCheckBox("  ✏️ 自訂輸入…")
+            self._custom_cb.setStyleSheet(self._CB_STYLE)
+            self._custom_cb.setCursor(Qt.CursorShape.PointingHandCursor)
+            layout.addWidget(self._custom_cb)
+
+            self._custom_input = QLineEdit()
+            self._custom_input.setPlaceholderText("請輸入自訂答案…")
+            self._custom_input.setStyleSheet(self._INPUT_STYLE)
+            self._custom_input.setEnabled(False)
+            layout.addWidget(self._custom_input)
+            self._custom_cb.toggled.connect(
+                lambda checked: (
+                    self._custom_input.setEnabled(checked),
+                    self._custom_input.setFocus() if checked else None,
+                )
+            )
+
+            layout.addSpacing(4)
+            confirm_btn = QPushButton("✓ 確認選擇")
+            confirm_btn.setObjectName("option")
+            confirm_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            confirm_btn.setStyleSheet(
+                "QPushButton { background: rgba(0,100,220,200); color: #fff; "
+                "border: none; border-radius: 9px; padding: 10px 16px; font-size: 13px; }"
+                "QPushButton:hover { background: rgba(0,120,255,220); }"
+            )
+            confirm_btn.clicked.connect(self._submit_multi)
+            layout.addWidget(confirm_btn)
+
+        else:
+            # ── Single-select: option buttons ─────────────────────────
+            for opt in options:
+                btn = QPushButton(f"  {opt}")
+                btn.setObjectName("option")
+                btn.setCursor(Qt.CursorShape.PointingHandCursor)
+                btn.clicked.connect(lambda _checked, o=opt: self._select(o))
+                layout.addWidget(btn)
+                self._option_btns.append(btn)
+
+            # Custom input button (expands inline)
+            custom_btn = QPushButton("  ✏️ 自訂輸入…")
+            custom_btn.setObjectName("option")
+            custom_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            custom_btn.clicked.connect(self._show_custom_input)
+            layout.addWidget(custom_btn)
+            self._option_btns.append(custom_btn)
+
+            self._custom_input = QLineEdit()
+            self._custom_input.setPlaceholderText("請輸入自訂答案…")
+            self._custom_input.setStyleSheet(self._INPUT_STYLE)
+            self._custom_input.returnPressed.connect(self._submit_custom)
+            self._custom_input.hide()
+            layout.addWidget(self._custom_input)
+
+            confirm_custom_btn = QPushButton("✓ 確認")
+            confirm_custom_btn.setObjectName("option")
+            confirm_custom_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            confirm_custom_btn.setStyleSheet(
+                "QPushButton { background: rgba(0,100,220,200); color: #fff; "
+                "border: none; border-radius: 9px; padding: 10px 16px; font-size: 13px; }"
+                "QPushButton:hover { background: rgba(0,120,255,220); }"
+            )
+            confirm_custom_btn.clicked.connect(self._submit_custom)
+            confirm_custom_btn.hide()
+            layout.addWidget(confirm_custom_btn)
+            self._confirm_custom_btn = confirm_custom_btn
+
+    # ── single-select helpers ──────────────────────────────────────────────
+
+    def _show_custom_input(self) -> None:
+        for btn in self._option_btns:
+            btn.hide()
+        if self._custom_input:
+            self._custom_input.show()
+            self._custom_input.setFocus()
+        if hasattr(self, "_confirm_custom_btn"):
+            self._confirm_custom_btn.show()
+
+    def _submit_custom(self) -> None:
+        text = (self._custom_input.text() or "").strip() if self._custom_input else ""
+        if not text:
+            return
         self._selected = text
         self.accept()
 
     def _select(self, option: str) -> None:
         self._selected = option
+        self.accept()
+
+    # ── multi-select helpers ───────────────────────────────────────────────
+
+    def _submit_multi(self) -> None:
+        selected = [cb.text().lstrip() for cb in self._checkboxes if cb.isChecked()]
+        if self._custom_cb and self._custom_cb.isChecked() and self._custom_input:
+            custom_text = self._custom_input.text().strip()
+            if custom_text:
+                selected.append(custom_text)
+        if not selected:
+            return
+        self._selected = ", ".join(selected)
+        self.accept()
+
+    # ── open-ended helpers ─────────────────────────────────────────────────
+
+    def _submit_text(self) -> None:
+        text = self._text_input.text().strip() if self._text_input else ""
+        self._selected = text
         self.accept()
 
     def get_result(self) -> str:

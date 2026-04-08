@@ -22,7 +22,7 @@ from internal.memory import MemoryManager
 from internal.runtime.stream_printer import BACKLOG_SCALE, BASE_DELAY, MIN_FACTOR
 from internal.runtime.system import run_cli
 from internal.services.agent_factory import load_base_config
-from internal.services.circle_ui import MainWindow, ChoiceDialog, ConfirmDialog, CommandLineEdit
+from internal.services.circle_ui import MainWindow, ChatWindow, ChoiceDialog, ConfirmDialog, CommandLineEdit
 from internal.services.voice_manager import VoiceManager
 from internal.services.config_db import (
     list_agent_configs,
@@ -30,7 +30,7 @@ from internal.services.config_db import (
     list_providers,
     list_remote_mcps,
 )
-from internal.cli import set_gui_confirm_handler, set_gui_question_handler
+from internal.cli import set_gui_confirm_handler, set_gui_question_handler, set_gui_render_handler
 from internal.command_handler import CommandHandler
 from internal.services import config_webui, config_cli
 from internal.compaction import (
@@ -42,6 +42,7 @@ from internal.compaction import (
 
 COMMAND_PREFIX = "/"
 GUI_CHUNK_EMIT_SIZE = 2000
+
 
 
 class AgentRuntime(QThread):
@@ -123,6 +124,7 @@ class AgentRuntime(QThread):
                 self.http_client,
                 skill_root_dirs=self.skill_root_dirs,
                 memory_manager=MemoryManager(),
+                runtime_mode="gui",
             )
 
             def _reload_skills_from_webui() -> dict[str, object]:
@@ -501,7 +503,12 @@ class GUIAgentApp(QObject):
         set_gui_confirm_handler(self._gui_confirm_handler)
         # 設置 GUI 問題選單處理器
         set_gui_question_handler(self._gui_question_handler)
+        # 設置 GUI 富媒體渲染處理器
+        set_gui_render_handler(self._gui_render_handler)
         
+        # Current UI mode: "circle" or "chat"
+        self._current_mode: str = "circle"
+
         self.runtime = AgentRuntime(self.base_config, skill_root_dirs=skill_root_dirs)
         # AgentRuntime (QThread) lives in the main thread but emits signals from run().
         # Qt sees sender/receiver both as main-thread objects and uses DirectConnection.
@@ -522,6 +529,7 @@ class GUIAgentApp(QObject):
         self.main_window.set_bypass_callback(self._on_bypass_changed)
         self.main_window.set_voice_callback(self._on_voice_event)
         self.main_window.collapse_state_changed.connect(self._on_collapse_state_changed)
+        self.main_window.switch_to_chat.connect(self._switch_to_chat)
         # Wire cross-thread voice result signal to main-thread slot
         self._voice_result_signal.connect(self._on_voice_result)
         # 當使用者在輸入框輸入時，重置閒置計時
@@ -531,27 +539,143 @@ class GUIAgentApp(QObject):
             pass
         self.main_window.show()
 
+        # Chat window (created lazily but set up now for signal wiring)
+        self.chat_window = ChatWindow()
+        self.chat_window.set_input_callback(self.process_input)
+        self.chat_window.set_stop_callback(self.stop_current_request)
+        self.chat_window.set_bypass_callback(self._on_bypass_changed)
+        self.chat_window.set_voice_callback(self._on_voice_event)
+        self.chat_window.switch_to_circle.connect(self._switch_to_circle)
+        self.chat_window.switch_to_circle_collapsed.connect(self._switch_to_circle_collapsed)
+        try:
+            self.chat_window.typing.connect(self._reset_idle_timer)
+        except Exception:
+            pass
+
         self.main_window.update_speech_bubble("Initializing...")
         self.main_window.speech_bubble.show()
 
     def _on_bypass_changed(self, enabled: bool) -> None:
         logger.info(f"Bypass mode {'enabled' if enabled else 'disabled'}")
 
+    # ── Active UI (circle or chat) ────────────────────────────────────────
+
+    @property
+    def _active_ui(self):
+        """Return the currently visible UI window."""
+        if self._current_mode == "chat":
+            return self.chat_window
+        return self.main_window
+
+    def _switch_to_chat(self) -> None:
+        """Switch from circle mode to chat mode."""
+        if self._current_mode == "chat":
+            return
+        self._current_mode = "chat"
+        # Populate chat history from completed pairs
+        self.chat_window.load_history(list(self._gui_history))
+        # Sync live exchange state — only pass agent_text when actively running.
+        # If the response is already complete, load_history already rendered it;
+        # passing _display_text here would create a duplicate bubble.
+        self.chat_window.sync_live_state(
+            user_text=self._last_user_input if self._waiting_response else "",
+            agent_text=self._display_text if self._waiting_response else "",
+            is_running=self._waiting_response,
+        )
+        # Sync bypass state
+        self.chat_window.sync_bypass_state(
+            self.main_window.is_bypass_mode()
+        )
+        # Sync running state
+        self.chat_window.set_running(self._waiting_response)
+        # Sync todo drawer
+        try:
+            if self._todo_snapshot_text:
+                self.chat_window.update_todo_drawer(self._todo_snapshot_text)
+        except Exception:
+            pass
+        # Sync context meter
+        try:
+            from internal.compaction import MAX_CONTEXT_TOKENS
+            ctx = getattr(self.runtime._conversation_state, "totalTokens", 0) or 0
+            self.chat_window.update_context_meter(ctx, MAX_CONTEXT_TOKENS, self._total_tokens_consumed)
+        except Exception:
+            pass
+        self.main_window.hide()
+        self.chat_window.show()
+        self.chat_window.raise_()
+        self.chat_window.activateWindow()
+        # Chat mode: no idle-collapse; stop the timer so it can't fire while hidden.
+        self._idle_timer.stop()
+
+    def _switch_to_circle(self) -> None:
+        """Switch from chat mode to circle mode."""
+        if self._current_mode == "circle":
+            return
+        self._current_mode = "circle"
+        # Sync bypass state back to circle window
+        if self.chat_window.is_bypass_mode() != self.main_window.is_bypass_mode():
+            self.main_window._bypass_btn.setChecked(self.chat_window.is_bypass_mode())
+            self.main_window._on_bypass_toggled(self.chat_window.is_bypass_mode())
+        self.chat_window.hide()
+        self.main_window.show()
+        self.main_window.raise_()
+        self.main_window.activateWindow()
+        # Sync todo drawer
+        try:
+            self.main_window.update_todo_drawer(self._todo_snapshot_text or "")
+        except Exception:
+            pass
+        # Sync running state + glow
+        try:
+            self.main_window.set_running(self._waiting_response)
+            if self._waiting_response:
+                self.main_window.start_agent_animation()
+            else:
+                self.main_window.stop_agent_animation()
+        except Exception:
+            pass
+        # Sync context meter
+        try:
+            from internal.compaction import MAX_CONTEXT_TOKENS
+            ctx = getattr(self.runtime._conversation_state, "totalTokens", 0) or 0
+            self.main_window.update_context_meter(ctx, MAX_CONTEXT_TOKENS, self._total_tokens_consumed)
+        except Exception:
+            pass
+        # Restore current display text
+        if self._display_text:
+            self.main_window.update_speech_bubble(self._compose_display_text())
+        elif self._waiting_response and self._last_user_input:
+            self.main_window.update_speech_bubble(
+                f"You: {self._last_user_input}\n\n{self._waiting_status}"
+            )
+        # Circle mode: re-enable idle-collapse timer (guard inside _reset_idle_timer
+        # already skips when running or collapsed, so this is always safe).
+        self._reset_idle_timer()
+
+    def _switch_to_circle_collapsed(self) -> None:
+        """Switch from chat mode to circle mode, then immediately collapse to the edge ball."""
+        self._switch_to_circle()
+        try:
+            self.main_window.collapse_to_edge()
+        except Exception:
+            pass
+
     # ── Voice mode handlers ───────────────────────────────────────────────
 
     def _on_voice_event(self, event: str) -> None:
-        """Called from MainWindow when user interacts with voice button/send."""
+        """Called from active UI when user interacts with voice button/send."""
         if event == "__start__":
             self._start_voice_recognition()
         elif event == "__cancel__":
             self.voice_manager.cancel()
-            self.main_window.update_speech_bubble("語音取消")
+            self._active_ui.update_speech_bubble("語音取消")
         elif event == "__submit__":
             self.voice_manager.submit_now()
-            self.main_window.update_speech_bubble("辨識中...")
+            self._active_ui.update_speech_bubble("辨識中...")
 
     def _start_voice_recognition(self) -> None:
-        self.main_window.update_speech_bubble("Listening...")
+        self._active_ui.update_speech_bubble("Listening...")
 
         def _on_result(text):
             self._voice_result_signal.emit(text)
@@ -561,32 +685,64 @@ class GUIAgentApp(QObject):
     def _on_voice_result(self, text) -> None:
         """Called in main thread when recognition finishes.
         Appends text to the input field — user presses 發送 manually to submit."""
-        self.main_window.voice_result_ready(text)
+        self._active_ui.voice_result_ready(text)
         if text:
             logger.info(f"Voice recognized: {text[:60]}")
         else:
-            self.main_window.update_speech_bubble("未識別到語音，請再試一次")
+            self._active_ui.update_speech_bubble("未識別到語音，請再試一次")
+
+    # ── Broadcast helpers (keep both UIs in sync) ────────────────────────
+
+    def _set_running_both(self, running: bool) -> None:
+        """Set running state on both windows so button/glow stays in sync."""
+        for win in (self.main_window, self.chat_window):
+            try:
+                win.set_running(running)
+            except Exception:
+                pass
+
+    def _update_context_both(self, used: int, max_tokens: int, total: int = 0) -> None:
+        """Push context meter update to both windows simultaneously."""
+        for win in (self.main_window, self.chat_window):
+            try:
+                win.update_context_meter(used, max_tokens, total)
+            except Exception:
+                pass
 
     def _gui_confirm_handler(self, message: str, default_choice: str) -> bool:
         """GUI 模式下的確認處理器（線程安全）"""
         # Bypass mode: auto-approve everything
-        if getattr(self.main_window, "is_bypass_mode", lambda: False)():
+        if self._active_ui.is_bypass_mode():
             logger.info(f"[bypass] auto-approving: {message[:60]}")
             return True
         logger.info(f"_gui_confirm_handler called: {message[:50]}...")
-        result = self.main_window.show_confirm_dialog(message, default_choice)
+        result = self._active_ui.show_confirm_dialog(message, default_choice)
         logger.info(f"_gui_confirm_handler returning: {result}")
         return result
 
-    def _gui_question_handler(self, question: str, options: list[str]) -> str:
+    def _gui_question_handler(self, question: str, options: list[str], multi: bool = False) -> str:
         """GUI 模式下的問題選單處理器（線程安全）"""
         logger.info(f"_gui_question_handler called: {question[:50]}...")
-        result = self.main_window.show_question_dialog(question, options)
+        result = self._active_ui.show_question_dialog(question, options, multi)
         logger.info(f"_gui_question_handler returning: {result!r}")
         if result and result != "(no answer — user dismissed the dialog)":
-            self._discussion_text = f"**Q:** {question}\n\n**A:** {result}"
-            self._request_display_update()
+            if self._current_mode != "chat":
+                # In circle mode update the speech bubble with Q&A context.
+                # In chat mode the inline bubble already shows the exchange.
+                self._discussion_text = f"**Q:** {question}\n\n**A:** {result}"
+                self._request_display_update()
         return result
+
+    def _gui_render_handler(self, content: str) -> None:
+        """GUI 模式下的富媒體渲染處理器（線程安全）。
+
+        Called from the agent thread; emits a signal so ChatWindow renders on the main thread.
+        """
+        logger.info("_gui_render_handler called, emitting render_rich_requested")
+        try:
+            self.chat_window.render_rich_requested.emit(content)
+        except Exception as exc:
+            logger.warning("_gui_render_handler emit error: %s", exc)
 
     def _reset_tool_log(self) -> None:
         self._tool_log_lines = []
@@ -595,10 +751,11 @@ class GUIAgentApp(QObject):
 
     def _reset_todo_snapshot(self) -> None:
         self._todo_snapshot_text = ""
-        try:
-            self.main_window.update_todo_drawer("")
-        except Exception:
-            pass
+        for win in (self.main_window, self.chat_window):
+            try:
+                win.update_todo_drawer("")
+            except Exception:
+                pass
 
     # ── Tool event rendering (Claude Code style) ──────────────────────────
 
@@ -775,8 +932,13 @@ class GUIAgentApp(QObject):
         todo_text = payload.get("todo_text")
         if isinstance(todo_text, str) and todo_text.strip():
             self._todo_snapshot_text = todo_text.strip()
+            # Keep BOTH windows in sync so switching doesn't lose todo state
             try:
                 self.main_window.update_todo_drawer(self._todo_snapshot_text)
+            except Exception:
+                pass
+            try:
+                self.chat_window.update_todo_drawer(self._todo_snapshot_text)
             except Exception:
                 pass
             self._request_display_update()
@@ -800,27 +962,41 @@ class GUIAgentApp(QObject):
                 self._set_waiting_status("執行工具中...")
         elif line_text.startswith("[OK]"):
             self._set_waiting_status("整理結果中...")
+
+        # In chat mode, forward tool events directly to the live agent bubble
+        if self._current_mode == "chat":
+            try:
+                live_bubble = self.chat_window._live_agent_bubble
+                if live_bubble is None:
+                    # Create bubble so tool events appear even before text arrives
+                    self.chat_window._ensure_live_agent_bubble()
+                    live_bubble = self.chat_window._live_agent_bubble
+                if live_bubble is not None:
+                    live_bubble.add_tool_event(line_text)
+            except Exception:
+                pass
+
         self._request_display_update()
         self._reset_idle_timer()
 
     def handle_compaction_event(self, started: bool) -> None:
         try:
-            self.main_window.set_compact_indicator(started)
+            self._active_ui.set_compact_indicator(started)
         except Exception:
             pass
 
     def handle_compact_result(self, payload: object) -> None:
         """Called in main thread when /compact finishes."""
-        self.main_window.set_compact_indicator(False)
+        self._active_ui.set_compact_indicator(False)
         try:
             changed, before, after, updated_history = payload  # type: ignore[misc]
             self.chat_history = updated_history or self.chat_history
             if changed:
-                self.main_window.update_speech_bubble(f"已執行壓縮：訊息數 {before} → {after}")
+                self._active_ui.update_speech_bubble(f"已執行壓縮：訊息數 {before} → {after}")
             else:
-                self.main_window.update_speech_bubble("已嘗試壓縮，但目前可壓縮內容不足（需要超過最近保留訊息量）。")
+                self._active_ui.update_speech_bubble("已嘗試壓縮，但目前可壓縮內容不足（需要超過最近保留訊息量）。")
         except Exception as exc:
-            self.main_window.update_speech_bubble(f"手動壓縮失敗：{exc}")
+            self._active_ui.update_speech_bubble(f"手動壓縮失敗：{exc}")
 
     def _set_waiting_status(self, status: str) -> None:
         self._waiting_status = status
@@ -829,13 +1005,16 @@ class GUIAgentApp(QObject):
         if self._display_text.strip():
             return
         if self._last_user_input:
-            self.main_window.update_speech_bubble(
+            self._active_ui.update_speech_bubble(
                 f"You: {self._last_user_input}\n\n{status}"
             )
         else:
-            self.main_window.update_speech_bubble(status)
+            self._active_ui.update_speech_bubble(status)
 
     def _reset_idle_timer(self) -> None:
+        # In chat mode there is no collapse/idle, skip
+        if self._current_mode == "chat":
+            return
         if self._ui_collapsed or self._waiting_response:
             return
         self._idle_timer.start(self._idle_timeout_ms)
@@ -884,17 +1063,18 @@ class GUIAgentApp(QObject):
             return
 
         self._auto_config_panel_opened = True
-        self.main_window.update_speech_bubble(
+        self._active_ui.update_speech_bubble(
             "尚未設定任何 Provider/Agent，已自動打開設定面板。"
         )
-        QTimer.singleShot(250, self.main_window.open_config_webview)
+        QTimer.singleShot(250, self._active_ui.open_config_webview)
 
     def handle_runtime_ready(self):
         self.runtime_ready = True
 
         def _close_window() -> None:
-            self.main_window.close()
-        
+            from PySide6.QtWidgets import QApplication
+            QApplication.quit()
+
         # 初始化指令處理器
         if self.runtime and self.runtime.main_agent:
             self.command_handler = CommandHandler(
@@ -904,8 +1084,8 @@ class GUIAgentApp(QObject):
                 exit_callback=_close_window,
                 gui_window=self.main_window,  # 傳入 GUI 窗口以支持 webview
             )
-        
-        self.main_window.update_speech_bubble("AI ready. Double-click to show input.")
+
+        self._active_ui.update_speech_bubble("AI ready. Double-click to show input.")
         QTimer.singleShot(500, self.show_input_container)
         self._auto_open_config_panel_if_needed()
         self._reset_idle_timer()
@@ -939,11 +1119,19 @@ class GUIAgentApp(QObject):
             self._stream_mode = "normal"
             self._typewriter_active = False
             self._typewriter_timer.stop()
-            # 直接使用原始文字，讓 circle_ui 處理圖片
-            final_text = self._compose_display_text()
-            self.main_window.update_speech_bubble(final_text)
+            # Chat mode: pass raw text (no tool HTML); circle mode: full composed text
+            if self._current_mode == "chat":
+                final_text = self._display_text
+            else:
+                final_text = self._compose_display_text()
+            self._active_ui.update_speech_bubble(final_text)
+            # Cancel any pending throttled updates so the timer can't fire
+            # after set_running(False) clears _live_agent_bubble, which would
+            # create a duplicate bubble.
+            self._pending_display_update = False
+            self._update_throttle_timer.stop()
             # 停止動畫，表示 agent 已完成
-            self.main_window.stop_agent_animation()
+            self._active_ui.stop_agent_animation()
         logger.info(f"AI Response: {output[:100]}...")
         if updated_history:
             self.chat_history = updated_history
@@ -959,7 +1147,7 @@ class GUIAgentApp(QObject):
                 delta = ctx - self._prev_context_tokens
                 self._total_tokens_consumed += delta if delta > 0 else ctx
                 self._prev_context_tokens = ctx
-                self.main_window.update_context_meter(ctx, MAX_CONTEXT_TOKENS, self._total_tokens_consumed)
+                self._update_context_both(ctx, MAX_CONTEXT_TOKENS, self._total_tokens_consumed)
             except Exception:
                 pass
 
@@ -967,7 +1155,7 @@ class GUIAgentApp(QObject):
         self._waiting_status = ""
         self._interrupted_partial = ""
         try:
-            self.main_window.set_running(False)
+            self._set_running_both(False)
         except Exception:
             pass
         if self._auto_expand_on_result:
@@ -984,11 +1172,15 @@ class GUIAgentApp(QObject):
         if request_id not in (0, self._active_request_id):
             return
         self._cleanup_pending_tmp_image()
-        self.main_window.update_speech_bubble(self._compose_display_text(f"Error: {error_message}"))
+        self._active_ui.update_speech_bubble(self._compose_display_text(f"Error: {error_message}"))
         # 停止動畫，即使發生錯誤
-        self.main_window.stop_agent_animation()
+        self._active_ui.stop_agent_animation()
         self._waiting_response = False
         self._waiting_status = ""
+        try:
+            self._set_running_both(False)
+        except Exception:
+            pass
         if self._auto_expand_on_result:
             self._expand_ui()
         self._reset_idle_timer()
@@ -1099,9 +1291,13 @@ class GUIAgentApp(QObject):
         """執行實際的顯示更新"""
         if self._pending_display_update:
             try:
-                # 直接使用原始文字，讓 circle_ui 處理圖片
-                display_text = self._compose_display_text()
-                self.main_window.update_speech_bubble(display_text)
+                if self._current_mode == "chat":
+                    # Chat mode: pass raw _display_text so the agent bubble
+                    # does a fast QTextBrowser update (no tool HTML mixed in).
+                    self._active_ui.update_speech_bubble(self._display_text)
+                else:
+                    display_text = self._compose_display_text()
+                    self._active_ui.update_speech_bubble(display_text)
                 self._pending_display_update = False
             except Exception as e:
                 logger.error(f"Display update error: {e}")
@@ -1110,8 +1306,8 @@ class GUIAgentApp(QObject):
         """GUI 輸出回調函數，用於指令處理器"""
         # 特殊指令：清空
         if text == "__clear__":
-            self.main_window.update_speech_bubble("對話已清空")
-            QTimer.singleShot(1000, lambda: self.main_window.update_speech_bubble(""))
+            self._active_ui.update_speech_bubble("對話已清空")
+            QTimer.singleShot(1000, lambda: self._active_ui.update_speech_bubble(""))
         else:
             # Markdown 格式化輸出
             if not text.startswith("**"):
@@ -1120,17 +1316,17 @@ class GUIAgentApp(QObject):
             else:
                 formatted = text
             # 直接使用原始文字，讓 circle_ui 處理圖片
-            self.main_window.update_speech_bubble(self._compose_display_text(formatted))
+            self._active_ui.update_speech_bubble(self._compose_display_text(formatted))
         self._reset_idle_timer()
 
     def show_input_container(self):
         """Show input container."""
-        self.main_window.show_input_container()
+        self._active_ui.show_input_container()
 
     def process_input(self, user_input: str | None = None):
         """Handle user input (text or speech)."""
         if not self.runtime_ready:
-            self.main_window.update_speech_bubble("Initializing... Please wait.")
+            self._active_ui.update_speech_bubble("Initializing... Please wait.")
             logger.warning("Runtime not ready yet")
             return
 
@@ -1143,7 +1339,7 @@ class GUIAgentApp(QObject):
             # 檢查是否為指令
             if user_input.startswith(COMMAND_PREFIX):
                 if not self.command_handler:
-                    self.main_window.update_speech_bubble("指令處理器尚未就緒")
+                    self._active_ui.update_speech_bubble("指令處理器尚未就緒")
                     return
                 # 處理指令（異步）
                 import asyncio
@@ -1164,13 +1360,16 @@ class GUIAgentApp(QObject):
                             self._cleanup_pending_tmp_image()
                             self._reset_tool_log()
                             self._reset_todo_snapshot()
-                            self.main_window.update_speech_bubble("對話 context 已清空")
+                            self._active_ui.update_speech_bubble("對話 context 已清空")
+                            # Also clear chat window history widgets if visible
+                            if self._current_mode == "chat":
+                                self.chat_window.load_history([])
                         except Exception as exc:
-                            self.main_window.update_speech_bubble(f"清空 context 失敗：{exc}")
+                            self._active_ui.update_speech_bubble(f"清空 context 失敗：{exc}")
                         return
                     if result == "__compact__":
-                        self.main_window.update_speech_bubble("壓縮中…")
-                        self.main_window.set_compact_indicator(True)
+                        self._active_ui.update_speech_bubble("壓縮中…")
+                        self._active_ui.set_compact_indicator(True)
 
                         def _on_compact_done(changed, before, after, updated_history, *_exc):
                             # called from background thread — emit signal to main thread
@@ -1181,8 +1380,8 @@ class GUIAgentApp(QObject):
                         try:
                             self.runtime.force_compact(done_callback=_on_compact_done)
                         except Exception as exc:
-                            self.main_window.set_compact_indicator(False)
-                            self.main_window.update_speech_bubble(f"手動壓縮失敗：{exc}")
+                            self._active_ui.set_compact_indicator(False)
+                            self._active_ui.update_speech_bubble(f"手動壓縮失敗：{exc}")
                         return
                     if result:
                         # 指令返回了要執行的提示（如 /retry）
@@ -1210,13 +1409,13 @@ class GUIAgentApp(QObject):
             # ── Retrieve any attachment from the input bar ─────────────────
             _tmp_image_paths: list[str] = []
             try:
-                attached_file = self.main_window.get_attached_file_path()
+                attached_file = self._active_ui.get_attached_file_path()
                 if attached_file:
                     user_input = f"{user_input}\n\n[Attached file: {attached_file}]"
             except Exception:
                 pass
             try:
-                _tmp_image_paths = self.main_window.pop_attached_images_as_tempfiles()
+                _tmp_image_paths = self._active_ui.pop_attached_images_as_tempfiles()
                 if _tmp_image_paths:
                     self._pending_tmp_images = _tmp_image_paths
                     if len(_tmp_image_paths) == 1:
@@ -1266,14 +1465,14 @@ class GUIAgentApp(QObject):
             # ──────────────────────────────────────────────────────────────
 
             logger.info(f"Processing input: {user_input[:80]}...")
-            self.main_window.update_speech_bubble(f"You: {self._last_user_input}")
+            self._active_ui.update_speech_bubble(f"You: {self._last_user_input}")
 
             # 啟動動畫並顯示等待狀態
             def start_waiting():
                 if not self._waiting_response:
                     return
                 self._set_waiting_status("分析需求中...")
-                self.main_window.start_agent_animation()
+                self._active_ui.start_agent_animation()
 
             QTimer.singleShot(500, start_waiting)
             self._display_text = ""
@@ -1289,7 +1488,7 @@ class GUIAgentApp(QObject):
             self._idle_timer.stop()
             # Update stop button state
             try:
-                self.main_window.set_running(True)
+                self._set_running_both(True)
             except Exception:
                 pass
             request_id = self.runtime.submit(user_input, self.chat_history)
@@ -1317,13 +1516,18 @@ class GUIAgentApp(QObject):
             )
         self._waiting_response = False
         self._waiting_status = ""
+        self._pending_display_update = False
+        self._update_throttle_timer.stop()
         if partial:
-            self.main_window.update_speech_bubble(self._compose_display_text())
+            if self._current_mode == "chat":
+                self._active_ui.update_speech_bubble(partial)
+            else:
+                self._active_ui.update_speech_bubble(self._compose_display_text())
         else:
-            self.main_window.update_speech_bubble("(stopped)")
-        self.main_window.stop_agent_animation()
+            self._active_ui.update_speech_bubble("(stopped)")
+        self._active_ui.stop_agent_animation()
         try:
-            self.main_window.set_running(False)
+            self._set_running_both(False)
         except Exception:
             pass
 
@@ -1335,6 +1539,7 @@ class GUIAgentApp(QObject):
             # 清理 GUI 處理器
             set_gui_confirm_handler(None)
             set_gui_question_handler(None)
+            set_gui_render_handler(None)
             self.runtime.stop()
             self.runtime.wait(3000)
         return result

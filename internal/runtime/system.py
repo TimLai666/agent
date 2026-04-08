@@ -171,6 +171,7 @@ async def run_cli(
             http_client,
             skill_root_dirs=skill_root_dirs,
             memory_manager=MemoryManager(),
+            runtime_mode="cli",
         )
 
         def reload_skills_from_webui() -> dict[str, object]:

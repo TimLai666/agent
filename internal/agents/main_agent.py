@@ -253,6 +253,31 @@ class MainAgent:
             variables=variables,
         )
 
+    # Runtime mode prompt snippets injected into the system prompt at create() time.
+    _RUNTIME_MODE_PROMPTS: dict[str, str] = {
+        "gui": (
+            "## Runtime Environment\n\n"
+            "You are running in **GUI** mode (graphical chat window). "
+            "Use the **`RenderRich`** tool to display math formulas, charts, and Mermaid diagrams — "
+            "it renders a live rich bubble with KaTeX math (selectable text) and SVG diagrams. "
+            "**Do NOT write raw `$...$` in your plain-text reply** — use `RenderRich` instead."
+        ),
+        "cli": (
+            "## Runtime Environment\n\n"
+            "You are running in **CLI** mode (terminal / command-line). "
+            "There is no graphical rendering. "
+            "The **`RenderRich`** tool is available but will only print plain text. "
+            "Write math inline as plain text (e.g. 'E = mc^2'); describe charts textually."
+        ),
+        "sdk": (
+            "## Runtime Environment\n\n"
+            "You are running in **SDK** mode (programmatic API — no user terminal or GUI). "
+            "There is no graphical rendering. "
+            "Do not call **`RenderRich`** unless the caller has registered a render handler. "
+            "Return math and structured data as plain text or in the format the caller requested."
+        ),
+    }
+
     @classmethod
     def create(
         cls,
@@ -275,7 +300,16 @@ class MainAgent:
         memory_manager: MemoryManager | None = None,
         disabled_skills: list[str] | None = None,
         extra_mcp_servers: list[Any] | None = None,
+        runtime_mode: str | None = None,
     ) -> "MainAgent":
+        # Prepend runtime-mode context only when explicitly specified
+        if runtime_mode is not None:
+            mode_prompt = cls._RUNTIME_MODE_PROMPTS.get(runtime_mode, "")
+            if mode_prompt:
+                if system_prompt_append:
+                    system_prompt_append = mode_prompt + "\n\n" + system_prompt_append
+                else:
+                    system_prompt_append = mode_prompt
         # Load skills first
         if skills is None:
             try:
@@ -686,9 +720,46 @@ class MainAgent:
             return self._publish_todo_snapshot(snapshot, normalized_items)
 
         @self.agent.tool_plain
+        def RenderRich(content: str) -> str:
+            """在 GUI 介面中渲染富媒體內容（數學公式、圖表、流程圖）。
+
+            **何時使用**：每當你需要展示以下內容時，必須呼叫此工具：
+            - 數學公式（LaTeX 語法）
+            - 統計圖表（bar/line/pie 等）
+            - Mermaid 流程圖/序列圖
+
+            **數學公式語法**：
+            - 行內公式：`$E = mc^2$`（單個錢號）
+            - 獨立公式：`$$a^2 + b^2 = c^2$$`（雙錢號）
+
+            **圖表語法**（JSON 格式的 ```chart 區塊）：
+            ```chart
+            {"type": "bar", "title": "範例", "x": ["A","B"], "y": [10, 20]}
+            ```
+            支援類型：bar, barh, line, scatter, pie, hist
+
+            **Mermaid 流程圖語法**：
+            ```mermaid
+            graph TD; A --> B --> C
+            ```
+
+            `content` 可以是純數學、純圖表、純流程圖，也可以混合 Markdown 文字。
+            在 CLI 模式下會以純文字顯示。
+
+            **重要**：不要在一般回覆中直接寫 $...$，一律透過此工具渲染。
+            """
+            try:
+                from internal.cli import render_rich
+                return render_rich(content)
+            except Exception as exc:
+                logger.warning("RenderRich encountered an error: %s", exc)
+                return f"(RenderRich failed: {exc}. Content: {content[:200]})"
+
+        @self.agent.tool_plain
         def AskUserQuestion(
             question: str,
             options: str = "",
+            multi: bool = False,
         ) -> str:
             """向使用者提問，等待回答後再繼續執行。
 
@@ -699,7 +770,11 @@ class MainAgent:
             - 需要使用者提供具體資訊（名稱、格式、路徑等）
 
             **`options`**：逗號分隔的選項文字（例如 "Word, PDF, Markdown"）。
-            GUI 會將每個選項渲染成可點擊按鈕；留空則顯示自由輸入框。
+            GUI 會將每個選項渲染成可點擊按鈕或勾選框；留空則顯示自由輸入框。
+            無論單選或多選，GUI 都會額外提供「自訂輸入」讓使用者填寫任意答案。
+
+            **`multi`**：設為 true 時顯示多選勾選框（允許同時選多項），
+            回傳值為以逗號分隔的所有已選項目。預設為 false（單選）。
 
             **多個問題**：若需要多項資訊且問題彼此獨立，請在單一 `question` 中以編號列出所有問題，
             減少對使用者的打擾。只有當第二個問題的答案依賴第一個問題時，才分成多次呼叫。
@@ -709,7 +784,7 @@ class MainAgent:
             try:
                 opts = [o.strip() for o in options.split(",") if o.strip()] if options else []
                 from internal.cli import ask_user_question
-                result = ask_user_question(question, opts)
+                result = ask_user_question(question, opts, multi=multi)
                 return result if result else "(no answer — user dismissed the dialog)"
             except Exception as exc:
                 logger.warning("AskUserQuestion encountered an error: %s", exc)
