@@ -1196,6 +1196,8 @@ class GUIAgentApp(QObject):
             # 更新 GUI 歷史
             if self._last_user_input:
                 self._gui_history.append((self._last_user_input, output or ""))
+            if self._current_mode == "chat":
+                self._refresh_saved_conversations()
             # Update token usage display
             try:
                 from internal.compaction import MAX_CONTEXT_TOKENS
@@ -1402,7 +1404,7 @@ class GUIAgentApp(QObject):
                 # 處理指令（異步）
                 import asyncio
                 async def handle_command():
-                    result = await self.command_handler.handle(user_input)
+                    result = await self.command_handler.handle_async(user_input)
                     if result == "__clear_context__":
                         try:
                             self.runtime.clear_context()

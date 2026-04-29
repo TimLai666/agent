@@ -4507,6 +4507,8 @@ class ChatWindow(QMainWindow):
         self._last_user_image_count: int = 0
 
         # Todo panel refs (built in _build_ui)
+        self._history_panel: QWidget | None = None
+        self._history_list: QListWidget | None = None
         self._todo_panel: QWidget | None = None
         self._todo_browser: QTextBrowser | None = None
 
@@ -4520,6 +4522,7 @@ class ChatWindow(QMainWindow):
 
     def set_history_sessions(self, sessions: list[dict[str, object]]) -> None:
         self._history_sessions = list(sessions or [])
+        self._populate_history_list()
 
     # ── UI construction ───────────────────────────────────────────────────
 
@@ -4562,12 +4565,14 @@ class ChatWindow(QMainWindow):
         self._chat_layout.addStretch(1)   # keeps messages pushed to top
         self._scroll.setWidget(self._chat_container)
 
-        # Body row: chat area (left) + todo sidebar (right, hidden by default)
+        # Body row: history sidebar (left) + chat area + todo sidebar (right)
         body_row = QWidget()
         body_row.setStyleSheet("background: transparent;")
         body_h = QHBoxLayout(body_row)
         body_h.setContentsMargins(0, 0, 0, 0)
         body_h.setSpacing(0)
+        self._history_panel = self._build_history_panel()
+        body_h.addWidget(self._history_panel)
         body_h.addWidget(self._scroll, 1)
         self._todo_panel = self._build_todo_panel()
         body_h.addWidget(self._todo_panel)
@@ -4579,6 +4584,98 @@ class ChatWindow(QMainWindow):
         sep2.setStyleSheet("background: rgba(255,255,255,12);")
         vbox.addWidget(sep2)
         self._build_input_area(vbox)
+
+    def _build_history_panel(self) -> QWidget:
+        panel = QWidget()
+        panel.setFixedWidth(240)
+        panel.setStyleSheet(
+            "background: rgba(14,16,34,245);"
+            "border-right: 1px solid rgba(80,100,200,35);"
+        )
+        v = QVBoxLayout(panel)
+        v.setContentsMargins(8, 8, 8, 8)
+        v.setSpacing(6)
+
+        hdr = QLabel("History")
+        hdr.setStyleSheet(
+            "QLabel { color: #88c0f0; font-size: 12px; font-weight: bold; "
+            "background: transparent; border: none; }"
+        )
+        v.addWidget(hdr)
+
+        self._history_list = QListWidget()
+        self._history_list.setStyleSheet(
+            "QListWidget { background: transparent; border: none; color: #b8cce4; font-size: 11px; }"
+            "QListWidget::item { padding: 7px 4px; border-radius: 5px; }"
+            "QListWidget::item:hover { background: rgba(80,110,180,55); }"
+            "QListWidget::item:selected { background: rgba(60,95,170,135); }"
+            "QScrollBar:vertical { width: 4px; background: transparent; }"
+            "QScrollBar::handle:vertical { background: rgba(80,110,200,90); border-radius: 2px; }"
+        )
+        self._history_list.itemDoubleClicked.connect(lambda _item: self._resume_selected_history())
+        v.addWidget(self._history_list, 1)
+
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(6)
+        resume_btn = QPushButton("Resume")
+        delete_btn = QPushButton("Delete")
+        for btn in (resume_btn, delete_btn):
+            btn.setFixedHeight(24)
+            btn.setStyleSheet(
+                "QPushButton { background: rgba(36,48,90,210); color: #b8d8ff; "
+                "border: 1px solid rgba(70,110,220,70); border-radius: 6px; "
+                "font-size: 10px; padding: 0 8px; }"
+                "QPushButton:hover { background: rgba(50,68,120,235); }"
+            )
+        resume_btn.clicked.connect(self._resume_selected_history)
+        delete_btn.clicked.connect(self._delete_selected_history)
+        row.addWidget(resume_btn)
+        row.addWidget(delete_btn)
+        v.addLayout(row)
+
+        self._populate_history_list()
+        return panel
+
+    def _populate_history_list(self) -> None:
+        if self._history_list is None:
+            return
+        self._history_list.clear()
+        for session in self._history_sessions:
+            updated = str(session.get("updated_at") or "")
+            turns = session.get("turn_count") or 0
+            preview = str(session.get("preview") or "(empty)")
+            sid = str(session.get("session_id") or "")
+            label = f"{updated}\n{turns} turns - {preview}"
+            item = QListWidgetItem(label)
+            item.setToolTip(sid)
+            item.setData(Qt.ItemDataRole.UserRole, sid)
+            self._history_list.addItem(item)
+
+    def _selected_history_id(self) -> str:
+        if self._history_list is None:
+            return ""
+        item = self._history_list.currentItem()
+        return str(item.data(Qt.ItemDataRole.UserRole) or "") if item else ""
+
+    def _resume_selected_history(self) -> None:
+        sid = self._selected_history_id()
+        if sid:
+            self.history_resume_requested.emit(sid)
+
+    def _delete_selected_history(self) -> None:
+        sid = self._selected_history_id()
+        if not sid:
+            return
+        answer = QMessageBox.question(
+            self,
+            "Delete Conversation",
+            "Delete this saved conversation?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer == QMessageBox.StandardButton.Yes:
+            self.history_delete_requested.emit(sid)
 
     def _build_todo_panel(self) -> QWidget:
         """Build the right-side sidebar: top = todo, bottom = memory file list."""
@@ -4724,18 +4821,6 @@ class ChatWindow(QMainWindow):
         )
         h.addWidget(title)
         h.addStretch(1)
-
-        history_btn = QPushButton("History")
-        history_btn.setFixedHeight(26)
-        history_btn.setStyleSheet(
-            "QPushButton { background: rgba(36,48,90,210); color: #88c0f0; "
-            "border: 1px solid rgba(70,110,220,80); border-radius: 8px; "
-            "font-size: 11px; padding: 0 12px; }"
-            "QPushButton:hover { background: rgba(50,68,120,235); color: #b8d8ff; "
-            "border: 1px solid rgba(90,140,255,120); }"
-        )
-        history_btn.clicked.connect(self._open_history_dialog)
-        h.addWidget(history_btn)
 
         # Compact indicator
         self._compact_label = QLabel("✂ 壓縮記憶中…")

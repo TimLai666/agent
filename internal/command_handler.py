@@ -3,6 +3,7 @@
 CLI 和 GUI 模式都使用此模組處理用戶指令
 """
 
+import asyncio
 from typing import Callable, Optional
 import threading
 import webbrowser
@@ -42,7 +43,20 @@ class CommandHandler:
         self.last_user_prompt = ""
         self.last_assistant_reply = ""
     
-    async def handle(self, command: str) -> Optional[str]:
+    def handle(self, command: str) -> Optional[str]:
+        """Synchronous command API for simple callers and tests."""
+        parts = command.strip().split()
+        if not parts:
+            return None
+        if parts[0].lower() == "/skills":
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                return asyncio.run(self.handle_async(command))
+            raise RuntimeError("Use handle_async() for /skills while an event loop is running")
+        return self._handle_sync(command)
+
+    async def handle_async(self, command: str) -> Optional[str]:
         """
         處理指令
 
@@ -55,6 +69,19 @@ class CommandHandler:
             - str: 要執行的提示文本（如 /retry 返回上次輸入）
         """
         parts = command.strip().split()
+        if not parts:
+            return None
+        name = parts[0].lower()
+        args = parts[1:]
+        if name == "/skills":
+            await self._handle_skills_command(args)
+            return None
+        return self._handle_sync(command)
+
+    def _handle_sync(self, command: str) -> Optional[str]:
+        parts = command.strip().split()
+        if not parts:
+            return None
         name = parts[0].lower()
         args = parts[1:]
         
@@ -81,7 +108,7 @@ class CommandHandler:
         
         # /skills - Skills 相關指令
         elif name == "/skills":
-            await self._handle_skills_command(args)
+            self.output_callback("/skills requires async handling; use handle_async().")
             return None
         
         # /history - 顯示對話歷史

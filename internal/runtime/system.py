@@ -322,7 +322,7 @@ async def run_cli(
                 if not user_input:
                     return
                 if user_input.startswith(COMMAND_PREFIX):
-                    action = await command_handler.handle(user_input)
+                    action = await command_handler.handle_async(user_input)
                     if action == "__exit__":
                         return
                     if action == "__clear_context__":
@@ -361,7 +361,7 @@ async def run_cli(
                     if not user_input:
                         continue
                     if user_input.startswith(COMMAND_PREFIX):
-                        action = await command_handler.handle(user_input)
+                        action = await command_handler.handle_async(user_input)
                         if action == "__exit__":
                             break
                         if action == "__clear_context__":
