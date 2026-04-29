@@ -281,6 +281,7 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPushButton,
     QScrollArea,
@@ -4606,33 +4607,14 @@ class ChatWindow(QMainWindow):
         self._history_list = QListWidget()
         self._history_list.setStyleSheet(
             "QListWidget { background: transparent; border: none; color: #b8cce4; font-size: 11px; }"
-            "QListWidget::item { padding: 7px 4px; border-radius: 5px; }"
+            "QListWidget::item { border-radius: 5px; }"
             "QListWidget::item:hover { background: rgba(80,110,180,55); }"
             "QListWidget::item:selected { background: rgba(60,95,170,135); }"
             "QScrollBar:vertical { width: 4px; background: transparent; }"
             "QScrollBar::handle:vertical { background: rgba(80,110,200,90); border-radius: 2px; }"
         )
-        self._history_list.itemDoubleClicked.connect(lambda _item: self._resume_selected_history())
+        self._history_list.itemClicked.connect(lambda _item: self._resume_selected_history())
         v.addWidget(self._history_list, 1)
-
-        row = QHBoxLayout()
-        row.setContentsMargins(0, 0, 0, 0)
-        row.setSpacing(6)
-        resume_btn = QPushButton("Resume")
-        delete_btn = QPushButton("Delete")
-        for btn in (resume_btn, delete_btn):
-            btn.setFixedHeight(24)
-            btn.setStyleSheet(
-                "QPushButton { background: rgba(36,48,90,210); color: #b8d8ff; "
-                "border: 1px solid rgba(70,110,220,70); border-radius: 6px; "
-                "font-size: 10px; padding: 0 8px; }"
-                "QPushButton:hover { background: rgba(50,68,120,235); }"
-            )
-        resume_btn.clicked.connect(self._resume_selected_history)
-        delete_btn.clicked.connect(self._delete_selected_history)
-        row.addWidget(resume_btn)
-        row.addWidget(delete_btn)
-        v.addLayout(row)
 
         self._populate_history_list()
         return panel
@@ -4646,11 +4628,74 @@ class ChatWindow(QMainWindow):
             turns = session.get("turn_count") or 0
             preview = str(session.get("preview") or "(empty)")
             sid = str(session.get("session_id") or "")
-            label = f"{updated}\n{turns} turns - {preview}"
-            item = QListWidgetItem(label)
+            item = QListWidgetItem()
             item.setToolTip(sid)
             item.setData(Qt.ItemDataRole.UserRole, sid)
             self._history_list.addItem(item)
+            row = self._build_history_row(sid, updated, int(turns or 0), preview)
+            item.setSizeHint(row.sizeHint())
+            self._history_list.setItemWidget(item, row)
+
+    def _build_history_row(self, session_id: str, updated: str, turns: int, preview: str) -> QWidget:
+        row = QWidget()
+        row.setStyleSheet("QWidget { background: transparent; }")
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(6, 6, 4, 6)
+        layout.setSpacing(6)
+
+        text_box = QWidget()
+        text_layout = QVBoxLayout(text_box)
+        text_layout.setContentsMargins(0, 0, 0, 0)
+        text_layout.setSpacing(2)
+
+        title = QLabel(updated or "Saved conversation")
+        title.setStyleSheet("QLabel { color: #d8e6ff; font-size: 11px; background: transparent; }")
+        title.setTextInteractionFlags(Qt.TextInteractionFlag.NoTextInteraction)
+        title.setWordWrap(False)
+        text_layout.addWidget(title)
+
+        subtitle = QLabel(f"{turns} turns - {preview}")
+        subtitle.setStyleSheet("QLabel { color: rgba(184,204,228,160); font-size: 10px; background: transparent; }")
+        subtitle.setWordWrap(True)
+        subtitle.setTextInteractionFlags(Qt.TextInteractionFlag.NoTextInteraction)
+        text_layout.addWidget(subtitle)
+
+        layout.addWidget(text_box, 1)
+
+        def resume_from_row(_event) -> None:
+            self.history_resume_requested.emit(session_id)
+
+        row.mousePressEvent = resume_from_row
+        text_box.mousePressEvent = resume_from_row
+        title.mousePressEvent = resume_from_row
+        subtitle.mousePressEvent = resume_from_row
+
+        menu_btn = QToolButton()
+        menu_btn.setText("...")
+        menu_btn.setFixedSize(24, 22)
+        menu_btn.setToolTip("Conversation actions")
+        menu_btn.setStyleSheet(
+            "QToolButton { background: transparent; color: rgba(185,205,235,170); "
+            "border: none; border-radius: 4px; font-size: 12px; }"
+            "QToolButton:hover { background: rgba(255,255,255,12); color: #e8f0ff; }"
+        )
+
+        menu = QMenu(menu_btn)
+        menu.setStyleSheet(
+            "QMenu { background: #151a2e; color: #d8e6ff; border: 1px solid rgba(90,120,200,90); }"
+            "QMenu::item { padding: 6px 22px 6px 10px; }"
+            "QMenu::item:selected { background: rgba(70,105,180,150); }"
+        )
+        delete_action = menu.addAction("Delete")
+
+        def delete_from_menu() -> None:
+            self._delete_history_session(session_id)
+
+        delete_action.triggered.connect(delete_from_menu)
+        menu_btn.setMenu(menu)
+        menu_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        layout.addWidget(menu_btn)
+        return row
 
     def _selected_history_id(self) -> str:
         if self._history_list is None:
@@ -4665,6 +4710,9 @@ class ChatWindow(QMainWindow):
 
     def _delete_selected_history(self) -> None:
         sid = self._selected_history_id()
+        self._delete_history_session(sid)
+
+    def _delete_history_session(self, sid: str) -> None:
         if not sid:
             return
         answer = QMessageBox.question(
