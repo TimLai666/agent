@@ -281,6 +281,7 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMainWindow,
+    QMessageBox,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -4462,6 +4463,8 @@ class ChatWindow(QMainWindow):
     confirm_requested = Signal(str, str, object)
     question_requested = Signal(str, list, bool, object)  # question, options, multi, result_container
     render_rich_requested = Signal(str)  # content — insert a _RichBubble into chat
+    history_resume_requested = Signal(str)
+    history_delete_requested = Signal(str)
 
     _CHIP_STYLE = (
         "QLabel { background: rgba(45,55,80,200); color: #a8d4ff; "
@@ -4487,6 +4490,7 @@ class ChatWindow(QMainWindow):
         self._stop_callback = None
         self._voice_callback = None
         self._input_callback = None
+        self._history_sessions: list[dict[str, object]] = []
         self._is_running: bool = False
         self._attached_file_path: str = ""
         self._attached_images: list[bytes] = []
@@ -4513,6 +4517,9 @@ class ChatWindow(QMainWindow):
         self.confirm_requested.connect(self._handle_confirm_request)
         self.question_requested.connect(self._handle_question_request)
         self.render_rich_requested.connect(self.insert_rich_content)
+
+    def set_history_sessions(self, sessions: list[dict[str, object]]) -> None:
+        self._history_sessions = list(sessions or [])
 
     # ── UI construction ───────────────────────────────────────────────────
 
@@ -4718,6 +4725,18 @@ class ChatWindow(QMainWindow):
         h.addWidget(title)
         h.addStretch(1)
 
+        history_btn = QPushButton("History")
+        history_btn.setFixedHeight(26)
+        history_btn.setStyleSheet(
+            "QPushButton { background: rgba(36,48,90,210); color: #88c0f0; "
+            "border: 1px solid rgba(70,110,220,80); border-radius: 8px; "
+            "font-size: 11px; padding: 0 12px; }"
+            "QPushButton:hover { background: rgba(50,68,120,235); color: #b8d8ff; "
+            "border: 1px solid rgba(90,140,255,120); }"
+        )
+        history_btn.clicked.connect(self._open_history_dialog)
+        h.addWidget(history_btn)
+
         # Compact indicator
         self._compact_label = QLabel("✂ 壓縮記憶中…")
         self._compact_label.setFixedHeight(22)
@@ -4745,6 +4764,73 @@ class ChatWindow(QMainWindow):
         switch_btn.clicked.connect(self.switch_to_circle.emit)
         h.addWidget(switch_btn)
         return bar
+
+    def _open_history_dialog(self) -> None:
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Conversation History")
+        dlg.resize(560, 360)
+        v = QVBoxLayout(dlg)
+        v.setContentsMargins(12, 12, 12, 12)
+        v.setSpacing(8)
+
+        lst = QListWidget()
+        lst.setStyleSheet(
+            "QListWidget { background: #151a2e; color: #d8e6ff; border: 1px solid rgba(90,120,200,90); }"
+            "QListWidget::item { padding: 8px; }"
+            "QListWidget::item:selected { background: rgba(60,95,170,160); }"
+        )
+        for session in self._history_sessions:
+            updated = str(session.get("updated_at") or "")
+            turns = session.get("turn_count") or 0
+            preview = str(session.get("preview") or "(empty)")
+            sid = str(session.get("session_id") or "")
+            item = QListWidgetItem(f"{updated}  [{turns} turns]\n{preview}")
+            item.setData(Qt.ItemDataRole.UserRole, sid)
+            lst.addItem(item)
+        v.addWidget(lst, 1)
+
+        row = QHBoxLayout()
+        resume_btn = QPushButton("Resume")
+        delete_btn = QPushButton("Delete")
+        close_btn = QPushButton("Close")
+        row.addStretch(1)
+        row.addWidget(resume_btn)
+        row.addWidget(delete_btn)
+        row.addWidget(close_btn)
+        v.addLayout(row)
+
+        def selected_id() -> str:
+            item = lst.currentItem()
+            return str(item.data(Qt.ItemDataRole.UserRole) or "") if item else ""
+
+        def resume() -> None:
+            sid = selected_id()
+            if sid:
+                self.history_resume_requested.emit(sid)
+                dlg.accept()
+
+        def delete() -> None:
+            sid = selected_id()
+            if not sid:
+                return
+            answer = QMessageBox.question(
+                dlg,
+                "Delete Conversation",
+                "Delete this saved conversation?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer == QMessageBox.StandardButton.Yes:
+                self.history_delete_requested.emit(sid)
+                row = lst.currentRow()
+                if row >= 0:
+                    lst.takeItem(row)
+
+        lst.itemDoubleClicked.connect(lambda _item: resume())
+        resume_btn.clicked.connect(resume)
+        delete_btn.clicked.connect(delete)
+        close_btn.clicked.connect(dlg.accept)
+        dlg.exec()
 
     def _build_input_area(self, parent_layout: QVBoxLayout) -> None:
         wrapper = QWidget()

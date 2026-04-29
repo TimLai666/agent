@@ -13,6 +13,7 @@ from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.openai import OpenAIProvider
 
 from internal.agents import MainAgent
+from internal.conversation_history import ConversationHistoryStore
 from internal.logger import logger
 from internal.memory import MemoryManager
 from internal.paths import set_runtime_paths
@@ -57,12 +58,16 @@ class Agent:
         memory_enabled: bool = True,
         memory_dir: str | Path | None = None,
         memory_system: MemoryManager | None = None,
+        conversation_history_dir: str | Path | None = None,
         disabled_skills: list[str] | None = None,
         extra_mcp_servers: list[Any] | None = None,
     ) -> None:
         self.workspace_root = self._resolve_workspace_root(workspace)
-        if self.workspace_root is not None:
-            set_runtime_paths(sandbox_dir=self.workspace_root)
+        if self.workspace_root is not None or conversation_history_dir is not None:
+            set_runtime_paths(
+                sandbox_dir=self.workspace_root,
+                conversations_dir=conversation_history_dir,
+            )
 
         self.system_name = system_name
         self.system_prompt_append = system_prompt_append
@@ -79,6 +84,8 @@ class Agent:
         self.start_mcp_servers = start_mcp_servers
         self.disabled_skills = disabled_skills
         self.extra_mcp_servers = extra_mcp_servers
+        self.conversation_history_dir = conversation_history_dir
+        self._conversation_history_store = ConversationHistoryStore(conversation_history_dir)
 
         # Memory system: use provided instance, or build one from flags/dir
         if memory_system is not None:
@@ -182,6 +189,7 @@ class Agent:
             include_skill_tool=self.include_skill_tool,
             include_subagent_tools=self.include_subagent_tools,
             memory_manager=self._memory_manager,
+            conversation_history_store=self._conversation_history_store,
             disabled_skills=self.disabled_skills,
             extra_mcp_servers=self.extra_mcp_servers,
             runtime_mode="sdk",

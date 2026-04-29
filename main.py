@@ -547,6 +547,8 @@ class GUIAgentApp(QObject):
         self.chat_window.set_voice_callback(self._on_voice_event)
         self.chat_window.switch_to_circle.connect(self._switch_to_circle)
         self.chat_window.switch_to_circle_collapsed.connect(self._switch_to_circle_collapsed)
+        self.chat_window.history_resume_requested.connect(self._resume_saved_conversation)
+        self.chat_window.history_delete_requested.connect(self._delete_saved_conversation)
         try:
             self.chat_window.typing.connect(self._reset_idle_timer)
         except Exception:
@@ -572,6 +574,7 @@ class GUIAgentApp(QObject):
         if self._current_mode == "chat":
             return
         self._current_mode = "chat"
+        self._refresh_saved_conversations()
         # Populate chat history from completed pairs
         self.chat_window.load_history(list(self._gui_history))
         # Sync live exchange state — only pass agent_text when actively running.
@@ -662,6 +665,61 @@ class GUIAgentApp(QObject):
             pass
 
     # ── Voice mode handlers ───────────────────────────────────────────────
+
+    def _refresh_saved_conversations(self) -> None:
+        try:
+            if not self.runtime.main_agent:
+                self.chat_window.set_history_sessions([])
+                return
+            sessions = [
+                {
+                    "session_id": item.session_id,
+                    "created_at": item.created_at,
+                    "updated_at": item.updated_at,
+                    "turn_count": item.turn_count,
+                    "preview": item.preview,
+                }
+                for item in self.runtime.main_agent.conversation_history_store.list_sessions()
+            ]
+            self.chat_window.set_history_sessions(sessions)
+        except Exception:
+            logger.exception("Failed to refresh saved conversations")
+
+    def _resume_saved_conversation(self, session_id: str) -> None:
+        try:
+            if not self.runtime.main_agent:
+                return
+            store = self.runtime.main_agent.conversation_history_store
+            self.chat_history = store.load_message_history(session_id)
+            self.runtime.main_agent._session_id = session_id
+            self.runtime.main_agent._last_messages = list(self.chat_history or [])
+            self._gui_history = deque(store.load_display_history(session_id))
+            self._display_text = ""
+            self._last_user_input = ""
+            self._last_assistant_reply = ""
+            self._discussion_text = ""
+            self._stop_context = ""
+            self._reset_tool_log()
+            self._reset_todo_snapshot()
+            self.runtime._conversation_state = ConversationState(fullMessages=list(self.chat_history or []))
+            self.runtime._conversation_state.totalTokens = recalc_total_tokens(self.runtime._conversation_state.fullMessages)
+            self.chat_window.load_history(list(self._gui_history))
+            self._update_context_both(
+                self.runtime._conversation_state.totalTokens,
+                MAX_CONTEXT_TOKENS,
+                self._total_tokens_consumed,
+            )
+        except Exception as exc:
+            logger.exception("Failed to resume saved conversation")
+            self.chat_window.update_speech_bubble(f"Failed to resume conversation: {exc}")
+
+    def _delete_saved_conversation(self, session_id: str) -> None:
+        try:
+            if self.runtime.main_agent:
+                self.runtime.main_agent.conversation_history_store.delete_session(session_id)
+            self._refresh_saved_conversations()
+        except Exception:
+            logger.exception("Failed to delete saved conversation")
 
     def _on_voice_event(self, event: str) -> None:
         """Called from active UI when user interacts with voice button/send."""
