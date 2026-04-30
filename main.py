@@ -3,6 +3,7 @@ import asyncio
 import concurrent.futures
 import html as _html_module
 import sys
+import uuid
 import warnings
 from collections import deque
 from contextlib import AsyncExitStack
@@ -547,6 +548,7 @@ class GUIAgentApp(QObject):
         self.chat_window.set_voice_callback(self._on_voice_event)
         self.chat_window.switch_to_circle.connect(self._switch_to_circle)
         self.chat_window.switch_to_circle_collapsed.connect(self._switch_to_circle_collapsed)
+        self.chat_window.new_conversation_requested.connect(self._start_new_conversation)
         self.chat_window.history_resume_requested.connect(self._resume_saved_conversation)
         self.chat_window.history_delete_requested.connect(self._delete_saved_conversation)
         try:
@@ -704,6 +706,7 @@ class GUIAgentApp(QObject):
             self.runtime._conversation_state = ConversationState(fullMessages=list(self.chat_history or []))
             self.runtime._conversation_state.totalTokens = recalc_total_tokens(self.runtime._conversation_state.fullMessages)
             self.chat_window.load_history(list(self._gui_history))
+            self.chat_window.clear_history_selection()
             self._update_context_both(
                 self.runtime._conversation_state.totalTokens,
                 MAX_CONTEXT_TOKENS,
@@ -720,6 +723,34 @@ class GUIAgentApp(QObject):
             self._refresh_saved_conversations()
         except Exception:
             logger.exception("Failed to delete saved conversation")
+
+    def _start_new_conversation(self) -> None:
+        try:
+            if self._waiting_response:
+                self.chat_window.update_speech_bubble("Please stop the current response before starting a new conversation.")
+                return
+            self.runtime.clear_context()
+            self.chat_history = None
+            self._gui_history.clear()
+            if self.command_handler:
+                self.command_handler.clear_context_state()
+            self._last_user_input = ""
+            self._last_assistant_reply = ""
+            self._display_text = ""
+            self._discussion_text = ""
+            self._stop_context = ""
+            self._cleanup_pending_tmp_image()
+            self._reset_tool_log()
+            self._reset_todo_snapshot()
+            if self.runtime.main_agent is not None:
+                self.runtime.main_agent._session_id = str(uuid.uuid4())
+            self.chat_window.set_running(False)
+            self.chat_window.load_history([])
+            self.chat_window.clear_history_selection()
+            self._update_context_both(0, MAX_CONTEXT_TOKENS, self._total_tokens_consumed)
+        except Exception:
+            logger.exception("Failed to start new conversation")
+            self.chat_window.update_speech_bubble("Failed to start a new conversation.")
 
     def _on_voice_event(self, event: str) -> None:
         """Called from active UI when user interacts with voice button/send."""

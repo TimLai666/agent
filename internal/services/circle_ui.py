@@ -10,6 +10,7 @@ import weakref
 import urllib.request
 import concurrent.futures
 import base64
+from datetime import datetime
 from io import BytesIO
 try:
     from PIL import Image
@@ -277,6 +278,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QFileDialog,
+    QAbstractItemView,
     QLineEdit,
     QListWidget,
     QListWidgetItem,
@@ -4430,7 +4432,7 @@ class _MemoryViewerDialog(QDialog):
         hdr.setTextFormat(Qt.TextFormat.RichText)
         v.addWidget(hdr)
 
-        browser = QTextBrowser()
+        browser = AutoWrapTextBrowser()
         browser.setOpenExternalLinks(False)
         if content:
             try:
@@ -4464,6 +4466,7 @@ class ChatWindow(QMainWindow):
     confirm_requested = Signal(str, str, object)
     question_requested = Signal(str, list, bool, object)  # question, options, multi, result_container
     render_rich_requested = Signal(str)  # content — insert a _RichBubble into chat
+    new_conversation_requested = Signal()
     history_resume_requested = Signal(str)
     history_delete_requested = Signal(str)
 
@@ -4510,6 +4513,7 @@ class ChatWindow(QMainWindow):
         # Todo panel refs (built in _build_ui)
         self._history_panel: QWidget | None = None
         self._history_list: QListWidget | None = None
+        self._new_chat_btn: QPushButton | None = None
         self._todo_panel: QWidget | None = None
         self._todo_browser: QTextBrowser | None = None
 
@@ -4597,19 +4601,41 @@ class ChatWindow(QMainWindow):
         v.setContentsMargins(8, 8, 8, 8)
         v.setSpacing(6)
 
+        hdr_row = QWidget()
+        hdr_layout = QHBoxLayout(hdr_row)
+        hdr_layout.setContentsMargins(0, 0, 0, 0)
+        hdr_layout.setSpacing(6)
+
         hdr = QLabel("History")
         hdr.setStyleSheet(
             "QLabel { color: #88c0f0; font-size: 12px; font-weight: bold; "
             "background: transparent; border: none; }"
         )
-        v.addWidget(hdr)
+        hdr_layout.addWidget(hdr, 1)
+
+        self._new_chat_btn = QPushButton("New")
+        self._new_chat_btn.setFixedHeight(24)
+        self._new_chat_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._new_chat_btn.setToolTip("Start a blank conversation")
+        self._new_chat_btn.setStyleSheet(
+            "QPushButton { background: rgba(46,72,132,180); color: #e6f0ff; "
+            "border: 1px solid rgba(98,140,220,110); border-radius: 6px; "
+            "padding: 0 10px; font-size: 11px; }"
+            "QPushButton:hover { background: rgba(58,86,150,210); }"
+            "QPushButton:disabled { background: rgba(40,48,72,120); color: rgba(190,205,225,110); "
+            "border: 1px solid rgba(80,100,140,60); }"
+        )
+        self._new_chat_btn.clicked.connect(self.new_conversation_requested.emit)
+        hdr_layout.addWidget(self._new_chat_btn, 0)
+        v.addWidget(hdr_row)
 
         self._history_list = QListWidget()
+        self._history_list.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        self._history_list.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._history_list.setStyleSheet(
             "QListWidget { background: transparent; border: none; color: #b8cce4; font-size: 11px; }"
-            "QListWidget::item { border-radius: 5px; }"
+            "QListWidget::item { border-radius: 5px; outline: none; }"
             "QListWidget::item:hover { background: rgba(80,110,180,55); }"
-            "QListWidget::item:selected { background: rgba(60,95,170,135); }"
             "QScrollBar:vertical { width: 4px; background: transparent; }"
             "QScrollBar::handle:vertical { background: rgba(80,110,200,90); border-radius: 2px; }"
         )
@@ -4648,17 +4674,18 @@ class ChatWindow(QMainWindow):
         text_layout.setContentsMargins(0, 0, 0, 0)
         text_layout.setSpacing(2)
 
-        title = QLabel(updated or "Saved conversation")
+        title = QLabel(self._history_title_text(preview))
         title.setStyleSheet("QLabel { color: #d8e6ff; font-size: 11px; background: transparent; }")
         title.setTextInteractionFlags(Qt.TextInteractionFlag.NoTextInteraction)
-        title.setWordWrap(False)
+        title.setWordWrap(True)
         text_layout.addWidget(title)
 
-        subtitle = QLabel(f"{turns} turns - {preview}")
+        subtitle = QLabel(self._history_subtitle_text(turns, updated))
         subtitle.setStyleSheet("QLabel { color: rgba(184,204,228,160); font-size: 10px; background: transparent; }")
         subtitle.setWordWrap(True)
         subtitle.setTextInteractionFlags(Qt.TextInteractionFlag.NoTextInteraction)
         text_layout.addWidget(subtitle)
+        row.setToolTip(f"{self._format_history_updated(updated)}\n{session_id}")
 
         layout.addWidget(text_box, 1)
 
@@ -4678,6 +4705,7 @@ class ChatWindow(QMainWindow):
             "QToolButton { background: transparent; color: rgba(185,205,235,170); "
             "border: none; border-radius: 4px; font-size: 12px; }"
             "QToolButton:hover { background: rgba(255,255,255,12); color: #e8f0ff; }"
+            "QToolButton::menu-indicator { image: none; width: 0px; }"
         )
 
         menu = QMenu(menu_btn)
@@ -4697,11 +4725,36 @@ class ChatWindow(QMainWindow):
         layout.addWidget(menu_btn)
         return row
 
+    def _history_title_text(self, preview: str) -> str:
+        text = " ".join((preview or "").split())
+        if not text:
+            return "Saved conversation"
+        return text[:72] + "..." if len(text) > 72 else text
+
+    def _history_subtitle_text(self, turns: int, updated: str) -> str:
+        turn_label = "1 turn" if turns == 1 else f"{turns} turns"
+        return f"{turn_label} · {self._format_history_updated(updated)}"
+
+    def _format_history_updated(self, updated: str) -> str:
+        if not updated:
+            return "Unknown time"
+        try:
+            dt = datetime.fromisoformat(updated.replace("Z", "+00:00"))
+            return dt.astimezone().strftime("%Y-%m-%d %H:%M")
+        except Exception:
+            return updated
+
     def _selected_history_id(self) -> str:
         if self._history_list is None:
             return ""
         item = self._history_list.currentItem()
         return str(item.data(Qt.ItemDataRole.UserRole) or "") if item else ""
+
+    def clear_history_selection(self) -> None:
+        if self._history_list is None:
+            return
+        self._history_list.clearSelection()
+        self._history_list.setCurrentItem(None)
 
     def _resume_selected_history(self) -> None:
         sid = self._selected_history_id()
@@ -4775,7 +4828,7 @@ class ChatWindow(QMainWindow):
         sep1 = QWidget(); sep1.setFixedHeight(1); sep1.setStyleSheet(_SEP_STYLE)
         top_v.addWidget(sep1)
 
-        self._todo_browser = QTextBrowser()
+        self._todo_browser = AutoWrapTextBrowser()
         self._todo_browser.setStyleSheet(_BROWSER_STYLE)
         self._todo_browser.setOpenExternalLinks(False)
         self._todo_browser.setReadOnly(True)
@@ -5217,6 +5270,8 @@ class ChatWindow(QMainWindow):
 
     def set_running(self, running: bool) -> None:
         self._is_running = running
+        if self._new_chat_btn is not None:
+            self._new_chat_btn.setEnabled(not running)
         if running:
             self.send_button.setText("")
             self.send_button.setIcon(_make_stop_icon(20))
@@ -6060,7 +6115,7 @@ class ConfirmDialog(QDialog):
         layout.addWidget(sep)
 
         # Scrollable body — fixed height so long messages don't overflow
-        body = QTextBrowser()
+        body = AutoWrapTextBrowser()
         body.setObjectName("body")
         body.setOpenLinks(False)
         body.setReadOnly(True)
