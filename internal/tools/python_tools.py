@@ -6,6 +6,7 @@ from typing import Any, TextIO
 from pydantic_ai import Agent
 
 from internal.cli import TeeStdout, confirm
+from internal.logger import logger
 
 
 def add_python_tools(agent: Agent) -> None:

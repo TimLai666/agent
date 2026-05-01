@@ -17,14 +17,18 @@ def _load_prompts() -> dict[str, str]:
     根目錄的檔案：key = 檔名大寫（例如 SYSTEM_PROMPT）
     system-prompts 的檔案：key = system_prompts.檔名（例如 system_prompts.agent_prompt_explore）
     """
+    import logging as _logging
+    _log = _logging.getLogger(__name__)
     prompts: dict[str, str] = {}
     if not PROMPTS_DIR.exists():
         return prompts
 
     # 載入根目錄的 prompts
     for path in PROMPTS_DIR.glob("*.md"):
-        key = path.stem.upper()
-        prompts[key] = path.read_text(encoding="utf-8").strip()
+        try:
+            prompts[path.stem.upper()] = path.read_text(encoding="utf-8").strip()
+        except OSError as exc:
+            _log.warning("Failed to read prompt %s: %s", path, exc)
 
     # 載入 system-prompts 子目錄
     system_prompts_dir = PROMPTS_DIR / "system-prompts"
@@ -32,7 +36,10 @@ def _load_prompts() -> dict[str, str]:
         for path in system_prompts_dir.glob("*.md"):
             # 使用小寫並保留連字符，以 system_prompts. 為前綴
             key = f"system_prompts.{path.stem}"
-            prompts[key] = path.read_text(encoding="utf-8").strip()
+            try:
+                prompts[key] = path.read_text(encoding="utf-8").strip()
+            except OSError as exc:
+                _log.warning("Failed to read system prompt %s: %s", path, exc)
 
     return prompts
 
@@ -204,7 +211,7 @@ def _process_variables(text: str, variables: dict[str, str] | None = None) -> st
         "RUN_IN_BACKGROUND_NOTE": "",  # 背景執行說明
         "BASH_TOOL_EXTRA_NOTES": "",  # Bash 工具額外說明
         "BASH_BACKGROUND_TASK_NOTES_FN": "",  # Bash 背景任務說明
-            "SCRATCHPAD_DIR_FN": str(TIM_AGENT_SANDBOX_DIR),  # 沙盒/暫存目錄
+        "SCRATCHPAD_DIR_FN": str(TIM_AGENT_SANDBOX_DIR),  # 沙盒/暫存目錄
         "AGENT_TOOL_USAGE_NOTES": "",  # Agent 工具使用說明
         "TODO_TOOL_OBJECT": "todo",  # 待辦事項工具對象
         "AVAILABLE_TOOLS_SET": "tools",  # 可用工具集合

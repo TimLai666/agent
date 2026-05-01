@@ -207,16 +207,27 @@ class Agent:
                     "MCP servers failed to start in programmatic Agent; continuing without MCP. Root cause: %s",
                     reason,
                 )
+                # Tear down whatever was partially entered, then drop the stack
+                # so close() won't double-aclose.
+                try:
+                    await self._mcp_stack.aclose()
+                except Exception:
+                    pass
+                self._mcp_stack = None
                 self._main_agent.agent._user_toolsets = []
 
     async def close(self) -> None:
         if self._mcp_stack is not None:
-            await self._mcp_stack.aclose()
-            self._mcp_stack = None
+            try:
+                await self._mcp_stack.aclose()
+            finally:
+                self._mcp_stack = None
 
         if self._http_client is not None:
-            await self._http_client.aclose()
-            self._http_client = None
+            try:
+                await self._http_client.aclose()
+            finally:
+                self._http_client = None
 
         self._main_agent = None
 

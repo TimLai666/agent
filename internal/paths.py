@@ -64,6 +64,9 @@ def set_runtime_paths(
 
 	This is intended for SDK/programmatic use where callers need to control
 	workspace/sandbox directories without relying on process-wide env vars.
+
+	Only the paths explicitly passed in are overridden. Paths left as None
+	preserve their previous values (env-based or defaults).
 	"""
 
 	def _resolve(raw: str | Path | None) -> Path | None:
@@ -81,14 +84,33 @@ def set_runtime_paths(
 	if resolved_root is not None:
 		TIM_AGENT_ROOT = resolved_root
 
+	# Preserve existing values when caller did not pass an override.
 	resolved_config = _resolve(config_dir)
-	resolved_skills = _resolve(skills_dir)
-	resolved_sandbox = _resolve(sandbox_dir)
-	resolved_memory = _resolve(memory_dir)
-	resolved_conversations = _resolve(conversations_dir)
+	if resolved_config is not None:
+		TIM_AGENT_CONFIG_DIR = resolved_config
+	elif resolved_root is not None:
+		TIM_AGENT_CONFIG_DIR = TIM_AGENT_ROOT / "config"
 
-	TIM_AGENT_CONFIG_DIR = resolved_config or (TIM_AGENT_ROOT / "config")
-	TIM_AGENT_SKILLS_DIR = resolved_skills or (TIM_AGENT_ROOT / "skills")
-	TIM_AGENT_SANDBOX_DIR = resolved_sandbox or (TIM_AGENT_ROOT / "sandbox")
-	TIM_AGENT_MEMORY_DIR = resolved_memory or (TIM_AGENT_ROOT / "memory")
-	TIM_AGENT_CONVERSATIONS_DIR = resolved_conversations or (TIM_AGENT_ROOT / "conversations")
+	resolved_skills = _resolve(skills_dir)
+	if resolved_skills is not None:
+		TIM_AGENT_SKILLS_DIR = resolved_skills
+	elif resolved_root is not None:
+		TIM_AGENT_SKILLS_DIR = TIM_AGENT_ROOT / "skills"
+
+	resolved_sandbox = _resolve(sandbox_dir)
+	if resolved_sandbox is not None:
+		TIM_AGENT_SANDBOX_DIR = resolved_sandbox
+	elif resolved_root is not None:
+		TIM_AGENT_SANDBOX_DIR = TIM_AGENT_ROOT / "sandbox"
+
+	resolved_memory = _resolve(memory_dir)
+	if resolved_memory is not None:
+		TIM_AGENT_MEMORY_DIR = resolved_memory
+	elif resolved_root is not None:
+		TIM_AGENT_MEMORY_DIR = TIM_AGENT_ROOT / "memory"
+
+	resolved_conversations = _resolve(conversations_dir)
+	if resolved_conversations is not None:
+		TIM_AGENT_CONVERSATIONS_DIR = resolved_conversations
+	elif resolved_root is not None:
+		TIM_AGENT_CONVERSATIONS_DIR = TIM_AGENT_ROOT / "conversations"

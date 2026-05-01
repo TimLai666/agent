@@ -1,3 +1,4 @@
+import asyncio
 import warnings
 from contextlib import AsyncExitStack
 from pathlib import Path
@@ -237,150 +238,115 @@ async def run_cli(
                 else:
                     mcp_started = True
 
-            ready_msg = "\nAgent ready. Type /help for commands."
-            if not mcp_started:
-                ready_msg = (
-                    "\nAgent ready. Type /help for commands."
-                    "\nNote: install Playwright via `uv run playwright install` if you want browser tooling."
-                )
-            print(ready_msg)
-
-            if prompt_once is not None:
-                user_input = prompt_once.strip()
-                if not user_input:
-                    return
-                await stream_print(
-                    main_agent.coordinator_handle_user_turn_stream(
-                        user_input,
-                        message_history=chat_history,
+                ready_msg = "\nAgent ready. Type /help for commands."
+                if not mcp_started:
+                    ready_msg = (
+                        "\nAgent ready. Type /help for commands."
+                        "\nNote: install Playwright via `uv run playwright install` if you want browser tooling."
                     )
-                )
-                return
+                print(ready_msg)
 
-            async def update_history() -> None:
-                nonlocal chat_history
-                try:
-                    if getattr(main_agent, "_last_messages", None):
-                        conversation_state.fullMessages = (
-                            main_agent._last_messages if main_agent._last_messages is not None else []
+                if prompt_once is not None:
+                    user_input = prompt_once.strip()
+                    if not user_input:
+                        return
+                    await stream_print(
+                        main_agent.coordinator_handle_user_turn_stream(
+                            user_input,
+                            message_history=chat_history,
                         )
-                        conversation_state.totalTokens = recalc_total_tokens(conversation_state.fullMessages)
-                        updated_state = await compact_coordinator.maybeCompact(conversation_state)
-                        conversation_state.fullMessages = updated_state.fullMessages
-                        conversation_state.recentMessages = updated_state.recentMessages
-                        conversation_state.compressedSummary = updated_state.compressedSummary
-                        conversation_state.totalTokens = updated_state.totalTokens
-                        conversation_state.lastCompactedMessageId = updated_state.lastCompactedMessageId
-                        chat_history = updated_state.fullMessages
-                    else:
-                        chat_history = None
-                except Exception:
-                    chat_history = None
-
-            async def force_compact() -> tuple[bool, int, int]:
-                nonlocal chat_history
-                base_messages = chat_history or getattr(main_agent, "_last_messages", None) or []
-                if not base_messages:
-                    return False, 0, 0
-
-                conversation_state.fullMessages = list(base_messages)
-                before_count = len(conversation_state.fullMessages)
-                conversation_state.totalTokens = max(
-                    recalc_total_tokens(conversation_state.fullMessages),
-                    MAX_CONTEXT_TOKENS,
-                )
-                updated_state = await compact_coordinator.maybeCompact(conversation_state)
-                conversation_state.fullMessages = updated_state.fullMessages
-                conversation_state.recentMessages = updated_state.recentMessages
-                conversation_state.compressedSummary = updated_state.compressedSummary
-                conversation_state.totalTokens = updated_state.totalTokens
-                conversation_state.lastCompactedMessageId = updated_state.lastCompactedMessageId
-                chat_history = updated_state.fullMessages
-                after_count = len(chat_history)
-                return after_count < before_count, before_count, after_count
-
-            def clear_context() -> None:
-                nonlocal chat_history, conversation_state
-                chat_history = None
-                conversation_state = ConversationState(fullMessages=[])
-                command_handler.clear_context_state()
-                history.clear()
-                main_agent._last_messages = None
-                main_agent._last_assistant_reply = None
-
-            def read_input_once() -> str | None:
-                user_input = input("輸入文字或按Enter啟動語音辨識> ").strip()
-                if not user_input:
-                    user_input = voice_manager.recognize_speech()
-                    if not user_input:
-                        return None
-                    print("Speech recognized: " + user_input)
-                return user_input
-
-            if single_turn:
-                user_input = read_input_once()
-                if not user_input:
-                    return
-                if user_input.startswith(COMMAND_PREFIX):
-                    action = await command_handler.handle_async(user_input)
-                    if action == "__exit__":
-                        return
-                    if action == "__clear_context__":
-                        clear_context()
-                        print("已清空對話 context。")
-                        return
-                    if action == "__compact__":
-                        changed, before, after = await force_compact()
-                        if changed:
-                            print(f"已執行壓縮：訊息數 {before} -> {after}")
-                        else:
-                            print("已嘗試壓縮，但目前可壓縮內容不足（需要超過最近保留訊息量）。")
-                        return
-                    if action:
-                        user_input = action
-                    else:
-                        return
-                if user_input.lower() in ["exit", "quit"]:
-                    return
-                command_handler.update_last_prompt(user_input)
-                await stream_print(
-                    main_agent.coordinator_handle_user_turn_stream(
-                        user_input,
-                        message_history=chat_history,
                     )
-                )
-                await update_history()
-                reply = main_agent._last_assistant_reply or ""
-                command_handler.update_last_reply(reply)
-                history.append((user_input, reply))
-                return
+                    return
 
-            while True:
-                try:
-                    user_input = read_input_once()
+                async def update_history() -> None:
+                    nonlocal chat_history
+                    try:
+                        if getattr(main_agent, "_last_messages", None):
+                            conversation_state.fullMessages = (
+                                main_agent._last_messages if main_agent._last_messages is not None else []
+                            )
+                            conversation_state.totalTokens = recalc_total_tokens(conversation_state.fullMessages)
+                            updated_state = await compact_coordinator.maybeCompact(conversation_state)
+                            conversation_state.fullMessages = updated_state.fullMessages
+                            conversation_state.recentMessages = updated_state.recentMessages
+                            conversation_state.compressedSummary = updated_state.compressedSummary
+                            conversation_state.totalTokens = updated_state.totalTokens
+                            conversation_state.lastCompactedMessageId = updated_state.lastCompactedMessageId
+                            chat_history = updated_state.fullMessages
+                        else:
+                            chat_history = None
+                    except Exception:
+                        chat_history = None
+
+                async def force_compact() -> tuple[bool, int, int]:
+                    nonlocal chat_history
+                    base_messages = chat_history or getattr(main_agent, "_last_messages", None) or []
+                    if not base_messages:
+                        return False, 0, 0
+
+                    conversation_state.fullMessages = list(base_messages)
+                    before_count = len(conversation_state.fullMessages)
+                    conversation_state.totalTokens = max(
+                        recalc_total_tokens(conversation_state.fullMessages),
+                        MAX_CONTEXT_TOKENS,
+                    )
+                    updated_state = await compact_coordinator.maybeCompact(conversation_state)
+                    conversation_state.fullMessages = updated_state.fullMessages
+                    conversation_state.recentMessages = updated_state.recentMessages
+                    conversation_state.compressedSummary = updated_state.compressedSummary
+                    conversation_state.totalTokens = updated_state.totalTokens
+                    conversation_state.lastCompactedMessageId = updated_state.lastCompactedMessageId
+                    chat_history = updated_state.fullMessages
+                    after_count = len(chat_history)
+                    return after_count < before_count, before_count, after_count
+
+                def clear_context() -> None:
+                    nonlocal chat_history, conversation_state
+                    chat_history = None
+                    conversation_state = ConversationState(fullMessages=[])
+                    command_handler.clear_context_state()
+                    history.clear()
+                    main_agent._last_messages = None
+                    main_agent._last_assistant_reply = None
+
+                async def read_input_once() -> str | None:
+                    import asyncio as _asyncio
+                    try:
+                        user_input = (await _asyncio.to_thread(input, "輸入文字或按Enter啟動語音辨識> ")).strip()
+                    except EOFError:
+                        return None
                     if not user_input:
-                        continue
+                        user_input = await _asyncio.to_thread(voice_manager.recognize_speech)
+                        if not user_input:
+                            return None
+                        print("Speech recognized: " + user_input)
+                    return user_input
+
+                if single_turn:
+                    user_input = await read_input_once()
+                    if not user_input:
+                        return
                     if user_input.startswith(COMMAND_PREFIX):
                         action = await command_handler.handle_async(user_input)
                         if action == "__exit__":
-                            break
+                            return
                         if action == "__clear_context__":
                             clear_context()
                             print("已清空對話 context。")
-                            continue
+                            return
                         if action == "__compact__":
                             changed, before, after = await force_compact()
                             if changed:
                                 print(f"已執行壓縮：訊息數 {before} -> {after}")
                             else:
                                 print("已嘗試壓縮，但目前可壓縮內容不足（需要超過最近保留訊息量）。")
-                            continue
+                            return
                         if action:
                             user_input = action
                         else:
-                            continue
+                            return
                     if user_input.lower() in ["exit", "quit"]:
-                        break
+                        return
                     command_handler.update_last_prompt(user_input)
                     await stream_print(
                         main_agent.coordinator_handle_user_turn_stream(
@@ -392,10 +358,51 @@ async def run_cli(
                     reply = main_agent._last_assistant_reply or ""
                     command_handler.update_last_reply(reply)
                     history.append((user_input, reply))
-                except KeyboardInterrupt:
-                    break
-                except Exception as exc:
-                    logger.error("Error: " + str(exc))
-                    print("\nError: " + str(exc) + "\n")
+                    return
+
+                while True:
+                    try:
+                        user_input = await read_input_once()
+                        if not user_input:
+                            continue
+                        if user_input.startswith(COMMAND_PREFIX):
+                            action = await command_handler.handle_async(user_input)
+                            if action == "__exit__":
+                                break
+                            if action == "__clear_context__":
+                                clear_context()
+                                print("已清空對話 context。")
+                                continue
+                            if action == "__compact__":
+                                changed, before, after = await force_compact()
+                                if changed:
+                                    print(f"已執行壓縮：訊息數 {before} -> {after}")
+                                else:
+                                    print("已嘗試壓縮，但目前可壓縮內容不足（需要超過最近保留訊息量）。")
+                                continue
+                            if action:
+                                user_input = action
+                            else:
+                                continue
+                        if user_input.lower() in ["exit", "quit"]:
+                            break
+                        command_handler.update_last_prompt(user_input)
+                        await stream_print(
+                            main_agent.coordinator_handle_user_turn_stream(
+                                user_input,
+                                message_history=chat_history,
+                            )
+                        )
+                        await update_history()
+                        reply = main_agent._last_assistant_reply or ""
+                        command_handler.update_last_reply(reply)
+                        history.append((user_input, reply))
+                    except KeyboardInterrupt:
+                        break
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:
+                        logger.error("Error: " + str(exc))
+                        print("\nError: " + str(exc) + "\n")
         finally:
             config_webui.register_skills_reload_handler(None)

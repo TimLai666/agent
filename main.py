@@ -321,7 +321,9 @@ class AgentRuntime(QThread):
 
     async def _shutdown(self):
         closed: set[int] = set()
-        for state in self._session_states.values():
+        # Snapshot to avoid "dictionary changed size during iteration" if
+        # another coroutine is creating sessions concurrently.
+        for state in list(self._session_states.values()):
             if state.mcp_stack is None or id(state.mcp_stack) in closed:
                 continue
             closed.add(id(state.mcp_stack))
@@ -331,7 +333,11 @@ class AgentRuntime(QThread):
             except Exception as exc:
                 logger.error(f"Error closing MCP servers: {exc}")
         if self.http_client:
-            await self.http_client.aclose()
+            try:
+                await self.http_client.aclose()
+            except Exception as exc:
+                logger.warning("Error closing HTTP client: %s", exc)
+            self.http_client = None
             logger.info("HTTP client closed")
         if self.loop:
             self.loop.stop()
@@ -388,7 +394,9 @@ class AgentRuntime(QThread):
         result_text = "".join(chunks).strip()
         updated_history = None
         if hasattr(main_agent, "_last_messages"):
-            messages = main_agent._last_messages if main_agent._last_messages is not None else []
+            # Copy the message list so later mutations on _last_messages don't
+            # silently rewrite the saved conversation state.
+            messages = list(main_agent._last_messages or [])
             state.conversation_state.fullMessages = messages
             state.conversation_state.totalTokens = recalc_total_tokens(messages)
             if state.compact_coordinator is not None:
@@ -1677,15 +1685,20 @@ class GUIAgentApp(QObject):
                         # 指令已處理完畢
                         pass
                 
+                # 將指令處理排到 agent 線程的事件循環，避免阻塞 Qt 主線程
                 try:
-                    loop = asyncio.get_event_loop()
-                    if loop.is_running():
-                        asyncio.ensure_future(handle_command())
+                    runtime_loop = getattr(self.runtime, "loop", None)
+                    if runtime_loop is not None and runtime_loop.is_running():
+                        asyncio.run_coroutine_threadsafe(handle_command(), runtime_loop)
                     else:
-                        loop.run_until_complete(handle_command())
-                except Exception:
-                    # 如果無法獲取事件循環，使用 QTimer
-                    pass
+                        # 後備：runtime loop 尚未就緒，僅在無事件循環時臨時建立一個
+                        try:
+                            asyncio.run(handle_command())
+                        except RuntimeError:
+                            # 已存在 loop（罕見），改用 ensure_future
+                            asyncio.ensure_future(handle_command())
+                except Exception as exc:
+                    logger.warning("Failed to dispatch command handler: %s", exc)
                 return
             
             # 記錄用戶輸入

@@ -1,9 +1,7 @@
+import shlex
+
 from pydantic_ai.mcp import MCPServerStdio
 from internal.mcp.client_builder import McpClient
-from internal.mcp.fetch import fetch
-from internal.mcp.browser import playwright
-from internal.mcp.taiwan_holiday import taiwan_holiday
-from internal.mcp.computer_use import computer_use
 from internal.services.config_db import list_mcp_tools, list_remote_mcps, get_mcp_last_updated
 from internal.mcp.remote_mcp_loader import load_remote_mcp_from_url
 from internal.logger import logger
@@ -16,9 +14,23 @@ _last_cache_timestamp: str | None = None
 
 # Start with a function that returns the list of built-in MCP servers
 def get_built_in_mcp_servers() -> list[MCPServerStdio]:
-    """Returns a fresh list of built-in MCP servers."""
+    """Build *fresh* instances of the built-in MCP servers on every call.
+
+    Each MCPServerStdio holds a subprocess and an AsyncExitStack-managed
+    transport. Sharing one instance across multiple `run_mcp_servers()`
+    lifetimes (different MainAgent/session contexts) is unsafe: the closed
+    transport cannot be re-entered, and two concurrent sessions cannot
+    share one stdio subprocess.
+    """
     return [
-        fetch, playwright, taiwan_holiday, computer_use,
+        McpClient(command="uvx", args=["mcp-server-fetch"]),
+        McpClient(
+            command="npx",
+            args=["@playwright/mcp@latest"],
+            tool_prefix="playwright_",
+        ),
+        McpClient(command="npx", args=["@bachstudio/taiwan-holiday-mcp@latest"]),
+        McpClient(command="npx", args=["-y", "computer-use-mcp"]),
     ]
 
 
@@ -31,7 +43,15 @@ def _load_mcp_servers() -> list[MCPServerStdio]:
         logger.debug(f"Found {len(custom_tools)} custom MCP tools in the database.")
         for tool_config in custom_tools:
             try:
-                args = tool_config.args.split() if tool_config.args else []
+                try:
+                    args = shlex.split(tool_config.args) if tool_config.args else []
+                except ValueError as parse_err:
+                    logger.warning(
+                        "Failed to shlex-split args for tool '%s' (%s); falling back to whitespace split.",
+                        tool_config.name,
+                        parse_err,
+                    )
+                    args = tool_config.args.split() if tool_config.args else []
                 # Prefix tools coming from this MCP with the MCP's id to avoid name collisions
                 tool_prefix = f"{tool_config.mcp_tool_id}_"
                 custom_tool_client = McpClient(
@@ -67,23 +87,25 @@ def _load_mcp_servers() -> list[MCPServerStdio]:
 def get_all_mcp_servers() -> list[MCPServerStdio]:
     """
     Load all MCP servers, including built-in and custom tools from the database.
-    Uses caching to avoid unnecessary reloads - only refreshes when MCP settings change.
+
+    NOTE: This intentionally returns *fresh* MCPServerStdio/MCPServerSSE
+    instances on every call. Caching the same server instances across multiple
+    MainAgent / run_mcp_servers() lifetimes is unsafe — once a server's
+    AsyncExitStack-managed transport closes, that instance cannot be re-entered
+    in a new context, and two concurrent sessions cannot share one stdio
+    subprocess. We only keep `_last_cache_timestamp` for diagnostic logging.
     """
-    global _mcp_cache, _last_cache_timestamp
+    global _last_cache_timestamp
 
-    # Check if settings have been updated
     current_timestamp = get_mcp_last_updated()
+    if _last_cache_timestamp != current_timestamp:
+        logger.debug(
+            "MCP settings timestamp changed: %s -> %s",
+            _last_cache_timestamp,
+            current_timestamp,
+        )
+        _last_cache_timestamp = current_timestamp
 
-    # Use cache if available and settings haven't changed
-    if _mcp_cache is not None and _last_cache_timestamp == current_timestamp:
-        logger.debug("Using cached MCP servers (no changes detected)")
-        return _mcp_cache
-
-    # Settings changed or first load - reload from database
-    logger.debug(f"Reloading MCP servers (timestamp changed: {_last_cache_timestamp} -> {current_timestamp})")
-    _mcp_cache = _load_mcp_servers()
-    _last_cache_timestamp = current_timestamp
-
-    return _mcp_cache
+    return _load_mcp_servers()
 
 

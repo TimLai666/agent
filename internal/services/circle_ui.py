@@ -107,8 +107,9 @@ def _download_and_encode_image(url: str, max_width: int = 800) -> str:
 
 def _render_image_block(data_uri: str, alt: str, source_url: str | None = None) -> str:
     safe_alt = html.escape(alt) if alt else ""
+    safe_uri = html.escape(data_uri, quote=True)
     action_links = (
-        f'<a href="{data_uri}" '
+        f'<a href="{safe_uri}" '
         f'style="display: inline-block; padding: 2px 6px; '
         f'background: rgba(0, 0, 0, 0.55); color: #CFE9FF; text-decoration: none; '
         f'border-radius: 6px; font-size: 10px;">Save</a>'
@@ -123,7 +124,7 @@ def _render_image_block(data_uri: str, alt: str, source_url: str | None = None) 
         )
     return (
         f'<div style="margin: 6px 0 10px 0;">'
-        f'<img src="{data_uri}" alt="{safe_alt}" '
+        f'<img src="{safe_uri}" alt="{safe_alt}" '
         f'style="max-width: 100%; height: auto; display: block; margin: 0 0 4px 0;" />'
         f'{action_links}'
         f'</div>'

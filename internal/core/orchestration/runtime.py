@@ -50,7 +50,11 @@ class OrchestrationRuntime:
             task_kind=task_kind,
             plan=plan,
         )
-        self.store.resume_incomplete_runs()
+        # Do not call resume_incomplete_runs() here — it mass-resets every
+        # running/verifying/repairing row across all sessions/processes and
+        # would clobber concurrent runtimes' active steps. Recovery should
+        # happen at process startup via MainAgent.resume_incomplete_runs(),
+        # not on every per-task execute.
 
         while True:
             self.store.refresh_waiting_dependencies(task_run.taskRunId)
@@ -58,13 +62,24 @@ class OrchestrationRuntime:
             if on_todo_update:
                 on_todo_update(self._render_status(steps))
 
-            if all(step.status == "completed" for step in steps):
+            if steps and all(step.status == "completed" for step in steps):
                 self.store.update_task_run_status(task_run.taskRunId, "completed")
                 return self._final_result(task_run.taskRunId)
 
             discover_steps = self._runnable_steps(steps, {"discover", "plan"})
             if discover_steps:
-                await asyncio.gather(*(self._execute_regular_step(step) for step in discover_steps))
+                # return_exceptions=True so a single failing discover step
+                # doesn't cancel siblings (which would leak their leases and
+                # leave them stuck in `running`).
+                results = await asyncio.gather(
+                    *(self._execute_regular_step(step) for step in discover_steps),
+                    return_exceptions=True,
+                )
+                for step, outcome in zip(discover_steps, results):
+                    if isinstance(outcome, BaseException):
+                        # Exception was already handled inside _execute_regular_step
+                        # (lease released, step transitioned to failed).
+                        pass
                 continue
 
             verify_steps = self._runnable_steps(steps, {"verify"})
@@ -120,10 +135,22 @@ class OrchestrationRuntime:
             summary=f"Executing {step_run.stepId}",
         )
         try:
-            result = await self.step_executor(
-                self._to_step_spec(step_run),
-                self._collect_upstream_artifacts(step_run),
-            )
+            try:
+                result = await self.step_executor(
+                    self._to_step_spec(step_run),
+                    self._collect_upstream_artifacts(step_run),
+                )
+            except Exception as exc:
+                # Avoid leaving the step stuck in `running`/`repairing`.
+                current = self.store.get_step_run(step_run.stepRunId) or step_run
+                self.store.transition_step(
+                    step_run.stepRunId,
+                    from_status=current.status,
+                    to_status="failed",
+                    summary=f"Step executor raised: {exc}",
+                    failure_class="deterministic",
+                )
+                return
             await self._record_regular_result(step_run.stepRunId, result)
         finally:
             self.store.release_step_lease(step_run.stepRunId)
@@ -138,10 +165,21 @@ class OrchestrationRuntime:
             summary=f"Verifying {step_run.stepId}",
         )
         try:
-            report = await self.verification_executor(
-                self._to_step_spec(step_run),
-                self._collect_upstream_artifacts(step_run),
-            )
+            try:
+                report = await self.verification_executor(
+                    self._to_step_spec(step_run),
+                    self._collect_upstream_artifacts(step_run),
+                )
+            except Exception as exc:
+                current = self.store.get_step_run(step_run.stepRunId) or step_run
+                self.store.transition_step(
+                    step_run.stepRunId,
+                    from_status=current.status,
+                    to_status="failed",
+                    summary=f"Verifier raised: {exc}",
+                    failure_class="deterministic",
+                )
+                return
             await self._record_verification_result(step_run.stepRunId, report)
         finally:
             self.store.release_step_lease(step_run.stepRunId)
@@ -280,7 +318,7 @@ class OrchestrationRuntime:
 
         self.store.update_step_dependencies(
             step_run_id,
-            [*step.dependsOn, repair_ids[-1]],
+            list(dict.fromkeys([*step.dependsOn, *repair_ids])),
             status="waiting_dependency",
         )
         with self.store._connect() as conn:  # noqa: SLF001
@@ -332,7 +370,7 @@ class OrchestrationRuntime:
     def _final_result(self, task_run_id: str) -> str:
         steps = self.store.list_steps(task_run_id)
         for step in steps:
-            if step.kind != "synthesize":
+            if step.kind != "synthesize" or step.status != "completed":
                 continue
             artifacts = self.store.list_step_artifacts(step.stepRunId)
             if not artifacts:
@@ -342,7 +380,11 @@ class OrchestrationRuntime:
                 return str(payload["result"])
             if artifacts[-1].summary:
                 return artifacts[-1].summary
+        # Fallback: only consider completed steps so a failed/repair payload
+        # never gets returned as the user-facing final answer.
         for step in reversed(steps):
+            if step.status != "completed":
+                continue
             artifacts = self.store.list_step_artifacts(step.stepRunId)
             if not artifacts:
                 continue

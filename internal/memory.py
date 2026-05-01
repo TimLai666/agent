@@ -89,12 +89,30 @@ class MemoryManager:
             return ""
 
     def write_file(self, name: str, content: str) -> None:
-        """Write a memory file, replacing its full content."""
+        """Write a memory file, replacing its full content (atomic)."""
         if not self.enabled or self._dir is None:
             return
         name = self._validate_name(name)
         path = self._dir / name
-        path.write_text(content.strip() + "\n", encoding="utf-8")
+        # Atomic write: temp file in the same directory, then os.replace.
+        import os as _os
+        import tempfile as _tempfile
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp_name = _tempfile.mkstemp(
+            prefix=path.name + ".",
+            suffix=".tmp",
+            dir=str(path.parent),
+        )
+        try:
+            with _os.fdopen(fd, "w", encoding="utf-8", newline="") as fh:
+                fh.write(content.strip() + "\n")
+            _os.replace(tmp_name, path)
+        except Exception:
+            try:
+                _os.unlink(tmp_name)
+            except OSError:
+                pass
+            raise
 
     def read_all(self) -> dict[str, str]:
         """Read all non-empty memory files."""

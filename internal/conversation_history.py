@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
+import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -18,9 +20,34 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def _atomic_write_text(path: Path, content: str) -> None:
+    """Write text atomically: write to a sibling temp file, then os.replace."""
+    parent = path.parent
+    parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=path.name + ".",
+        suffix=".tmp",
+        dir=str(parent),
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as fh:
+            fh.write(content)
+        os.replace(tmp_name, path)
+    except Exception:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
+
+
 def _safe_session_id(session_id: str) -> str:
     cleaned = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(session_id or "").strip())
-    return cleaned or "session"
+    # Reject path-traversal components (e.g. ".", "..") that the regex would
+    # otherwise leave untouched because dots are allowed.
+    if not cleaned or cleaned.strip(".") == "":
+        return "session"
+    return cleaned
 
 
 @dataclass(frozen=True)
@@ -80,9 +107,9 @@ class ConversationHistoryStore:
                 "preview": preview or str(meta.get("preview") or ""),
             }
         )
-        self._meta_path(session_id).write_text(
+        _atomic_write_text(
+            self._meta_path(session_id),
             json.dumps(meta, ensure_ascii=False, indent=2),
-            encoding="utf-8",
         )
 
         turn = {
@@ -96,9 +123,9 @@ class ConversationHistoryStore:
 
         if messages is not None:
             payload = ModelMessagesTypeAdapter.dump_python(messages, mode="json")
-            self._messages_path(session_id).write_text(
+            _atomic_write_text(
+                self._messages_path(session_id),
                 json.dumps(payload, ensure_ascii=False, indent=2),
-                encoding="utf-8",
             )
 
     def _read_meta(self, session_id: str) -> dict[str, Any]:
@@ -156,14 +183,23 @@ class ConversationHistoryStore:
         path = self._messages_path(session_id)
         if not path.exists():
             return []
-        payload = json.loads(path.read_text(encoding="utf-8"))
-        return list(ModelMessagesTypeAdapter.validate_python(payload))
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            return list(ModelMessagesTypeAdapter.validate_python(payload))
+        except Exception:
+            # Corrupted or partially-written history — degrade gracefully.
+            return []
 
     def delete_session(self, session_id: str) -> bool:
         path = self._session_dir(session_id)
         if not path.exists():
             return False
-        shutil.rmtree(path)
+        try:
+            shutil.rmtree(path)
+        except OSError:
+            # On Windows, files held by another handle prevent removal.
+            # Best-effort cleanup: leave whatever survived in place.
+            return False
         return True
 
     def search(

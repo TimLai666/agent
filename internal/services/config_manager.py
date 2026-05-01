@@ -279,13 +279,21 @@ def _create_github_copilot_model(
                     # Fix missing or None 'object' field
                     if response_data.get("object") is None:
                         response_data["object"] = "chat.completion"
-                        
+
                         # Reconstruct response with fixed data
                         from httpx import Response as HTTPXResponse
+                        new_body = json.dumps(response_data).encode()
+                        # Drop stale length / encoding headers — they no longer
+                        # match the rebuilt body, which would otherwise cause
+                        # downstream consumers to truncate or hang.
+                        fixed_headers = [
+                            (k, v) for k, v in response.headers.raw
+                            if k.lower() not in (b"content-length", b"transfer-encoding", b"content-encoding")
+                        ]
                         fixed_response = HTTPXResponse(
                             status_code=response.status_code,
-                            headers=response.headers,
-                            content=json.dumps(response_data).encode(),
+                            headers=fixed_headers,
+                            content=new_body,
                             request=response.request,
                         )
                         logger.debug("Fixed Copilot response 'object' field")

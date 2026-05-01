@@ -1447,13 +1447,33 @@ class MainAgent:
         message_history: list[ModelRequest | ModelResponse] | None = None,
         on_todo_update: Callable[[str], None] | None = None,
     ) -> AsyncIterator[str]:
-        result = await self.coordinator_handle_user_turn(
-            user_prompt,
-            message_history=message_history,
-            on_todo_update=on_todo_update,
-        )
-        if result:
-            yield result
+        def todo_callback(snapshot: str) -> None:
+            self._publish_todo_snapshot(snapshot, self._todo_tool_items, emit=False)
+            if on_todo_update:
+                on_todo_update(snapshot)
+
+        self._active_todo_update_callback = todo_callback
+        try:
+            stream_core = getattr(self, "_execute_turn_stream_core", None)
+            if callable(stream_core):
+                async for chunk in stream_core(
+                    user_prompt,
+                    message_history=message_history,
+                    skip_plan_execution=True,
+                ):
+                    yield chunk
+                return
+
+            # Fallback: deliver the full reply as a single chunk if no streaming core.
+            result = await self.coordinator_handle_user_turn(
+                user_prompt,
+                message_history=message_history,
+                on_todo_update=on_todo_update,
+            )
+            if result:
+                yield result
+        finally:
+            self._active_todo_update_callback = None
 
     async def _orchestration_execute_step(
         self,
