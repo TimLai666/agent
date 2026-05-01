@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Any, Awaitable, Callable, Literal
 
@@ -13,8 +13,9 @@ MessageLike = ModelRequest | ModelResponse
 
 MAX_CONTEXT_TOKENS = 512000
 COMPACT_TRIGGER_RATIO = 0.75
-RECENT_KEEP_COUNT = 8
+RECENT_KEEP_COUNT = 20   # keep more recent messages for richer continuation context
 TOOL_OUTPUT_RECENT_KEEP = 8
+TOOL_OUTPUT_INLINE_TOKEN_BUDGET = 700
 COMPACTION_INPUT_TOKEN_BUDGET = 90000
 COMPACTION_OLD_SUMMARY_TOKEN_BUDGET = 20000
 
@@ -399,6 +400,58 @@ def recalc_total_tokens(messages: list[MessageLike]) -> int:
     return sum(estimate_tokens(get_message_text(message)) for message in messages)
 
 
+def compact_tool_output_history(
+    messages: list[MessageLike],
+    *,
+    recent_tool_keep: int = TOOL_OUTPUT_RECENT_KEEP,
+    inline_token_budget: int = TOOL_OUTPUT_INLINE_TOKEN_BUDGET,
+) -> list[MessageLike]:
+    """Keep message structure intact while trimming distant/large tool outputs."""
+    tool_refs: list[tuple[int, int]] = []
+    for message_index, message in enumerate(messages):
+        for part_index, part in enumerate(getattr(message, "parts", []) or []):
+            if str(getattr(part, "part_kind", "")) == "tool-return":
+                tool_refs.append((message_index, part_index))
+
+    if not tool_refs:
+        return list(messages)
+
+    keep_refs = set(tool_refs[-recent_tool_keep:])
+    changed = False
+    output: list[MessageLike] = []
+
+    for message_index, message in enumerate(messages):
+        parts = list(getattr(message, "parts", []) or [])
+        new_parts = []
+        message_changed = False
+        for part_index, part in enumerate(parts):
+            if str(getattr(part, "part_kind", "")) != "tool-return":
+                new_parts.append(part)
+                continue
+
+            content = getattr(part, "content", "")
+            text = content if isinstance(content, str) else str(content)
+            token_count = estimate_tokens(text)
+            should_trim = (message_index, part_index) not in keep_refs or token_count > inline_token_budget
+            if not should_trim:
+                new_parts.append(part)
+                continue
+
+            trimmed = trim_text_to_token_budget(text, inline_token_budget)
+            tool_name = str(getattr(part, "tool_name", "tool"))
+            compacted = (
+                f"[Compacted tool output: {tool_name}; original ~{token_count} tokens]\n"
+                f"{trimmed}"
+            )
+            new_parts.append(replace(part, content=compacted))
+            message_changed = True
+            changed = True
+
+        output.append(replace(message, parts=new_parts) if message_changed else message)
+
+    return output if changed else list(messages)
+
+
 class CompactCoordinator:
     def __init__(
         self,
@@ -528,10 +581,37 @@ class CompactCoordinator:
             state.recentMessages = list(state.fullMessages[-self._recent_keep_count :])
             return state
 
+        slim_full_messages = compact_tool_output_history(state.fullMessages)
+        if slim_full_messages != state.fullMessages:
+            slim_tokens = recalc_total_tokens(slim_full_messages)
+            if not should_compact(slim_tokens):
+                return ConversationState(
+                    fullMessages=slim_full_messages,
+                    compressedSummary=state.compressedSummary,
+                    recentMessages=list(slim_full_messages[-self._recent_keep_count :]),
+                    transcriptPath=state.transcriptPath,
+                    totalTokens=slim_tokens,
+                    lastCompactedMessageId=state.lastCompactedMessageId,
+                )
+            state = ConversationState(
+                fullMessages=slim_full_messages,
+                compressedSummary=state.compressedSummary,
+                recentMessages=state.recentMessages,
+                transcriptPath=state.transcriptPath,
+                totalTokens=slim_tokens,
+                lastCompactedMessageId=state.lastCompactedMessageId,
+            )
+
         messages_to_compress, preserved_recent_messages = split_messages_for_compaction(
             state.fullMessages,
             keep_count=self._recent_keep_count,
         )
+        if not messages_to_compress:
+            fallback_keep = min(8, max(1, len(state.fullMessages) - 1))
+            messages_to_compress, preserved_recent_messages = split_messages_for_compaction(
+                state.fullMessages,
+                keep_count=fallback_keep,
+            )
         if not messages_to_compress:
             state.recentMessages = preserved_recent_messages
             state.totalTokens = recalc_total_tokens(state.fullMessages)

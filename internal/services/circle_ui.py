@@ -139,8 +139,7 @@ def _render_image_placeholder(alt: str) -> str:
 
 
 def _render_image_link(url: str, alt: str) -> str:
-    label = alt if alt else "image"
-    return f"[{label}]({url})"
+    return _render_image_block(url, alt, url)
 
 
 def _process_markdown_images_async(text: str) -> tuple[str, list[tuple[str, int]]]:
@@ -3916,7 +3915,20 @@ class _InlineQuestionBubble(QFrame):
     # ── common ────────────────────────────────────────────────────────────
 
     def _finish(self, result: str) -> None:
+        if self._done:
+            return
         self._done = True
+        for btn in self._option_btns:
+            btn.setEnabled(False)
+        for cb in self._checkboxes:
+            cb.setEnabled(False)
+        if self._custom_cb:
+            self._custom_cb.setEnabled(False)
+        if self._custom_input:
+            self._custom_input.setReadOnly(True)
+            self._custom_input.setEnabled(False)
+        if self._confirm_btn:
+            self._confirm_btn.setEnabled(False)
         self._answer_lbl.setText(f"✓ 已選擇：{result}")
         self._answer_lbl.show()
         self.answered.emit(result)
@@ -5504,6 +5516,20 @@ class ChatWindow(QMainWindow):
             insert_pos += 2
 
         QTimer.singleShot(100, self._scroll_to_bottom)
+
+    def clear_live_state(self) -> None:
+        for widget in (self._live_user_bubble, self._live_agent_bubble):
+            if widget is None:
+                continue
+            try:
+                self._chat_layout.removeWidget(widget)
+                widget.deleteLater()
+            except Exception:
+                pass
+        self._live_user_bubble = None
+        self._live_agent_bubble = None
+        self._live_user_text = ""
+        self._live_agent_text = ""
 
     def sync_live_state(self, user_text: str, agent_text: str, is_running: bool) -> None:
         """Sync the live (current) exchange state when switching from circle mode.
