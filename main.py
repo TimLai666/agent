@@ -520,8 +520,10 @@ class GUIAgentApp(QObject):
         self.runtime.chunk_ready.connect(self.handle_chunk, _Q)
         self.runtime.error_occurred.connect(self.handle_error, _Q)
         self.runtime.tool_event.connect(self.handle_tool_event, _Q)
-        self.runtime.compaction_event.connect(self.handle_compaction_event, _Q)
-        self.runtime.compact_result.connect(self.handle_compact_result, _Q)
+        if hasattr(self.runtime, "compaction_event"):
+            self.runtime.compaction_event.connect(self.handle_compaction_event, _Q)
+        if hasattr(self.runtime, "compact_result"):
+            self.runtime.compact_result.connect(self.handle_compact_result, _Q)
         self.runtime.start()
 
         self.main_window = MainWindow()

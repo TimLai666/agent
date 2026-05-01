@@ -1419,6 +1419,64 @@ class CollapsibleSection(QWidget):
 
 
 class OutputBubble(QWidget):
+    @staticmethod
+    def _split_images(_self, text: str):
+        """Split text into ('text', text) and ('image', url, alt, width) segments."""
+        if not text:
+            return [("text", "")]
+
+        image_ext = r"(?:png|jpe?g|gif|webp|bmp|svg)"
+        md_img = re.compile(
+            r'!\[([^\]]*)\]\(([^)]*?\.(?:png|jpe?g|gif|webp|bmp|svg)(?:[^)]*)?)\)(?:\{width=(\d+)\})?',
+            re.IGNORECASE,
+        )
+        bare_url = re.compile(
+            rf"https?://[^\s<>)]+\.(?:{image_ext})(?:[^\s<>)\]]*)?",
+            re.IGNORECASE,
+        )
+
+        def parse_target(raw: str, brace_width: str | None = None) -> tuple[str, int | None]:
+            target = (raw or "").strip()
+            width: int | None = int(brace_width) if brace_width else None
+            if target.startswith("<") and target.endswith(">"):
+                target = target[1:-1].strip()
+            eq_width = re.search(r"\s+=\s*(\d+)\s*$", target)
+            if eq_width:
+                width = int(eq_width.group(1))
+                target = target[: eq_width.start()].strip()
+            quoted_title = re.search(r'\s+(?:"[^"]*"|\'[^\']*\')\s*$', target)
+            if quoted_title:
+                target = target[: quoted_title.start()].strip()
+            return target, width
+
+        matches: list[tuple[int, int, str, str, int | None]] = []
+        occupied: list[tuple[int, int]] = []
+        for match in md_img.finditer(text):
+            url, width = parse_target(match.group(2), match.group(3))
+            matches.append((match.start(), match.end(), url, match.group(1), width))
+            occupied.append((match.start(), match.end()))
+
+        for match in bare_url.finditer(text):
+            start, end = match.span()
+            if any(start >= s and end <= e for s, e in occupied):
+                continue
+            url = match.group(0).rstrip(".,;:")
+            matches.append((start, start + len(url), url, "", None))
+
+        if not matches:
+            return [("text", text)]
+
+        parts = []
+        cursor = 0
+        for start, end, url, alt, width in sorted(matches, key=lambda item: item[0]):
+            if start > cursor:
+                parts.append(("text", text[cursor:start]))
+            parts.append(("image", url, alt, width))
+            cursor = end
+        if cursor < len(text):
+            parts.append(("text", text[cursor:]))
+        return parts
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setAttribute(Qt.WA_StyledBackground, True)

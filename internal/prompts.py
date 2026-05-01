@@ -40,8 +40,47 @@ def _load_prompts() -> dict[str, str]:
 _PROMPTS = _load_prompts()
 
 
+def _prompt_key_candidates(prompt_name: str) -> list[str]:
+    raw = (prompt_name or "").strip()
+    if not raw:
+        return []
+
+    names = [raw]
+    for candidate in (raw.replace("_", "-"), raw.replace("-", "_")):
+        if candidate not in names:
+            names.append(candidate)
+
+    candidates: list[str] = []
+    for name in names:
+        variants = [name, name.lower(), name.upper()]
+        if name.startswith("system_prompts."):
+            stem = name.removeprefix("system_prompts.")
+            variants.extend([
+                "system_prompts." + stem,
+                "system_prompts." + stem.replace("_", "-"),
+            ])
+        elif name.startswith("system-prompts."):
+            stem = name.removeprefix("system-prompts.")
+            variants.extend([
+                "system_prompts." + stem,
+                "system_prompts." + stem.replace("_", "-"),
+            ])
+        else:
+            variants.extend([
+                "system_prompts." + name,
+                "system_prompts." + name.replace("_", "-"),
+            ])
+        for variant in variants:
+            if variant not in candidates:
+                candidates.append(variant)
+    return candidates
+
+
 def get_prompt(key: str, default: str = "") -> str:
-    return _PROMPTS.get(key.upper(), default)
+    for candidate in _prompt_key_candidates(key):
+        if candidate in _PROMPTS:
+            return _PROMPTS[candidate]
+    return default
 
 
 def _build_system_prompt() -> str:
@@ -60,16 +99,10 @@ def get_system_prompt(prompt_name: str, default: str = "") -> str:
         prompt 內容
     """
     # 如果已經有前綴，直接查詢
-    if prompt_name.startswith("system_prompts."):
-        return _PROMPTS.get(prompt_name, default)
-
-    # 嘗試添加前綴查詢
-    key_with_prefix = f"system_prompts.{prompt_name}"
-    if key_with_prefix in _PROMPTS:
-        return _PROMPTS[key_with_prefix]
-
-    # 嘗試大寫查詢（根目錄的 prompts）
-    return _PROMPTS.get(prompt_name.upper(), default)
+    for candidate in _prompt_key_candidates(prompt_name):
+        if candidate in _PROMPTS:
+            return _PROMPTS[candidate]
+    return default
 
 
 def build_combined_system_prompt(
