@@ -1,6 +1,6 @@
 import asyncio
 
-from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, UserPromptPart
+from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, ToolReturnPart, UserPromptPart
 
 import internal.compaction as compaction
 from internal.compaction import (
@@ -97,6 +97,38 @@ def test_compaction_retry_and_fallback():
 
     assert compacted.compressedSummary == "Summary:\nRecovered"
     assert call_count == 3
+
+
+def test_compaction_slims_tool_outputs_before_summary():
+    calls: list[str] = []
+
+    async def fake_runner(_job, prompt: str) -> str:
+        calls.append(prompt)
+        return "<analysis>ok</analysis><summary>Compressed after slim</summary>"
+
+    tool_history = [
+        ModelRequest(parts=[UserPromptPart(content="run a command")]),
+        ModelRequest(
+            parts=[
+                ToolReturnPart(
+                    tool_name="run_terminal_command",
+                    content="tool output " + ("z" * 12000),
+                    tool_call_id="tool-1",
+                )
+            ]
+        ),
+        ModelResponse(parts=[TextPart(content="done")]),
+    ]
+    coordinator = CompactCoordinator(runner=fake_runner)
+    state = ConversationState(fullMessages=tool_history, totalTokens=999999)
+
+    compacted = asyncio.run(coordinator.maybeCompact(state))
+
+    assert compacted.totalTokens < state.totalTokens
+    assert any(
+        "Compacted tool output" in compaction.get_message_text(message)
+        for message in compacted.fullMessages
+    ) or compacted.compressedSummary
 
 
 def test_run_compact_trims_input_to_budget():

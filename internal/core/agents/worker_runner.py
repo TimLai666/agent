@@ -48,4 +48,25 @@ class WorkerRunner:
 
     async def run_existing_task_once(self, task_id: str, instruction: str) -> WorkerResult:
         self._task_store.start_task(task_id)
-        return await self._runner.run(task_id, instruction)
+        try:
+            result = await self._runner.run(task_id, instruction)
+        except Exception as exc:
+            # Ensure the task is finalised even on failure so it doesn't get
+            # stuck in the `running` state and block subsequent transitions.
+            try:
+                self._task_store.fail_task(task_id, str(exc))
+            except Exception:
+                # Best-effort finalisation; never mask the real error.
+                pass
+            raise
+        self._task_store.complete_task(
+            task_id,
+            final_text=result.result,
+            summary=result.summary,
+            files_changed=result.filesChanged,
+            commands_executed=result.commandsExecuted,
+            evidence=result.evidence,
+            unresolved_issues=result.unresolvedIssues,
+            usage=result.usage,
+        )
+        return result

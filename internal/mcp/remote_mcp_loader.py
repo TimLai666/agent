@@ -19,7 +19,7 @@ def load_remote_mcp_from_url(url: str, prefix: str | None = None) -> list:
         sse_client = McpClientSSE(
             url=url,
             tool_prefix=tool_prefix,
-            timeout=60000,  # 60 second timeout in milliseconds
+            timeout=60,  # 60 second timeout (pydantic-ai MCP timeout is in seconds)
         )
         logger.debug(f"Successfully created SSE MCP client for {url} (prefix={tool_prefix})")
         return [sse_client]

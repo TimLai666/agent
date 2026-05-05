@@ -206,7 +206,13 @@ class SkillRegistry:
 
         # Use LLM scoring if available and requested
         if use_llm and self._llm_scorer:
-            return await self._llm_scorer.score_skills(prompt, list(self._skills.values()), max_skills, min_score)
+            llm_results = await self._llm_scorer.score_skills(
+                prompt, list(self._skills.values()), max_skills, min_score
+            )
+            if llm_results:
+                return llm_results
+            # LLM scoring failed/empty — fall back to keyword matching
+            logger.debug("LLM scoring returned no skills; falling back to keyword matching")
 
         # Fall back to keyword-based matching
         return self._keyword_based_matching(prompt, max_skills, min_score)
@@ -627,13 +633,18 @@ class SkillRelevanceScorer:
         max_skills: int = 3,
         min_score: float = 0.1
     ) -> list[SkillSpec]:
-        """Synchronous wrapper for async score_skills."""
-        try:
-            loop = asyncio.get_event_loop()
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
+        """Synchronous wrapper for async score_skills.
 
-        return loop.run_until_complete(
-            self.score_skills(prompt, skills, max_skills, min_score)
+        Refuses to run when an event loop is already active in the current
+        thread; in that case the caller must use the async variant directly.
+        """
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(
+                self.score_skills(prompt, skills, max_skills, min_score)
+            )
+        raise RuntimeError(
+            "score_skills_sync cannot be invoked while an event loop is running; "
+            "use score_skills(...) and await it instead."
         )

@@ -3,9 +3,11 @@ import asyncio
 import concurrent.futures
 import html as _html_module
 import sys
+import uuid
 import warnings
 from collections import deque
 from contextlib import AsyncExitStack
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from httpx import AsyncClient
@@ -44,6 +46,15 @@ COMMAND_PREFIX = "/"
 GUI_CHUNK_EMIT_SIZE = 2000
 
 
+@dataclass
+class RuntimeSessionState:
+    session_id: str
+    main_agent: MainAgent
+    mcp_stack: AsyncExitStack | None = None
+    conversation_state: ConversationState = field(default_factory=lambda: ConversationState(fullMessages=[]))
+    compact_coordinator: CompactCoordinator | None = None
+    current_future: concurrent.futures.Future | None = None
+
 
 class AgentRuntime(QThread):
     ready = Signal()
@@ -68,6 +79,9 @@ class AgentRuntime(QThread):
         self._active_request_id = 0
         self._conversation_state = ConversationState(fullMessages=[])
         self._compact_coordinator: CompactCoordinator | None = None
+        self._session_states: dict[str, RuntimeSessionState] = {}
+        self._request_sessions: dict[int, str] = {}
+        self._current_session_id = str(uuid.uuid4())
 
     def run(self):
         loop = asyncio.new_event_loop()
@@ -119,13 +133,9 @@ class AgentRuntime(QThread):
     async def _initialize(self):
         try:
             self.http_client = AsyncClient(verify=False)
-            self.main_agent = MainAgent.create(
-                self.base_config,
-                self.http_client,
-                skill_root_dirs=self.skill_root_dirs,
-                memory_manager=MemoryManager(),
-                runtime_mode="gui",
-            )
+            initial_state = await self._create_session_state(self._current_session_id)
+            self._session_states[self._current_session_id] = initial_state
+            self._activate_session_state(initial_state)
 
             def _reload_skills_from_webui() -> dict[str, object]:
                 if self.main_agent is None:
@@ -143,23 +153,6 @@ class AgentRuntime(QThread):
 
             config_webui.register_skills_reload_handler(_reload_skills_from_webui)
 
-            self.main_agent.set_tool_event_callback(self._emit_tool_event)
-            self._compact_coordinator = CompactCoordinator(runner=self.main_agent.run_compaction_subagent)
-            self.mcp_stack = AsyncExitStack()
-            try:
-                await self.mcp_stack.enter_async_context(
-                    self.main_agent.agent.run_mcp_servers()
-                )
-                logger.info("MCP servers started in AgentRuntime")
-            except Exception as exc:
-                reason = self._summarize_exception(exc)
-                logger.warning(
-                    "MCP servers failed to start in AgentRuntime; continuing without them. Root cause: %s",
-                    reason,
-                )
-                # 清除已註冊的 MCP toolsets 以防止 agent 嘗試調用不可用的工具
-                self.main_agent.agent._user_toolsets = []
-                logger.info("Cleared MCP toolsets from agent to prevent tool call failures")
             if self._ready_event:
                 self._ready_event.set()
             self.ready.emit()
@@ -168,6 +161,76 @@ class AgentRuntime(QThread):
             if self._ready_event:
                 self._ready_event.set()
             self.error_occurred.emit(0, "Initialization failed. Check logs.")
+
+    async def _create_session_state(self, session_id: str) -> RuntimeSessionState:
+        if self.http_client is None:
+            raise RuntimeError("HTTP client not initialized")
+        main_agent = MainAgent.create(
+            self.base_config,
+            self.http_client,
+            skill_root_dirs=self.skill_root_dirs,
+            memory_manager=MemoryManager(),
+            runtime_mode="gui",
+        )
+        main_agent._session_id = session_id
+        main_agent.set_tool_event_callback(
+            lambda event, sid=session_id: self._emit_tool_event(event, sid)
+        )
+        state = RuntimeSessionState(
+            session_id=session_id,
+            main_agent=main_agent,
+            compact_coordinator=CompactCoordinator(runner=main_agent.run_compaction_subagent),
+        )
+        state.mcp_stack = AsyncExitStack()
+        try:
+            await state.mcp_stack.enter_async_context(main_agent.agent.run_mcp_servers())
+            logger.info("MCP servers started for session %s", session_id)
+        except Exception as exc:
+            reason = self._summarize_exception(exc)
+            logger.warning(
+                "MCP servers failed to start for session %s; continuing without them. Root cause: %s",
+                session_id,
+                reason,
+            )
+            main_agent.agent._user_toolsets = []
+        return state
+
+    def _activate_session_state(self, state: RuntimeSessionState) -> None:
+        self._current_session_id = state.session_id
+        self.main_agent = state.main_agent
+        self.mcp_stack = state.mcp_stack
+        self._conversation_state = state.conversation_state
+        self._compact_coordinator = state.compact_coordinator
+
+    async def _get_session_state(self, session_id: str) -> RuntimeSessionState:
+        state = self._session_states.get(session_id)
+        if state is None:
+            state = await self._create_session_state(session_id)
+            self._session_states[session_id] = state
+        return state
+
+    def set_active_session(self, session_id: str) -> None:
+        self._current_session_id = session_id
+        state = self._session_states.get(session_id)
+        if state is not None:
+            self._activate_session_state(state)
+
+    def set_session_history(
+        self,
+        session_id: str,
+        history: list[ModelRequest | ModelResponse] | None,
+    ) -> None:
+        self.set_active_session(session_id)
+        conversation_state = ConversationState(fullMessages=list(history or []))
+        conversation_state.totalTokens = recalc_total_tokens(conversation_state.fullMessages)
+        state = self._session_states.get(session_id)
+        if state is not None:
+            state.conversation_state = conversation_state
+            state.main_agent._session_id = session_id
+            state.main_agent._last_messages = list(history or [])
+            self._activate_session_state(state)
+        else:
+            self._conversation_state = conversation_state
 
     def _format_tool_line(self, event: dict) -> str:
         tool = str(event.get("tool") or "tool")
@@ -231,7 +294,7 @@ class AgentRuntime(QThread):
             return f"[ERR] {label}{suffix}"
         return f"[*] {label}"
 
-    def _emit_tool_event(self, event: dict) -> None:
+    def _emit_tool_event(self, event: dict, session_id: str | None = None) -> None:
         try:
             line = self._format_tool_line(event)
         except Exception as exc:
@@ -239,22 +302,42 @@ class AgentRuntime(QThread):
             return
         if not line:
             return
-        payload = {"request_id": self._active_request_id, "line": line}
+        request_id = self._active_request_id
+        if session_id:
+            for candidate_id, candidate_session in reversed(self._request_sessions.items()):
+                if candidate_session == session_id:
+                    request_id = candidate_id
+                    break
+        payload = {"request_id": request_id, "session_id": session_id, "line": line}
         self.tool_event.emit(payload)
 
-    def _emit_todo_event(self, snapshot: str) -> None:
-        payload = {"request_id": self._active_request_id, "todo_text": snapshot}
+    def _emit_todo_event(self, snapshot: str, request_id: int | None = None, session_id: str | None = None) -> None:
+        payload = {
+            "request_id": request_id if request_id is not None else self._active_request_id,
+            "session_id": session_id,
+            "todo_text": snapshot,
+        }
         self.tool_event.emit(payload)
 
     async def _shutdown(self):
-        if self.mcp_stack is not None:
+        closed: set[int] = set()
+        # Snapshot to avoid "dictionary changed size during iteration" if
+        # another coroutine is creating sessions concurrently.
+        for state in list(self._session_states.values()):
+            if state.mcp_stack is None or id(state.mcp_stack) in closed:
+                continue
+            closed.add(id(state.mcp_stack))
             try:
-                await self.mcp_stack.aclose()
-                logger.info("MCP servers stopped")
+                await state.mcp_stack.aclose()
+                logger.info("MCP servers stopped for session %s", state.session_id)
             except Exception as exc:
                 logger.error(f"Error closing MCP servers: {exc}")
         if self.http_client:
-            await self.http_client.aclose()
+            try:
+                await self.http_client.aclose()
+            except Exception as exc:
+                logger.warning("Error closing HTTP client: %s", exc)
+            self.http_client = None
             logger.info("HTTP client closed")
         if self.loop:
             self.loop.stop()
@@ -267,21 +350,22 @@ class AgentRuntime(QThread):
     async def _run_prompt(
         self,
         request_id: int,
+        session_id: str,
         user_input: str,
         chat_history: list[ModelRequest | ModelResponse] | None,
     ):
         if self._ready_event:
             await self._ready_event.wait()
-        if not self.main_agent:
-            raise RuntimeError("Main agent not initialized")
+        state = await self._get_session_state(session_id)
+        main_agent = state.main_agent
 
         chunks: list[str] = []
 
         async def collect():
-            async for chunk in self.main_agent.coordinator_handle_user_turn_stream(
+            async for chunk in main_agent.coordinator_handle_user_turn_stream(
                 user_input,
                 message_history=chat_history,
-                on_todo_update=self._emit_todo_event,
+                on_todo_update=lambda snapshot: self._emit_todo_event(snapshot, request_id, session_id),
             ):
                 if not chunk:
                     continue
@@ -309,39 +393,49 @@ class AgentRuntime(QThread):
             await asyncio.wait_for(collect(), timeout=timeout_val)
         result_text = "".join(chunks).strip()
         updated_history = None
-        if hasattr(self.main_agent, "_last_messages"):
-            messages = self.main_agent._last_messages if self.main_agent._last_messages is not None else []
-            self._conversation_state.fullMessages = messages
-            self._conversation_state.totalTokens = recalc_total_tokens(messages)
-            if self._compact_coordinator is not None:
-                tokens_before = self._conversation_state.totalTokens
+        if hasattr(main_agent, "_last_messages"):
+            # Copy the message list so later mutations on _last_messages don't
+            # silently rewrite the saved conversation state.
+            messages = list(main_agent._last_messages or [])
+            state.conversation_state.fullMessages = messages
+            state.conversation_state.totalTokens = recalc_total_tokens(messages)
+            if state.compact_coordinator is not None:
+                tokens_before = state.conversation_state.totalTokens
                 self.compaction_event.emit(True)
-                self._conversation_state = await self._compact_coordinator.maybeCompact(self._conversation_state)
-                if self._conversation_state.totalTokens < tokens_before:
+                state.conversation_state = await state.compact_coordinator.maybeCompact(state.conversation_state)
+                if state.conversation_state.totalTokens < tokens_before:
                     # tokens decreased → compaction actually ran
                     self.compaction_event.emit(False)
                 else:
                     self.compaction_event.emit(False)
-            updated_history = self._conversation_state.fullMessages
+            updated_history = state.conversation_state.fullMessages
+        if self._current_session_id == session_id:
+            self._activate_session_state(state)
         return result_text, updated_history
 
     def submit(
         self,
         user_input: str,
         chat_history: list[ModelRequest | ModelResponse] | None,
+        session_id: str | None = None,
     ):
         if not self.loop:
             self.error_occurred.emit(0, "Initialization failed. Check logs.")
             return None
-        if self._current_future and not self._current_future.done():
-            self._current_future.cancel()
+        session_id = session_id or self._current_session_id
+        state = self._session_states.get(session_id)
+        if state and state.current_future and not state.current_future.done():
+            state.current_future.cancel()
         self._request_id += 1
         request_id = self._request_id
         self._active_request_id = request_id
+        self._request_sessions[request_id] = session_id
         future = asyncio.run_coroutine_threadsafe(
-            self._run_prompt(request_id, user_input, chat_history), self.loop
+            self._run_prompt(request_id, session_id, user_input, chat_history), self.loop
         )
         self._current_future = future
+        if state:
+            state.current_future = future
 
         def done_callback(fut):
             try:
@@ -353,6 +447,9 @@ class AgentRuntime(QThread):
             except Exception as e:
                 logger.error(f"AgentRuntime run error: {e}", exc_info=e)
                 self.error_occurred.emit(request_id, f"Error: {str(e)}")
+            finally:
+                if state and state.current_future is fut:
+                    state.current_future = None
 
         future.add_done_callback(done_callback)
         return request_id
@@ -360,26 +457,27 @@ class AgentRuntime(QThread):
     async def _force_compact(self):
         if self._ready_event:
             await self._ready_event.wait()
-        if not self.main_agent:
-            raise RuntimeError("Main agent not initialized")
+        state = await self._get_session_state(self._current_session_id)
+        main_agent = state.main_agent
 
         base_messages = (
-            self._conversation_state.fullMessages
-            or getattr(self.main_agent, "_last_messages", None)
+            state.conversation_state.fullMessages
+            or getattr(main_agent, "_last_messages", None)
             or []
         )
         if not base_messages:
             return False, 0, 0, []
 
-        self._conversation_state.fullMessages = list(base_messages)
-        before_count = len(self._conversation_state.fullMessages)
-        self._conversation_state.totalTokens = max(
-            recalc_total_tokens(self._conversation_state.fullMessages),
+        state.conversation_state.fullMessages = list(base_messages)
+        before_count = len(state.conversation_state.fullMessages)
+        state.conversation_state.totalTokens = max(
+            recalc_total_tokens(state.conversation_state.fullMessages),
             MAX_CONTEXT_TOKENS,
         )
-        if self._compact_coordinator is not None:
-            self._conversation_state = await self._compact_coordinator.maybeCompact(self._conversation_state)
-        after_messages = self._conversation_state.fullMessages
+        if state.compact_coordinator is not None:
+            state.conversation_state = await state.compact_coordinator.maybeCompact(state.conversation_state)
+        self._activate_session_state(state)
+        after_messages = state.conversation_state.fullMessages
         after_count = len(after_messages)
         changed = after_count < before_count
         return changed, before_count, after_count, after_messages
@@ -413,10 +511,11 @@ class AgentRuntime(QThread):
         async def _clear_context():
             if self._ready_event:
                 await self._ready_event.wait()
-            self._conversation_state = ConversationState(fullMessages=[])
-            if self.main_agent is not None:
-                self.main_agent._last_messages = None
-                self.main_agent._last_assistant_reply = None
+            state = await self._get_session_state(self._current_session_id)
+            state.conversation_state = ConversationState(fullMessages=[])
+            state.main_agent._last_messages = None
+            state.main_agent._last_assistant_reply = None
+            self._activate_session_state(state)
 
         future = asyncio.run_coroutine_threadsafe(_clear_context(), self.loop)
         future.result()
@@ -488,6 +587,9 @@ class GUIAgentApp(QObject):
         self._last_assistant_reply = ""  # 記錄最後的助手回覆（用於 /last）
         self._gui_history: list[tuple[str, str]] = []  # GUI 對話歷史
         self._auto_config_panel_opened = False
+        self._current_session_id = ""
+        self._session_ui_state: dict[str, dict[str, object]] = {}
+        self._request_session_ids: dict[int, str] = {}
         
         # UI 更新節流機制
         self._update_throttle_timer = QTimer()
@@ -510,6 +612,7 @@ class GUIAgentApp(QObject):
         self._current_mode: str = "circle"
 
         self.runtime = AgentRuntime(self.base_config, skill_root_dirs=skill_root_dirs)
+        self._current_session_id = getattr(self.runtime, "_current_session_id", str(uuid.uuid4()))
         # AgentRuntime (QThread) lives in the main thread but emits signals from run().
         # Qt sees sender/receiver both as main-thread objects and uses DirectConnection.
         # Force QueuedConnection so slots always execute in the main thread event loop.
@@ -519,8 +622,10 @@ class GUIAgentApp(QObject):
         self.runtime.chunk_ready.connect(self.handle_chunk, _Q)
         self.runtime.error_occurred.connect(self.handle_error, _Q)
         self.runtime.tool_event.connect(self.handle_tool_event, _Q)
-        self.runtime.compaction_event.connect(self.handle_compaction_event, _Q)
-        self.runtime.compact_result.connect(self.handle_compact_result, _Q)
+        if hasattr(self.runtime, "compaction_event"):
+            self.runtime.compaction_event.connect(self.handle_compaction_event, _Q)
+        if hasattr(self.runtime, "compact_result"):
+            self.runtime.compact_result.connect(self.handle_compact_result, _Q)
         self.runtime.start()
 
         self.main_window = MainWindow()
@@ -547,6 +652,9 @@ class GUIAgentApp(QObject):
         self.chat_window.set_voice_callback(self._on_voice_event)
         self.chat_window.switch_to_circle.connect(self._switch_to_circle)
         self.chat_window.switch_to_circle_collapsed.connect(self._switch_to_circle_collapsed)
+        self.chat_window.new_conversation_requested.connect(self._start_new_conversation)
+        self.chat_window.history_resume_requested.connect(self._resume_saved_conversation)
+        self.chat_window.history_delete_requested.connect(self._delete_saved_conversation)
         try:
             self.chat_window.typing.connect(self._reset_idle_timer)
         except Exception:
@@ -572,6 +680,7 @@ class GUIAgentApp(QObject):
         if self._current_mode == "chat":
             return
         self._current_mode = "chat"
+        self._refresh_saved_conversations()
         # Populate chat history from completed pairs
         self.chat_window.load_history(list(self._gui_history))
         # Sync live exchange state — only pass agent_text when actively running.
@@ -662,6 +771,101 @@ class GUIAgentApp(QObject):
             pass
 
     # ── Voice mode handlers ───────────────────────────────────────────────
+
+    def _refresh_saved_conversations(self) -> None:
+        try:
+            if not self.runtime.main_agent:
+                self.chat_window.set_history_sessions([])
+                return
+            sessions = [
+                {
+                    "session_id": item.session_id,
+                    "created_at": item.created_at,
+                    "updated_at": item.updated_at,
+                    "turn_count": item.turn_count,
+                    "preview": item.preview,
+                }
+                for item in self.runtime.main_agent.conversation_history_store.list_sessions()
+            ]
+            self.chat_window.set_history_sessions(sessions)
+        except Exception:
+            logger.exception("Failed to refresh saved conversations")
+
+    def _resume_saved_conversation(self, session_id: str) -> None:
+        try:
+            if not self.runtime.main_agent:
+                return
+            self._save_current_session_ui_state()
+            store = self.runtime.main_agent.conversation_history_store
+            self._current_session_id = session_id
+            self.chat_history = store.load_message_history(session_id)
+            self.runtime.set_session_history(session_id, self.chat_history)
+            self._gui_history = deque(store.load_display_history(session_id))
+            self._display_text = ""
+            self._last_user_input = ""
+            self._last_assistant_reply = ""
+            self._discussion_text = ""
+            self._stop_context = ""
+            self._reset_tool_log()
+            self._reset_todo_snapshot()
+            if session_id in self._session_ui_state:
+                self._load_session_ui_state(session_id)
+            self.runtime._conversation_state = ConversationState(fullMessages=list(self.chat_history or []))
+            self.runtime._conversation_state.totalTokens = recalc_total_tokens(self.runtime._conversation_state.fullMessages)
+            self._save_current_session_ui_state()
+            self.chat_window.clear_live_state()
+            self.chat_window.load_history(list(self._gui_history))
+            self.chat_window.sync_live_state(
+                user_text=self._last_user_input if self._waiting_response else "",
+                agent_text=self._display_text if self._waiting_response else "",
+                is_running=self._waiting_response,
+            )
+            self.chat_window.clear_history_selection()
+            self._update_context_both(
+                self.runtime._conversation_state.totalTokens,
+                MAX_CONTEXT_TOKENS,
+                self._total_tokens_consumed,
+            )
+        except Exception as exc:
+            logger.exception("Failed to resume saved conversation")
+            self.chat_window.update_speech_bubble(f"Failed to resume conversation: {exc}")
+
+    def _delete_saved_conversation(self, session_id: str) -> None:
+        try:
+            if self.runtime.main_agent:
+                self.runtime.main_agent.conversation_history_store.delete_session(session_id)
+            self._refresh_saved_conversations()
+        except Exception:
+            logger.exception("Failed to delete saved conversation")
+
+    def _start_new_conversation(self) -> None:
+        try:
+            self._save_current_session_ui_state()
+            session_id = str(uuid.uuid4())
+            self._current_session_id = session_id
+            self.runtime.set_active_session(session_id)
+            self.chat_history = None
+            self._gui_history.clear()
+            if self.command_handler:
+                self.command_handler.clear_context_state()
+            self._last_user_input = ""
+            self._last_assistant_reply = ""
+            self._display_text = ""
+            self._discussion_text = ""
+            self._stop_context = ""
+            self._cleanup_pending_tmp_image()
+            self._reset_tool_log()
+            self._reset_todo_snapshot()
+            self.runtime.set_session_history(session_id, [])
+            self._save_current_session_ui_state()
+            self.chat_window.set_running(False)
+            self.chat_window.clear_live_state()
+            self.chat_window.load_history([])
+            self.chat_window.clear_history_selection()
+            self._update_context_both(0, MAX_CONTEXT_TOKENS, self._total_tokens_consumed)
+        except Exception:
+            logger.exception("Failed to start new conversation")
+            self.chat_window.update_speech_bubble("Failed to start a new conversation.")
 
     def _on_voice_event(self, event: str) -> None:
         """Called from active UI when user interacts with voice button/send."""
@@ -756,6 +960,48 @@ class GUIAgentApp(QObject):
                 win.update_todo_drawer("")
             except Exception:
                 pass
+
+    def _save_current_session_ui_state(self) -> None:
+        if not self._current_session_id:
+            return
+        self._session_ui_state[self._current_session_id] = {
+            "chat_history": self.chat_history,
+            "gui_history": deque(self._gui_history),
+            "display_text": self._display_text,
+            "last_user_input": self._last_user_input,
+            "last_assistant_reply": self._last_assistant_reply,
+            "discussion_text": self._discussion_text,
+            "tool_log_lines": list(self._tool_log_lines),
+            "todo_snapshot_text": self._todo_snapshot_text,
+            "waiting_response": self._waiting_response,
+            "waiting_status": self._waiting_status,
+            "active_request_id": self._active_request_id,
+            "prev_context_tokens": self._prev_context_tokens,
+        }
+
+    def _load_session_ui_state(self, session_id: str) -> None:
+        state = self._session_ui_state.get(session_id, {})
+        self.chat_history = state.get("chat_history") if "chat_history" in state else None
+        self._gui_history = deque(state.get("gui_history", deque()))
+        self._display_text = str(state.get("display_text", ""))
+        self._last_user_input = str(state.get("last_user_input", ""))
+        self._last_assistant_reply = str(state.get("last_assistant_reply", ""))
+        self._discussion_text = str(state.get("discussion_text", ""))
+        self._tool_log_lines = list(state.get("tool_log_lines", []))
+        self._todo_snapshot_text = str(state.get("todo_snapshot_text", ""))
+        self._waiting_response = bool(state.get("waiting_response", False))
+        self._waiting_status = str(state.get("waiting_status", ""))
+        self._active_request_id = int(state.get("active_request_id", 0) or 0)
+        self._prev_context_tokens = int(state.get("prev_context_tokens", 0) or 0)
+        self._tool_events_cache_dirty = True
+        self._pending.clear()
+        self._stream_buffer = ""
+        self._stream_mode = "normal"
+        self._typewriter_active = False
+        self._typewriter_timer.stop()
+
+    def _is_request_for_current_session(self, request_id: int) -> bool:
+        return self._request_session_ids.get(request_id, self._current_session_id) == self._current_session_id
 
     # ── Tool event rendering (Claude Code style) ──────────────────────────
 
@@ -927,6 +1173,18 @@ class GUIAgentApp(QObject):
 
     def handle_tool_event(self, payload: dict) -> None:
         request_id = payload.get("request_id")
+        session_id = str(payload.get("session_id") or self._request_session_ids.get(request_id, self._current_session_id))
+        if session_id != self._current_session_id:
+            state = self._session_ui_state.setdefault(session_id, {})
+            todo_text = payload.get("todo_text")
+            if isinstance(todo_text, str) and todo_text.strip():
+                state["todo_snapshot_text"] = todo_text.strip()
+            line = payload.get("line")
+            if line:
+                lines = list(state.get("tool_log_lines", []))
+                lines.append(str(line).rstrip())
+                state["tool_log_lines"] = lines[-200:]
+            return
         if request_id != self._active_request_id:
             return
         todo_text = payload.get("todo_text")
@@ -1070,6 +1328,8 @@ class GUIAgentApp(QObject):
 
     def handle_runtime_ready(self):
         self.runtime_ready = True
+        self._current_session_id = getattr(self.runtime, "_current_session_id", self._current_session_id)
+        self._save_current_session_ui_state()
 
         def _close_window() -> None:
             from PySide6.QtWidgets import QApplication
@@ -1103,6 +1363,26 @@ class GUIAgentApp(QObject):
         self._pending_tmp_images = []
 
     def handle_result(self, request_id, output, updated_history):
+        session_id = self._request_session_ids.get(request_id, self._current_session_id)
+        if session_id != self._current_session_id:
+            state = self._session_ui_state.setdefault(session_id, {})
+            last_user = str(state.get("last_user_input", ""))
+            gui_history = deque(state.get("gui_history", deque()))
+            if last_user:
+                gui_history.append((last_user, output or ""))
+            state.update(
+                {
+                    "chat_history": updated_history or state.get("chat_history"),
+                    "gui_history": gui_history,
+                    "display_text": "",
+                    "last_assistant_reply": output or "",
+                    "waiting_response": False,
+                    "waiting_status": "",
+                    "active_request_id": 0,
+                }
+            )
+            self._refresh_saved_conversations()
+            return
         if request_id != self._active_request_id:
             return
         self._cleanup_pending_tmp_image()
@@ -1138,6 +1418,8 @@ class GUIAgentApp(QObject):
             # 更新 GUI 歷史
             if self._last_user_input:
                 self._gui_history.append((self._last_user_input, output or ""))
+            if self._current_mode == "chat":
+                self._refresh_saved_conversations()
             # Update token usage display
             try:
                 from internal.compaction import MAX_CONTEXT_TOKENS
@@ -1160,15 +1442,28 @@ class GUIAgentApp(QObject):
             pass
         if self._auto_expand_on_result:
             self._expand_ui()
+        self._save_current_session_ui_state()
         self._reset_idle_timer()
 
     def handle_chunk(self, request_id, chunk):
+        session_id = self._request_session_ids.get(request_id, self._current_session_id)
+        if session_id != self._current_session_id:
+            state = self._session_ui_state.setdefault(session_id, {})
+            state["display_text"] = str(state.get("display_text", "")) + (chunk or "")
+            return
         if request_id != self._active_request_id:
             return
         if chunk:
             self._process_stream_chunk(chunk)
 
     def handle_error(self, request_id, error_message):
+        session_id = self._request_session_ids.get(request_id, self._current_session_id)
+        if session_id != self._current_session_id:
+            state = self._session_ui_state.setdefault(session_id, {})
+            state["display_text"] = f"Error: {error_message}"
+            state["waiting_response"] = False
+            state["waiting_status"] = ""
+            return
         if request_id not in (0, self._active_request_id):
             return
         self._cleanup_pending_tmp_image()
@@ -1344,7 +1639,7 @@ class GUIAgentApp(QObject):
                 # 處理指令（異步）
                 import asyncio
                 async def handle_command():
-                    result = await self.command_handler.handle(user_input)
+                    result = await self.command_handler.handle_async(user_input)
                     if result == "__clear_context__":
                         try:
                             self.runtime.clear_context()
@@ -1390,15 +1685,20 @@ class GUIAgentApp(QObject):
                         # 指令已處理完畢
                         pass
                 
+                # 將指令處理排到 agent 線程的事件循環，避免阻塞 Qt 主線程
                 try:
-                    loop = asyncio.get_event_loop()
-                    if loop.is_running():
-                        asyncio.ensure_future(handle_command())
+                    runtime_loop = getattr(self.runtime, "loop", None)
+                    if runtime_loop is not None and runtime_loop.is_running():
+                        asyncio.run_coroutine_threadsafe(handle_command(), runtime_loop)
                     else:
-                        loop.run_until_complete(handle_command())
-                except Exception:
-                    # 如果無法獲取事件循環，使用 QTimer
-                    pass
+                        # 後備：runtime loop 尚未就緒，僅在無事件循環時臨時建立一個
+                        try:
+                            asyncio.run(handle_command())
+                        except RuntimeError:
+                            # 已存在 loop（罕見），改用 ensure_future
+                            asyncio.ensure_future(handle_command())
+                except Exception as exc:
+                    logger.warning("Failed to dispatch command handler: %s", exc)
                 return
             
             # 記錄用戶輸入
@@ -1466,6 +1766,7 @@ class GUIAgentApp(QObject):
 
             logger.info(f"Processing input: {user_input[:80]}...")
             self._active_ui.update_speech_bubble(f"You: {self._last_user_input}")
+            session_id = self._current_session_id or self.runtime._current_session_id
 
             # 啟動動畫並顯示等待狀態
             def start_waiting():
@@ -1491,9 +1792,11 @@ class GUIAgentApp(QObject):
                 self._set_running_both(True)
             except Exception:
                 pass
-            request_id = self.runtime.submit(user_input, self.chat_history)
+            request_id = self.runtime.submit(user_input, self.chat_history, session_id=session_id)
             if request_id:
                 self._active_request_id = request_id
+                self._request_session_ids[request_id] = session_id
+                self._save_current_session_ui_state()
 
     def stop_current_request(self) -> None:
         """Cancel the current agent request (stop button handler)."""
@@ -1501,8 +1804,10 @@ class GUIAgentApp(QObject):
             return
         self._cleanup_pending_tmp_image()
         try:
-            if self.runtime._current_future and not self.runtime._current_future.done():
-                self.runtime._current_future.cancel()
+            state = self.runtime._session_states.get(self._current_session_id)
+            future = state.current_future if state else self.runtime._current_future
+            if future and not future.done():
+                future.cancel()
         except Exception:
             pass
         # Save interrupted context so next message can reference it
@@ -1530,6 +1835,7 @@ class GUIAgentApp(QObject):
             self._set_running_both(False)
         except Exception:
             pass
+        self._save_current_session_ui_state()
 
     def run(self):
         """Run GUI application."""

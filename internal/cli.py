@@ -234,8 +234,10 @@ def confirm(message: str, default_choice: str = '') -> bool:
         f"<Confirmation> {message} {yes_no_str}: ")) else default_choice
 
     while True:
-        if response == '':
-            response = input(
-                f"Please enter a valid response: {message}{yes_no_str}")
-        if response.upper() in ['Y', 'N']:
-            return response.upper() == 'Y'
+        upper = response.strip().upper()
+        if upper in ['Y', 'N']:
+            return upper == 'Y'
+        response = input(
+            f"Please enter Y or N: {message} {yes_no_str}: ").strip()
+        if not response:
+            response = default_choice

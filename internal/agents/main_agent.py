@@ -47,6 +47,7 @@ from internal.skills_loader import SkillRegistry, load_skill_registry
 
 from internal.mcp_server_list import get_all_mcp_servers
 from internal.compaction import estimate_tokens, get_message_text, serialize_compaction_input
+from internal.conversation_history import ConversationHistoryStore
 from internal.core.orchestration.runtime import OrchestrationRuntime
 from internal.core.orchestration.store import OrchestrationStore
 from internal.core.orchestration.types import (
@@ -301,6 +302,7 @@ class MainAgent:
         disabled_skills: list[str] | None = None,
         extra_mcp_servers: list[Any] | None = None,
         runtime_mode: str | None = None,
+        conversation_history_store: ConversationHistoryStore | None = None,
     ) -> "MainAgent":
         # Prepend runtime-mode context only when explicitly specified
         if runtime_mode is not None:
@@ -479,6 +481,7 @@ class MainAgent:
             http_client,
             skill_root_dirs,
             memory_manager=memory_manager,
+            conversation_history_store=conversation_history_store,
         )
         try:
             # Register skill tool inside wrapped phase so skill activations
@@ -516,11 +519,13 @@ class MainAgent:
         http_client: AsyncClient | None = None,
         skill_root_dirs: list[Path] | None = None,
         memory_manager: MemoryManager | None = None,
+        conversation_history_store: ConversationHistoryStore | None = None,
     ) -> None:
         self.agent = agent
         self.sub_agents = None
         self.skills = skills
         self._memory_manager = memory_manager
+        self._conversation_history_store = conversation_history_store or ConversationHistoryStore()
         self._last_messages: list[ModelRequest | ModelResponse] | None = None
         self._last_execution_steps: list[dict[str, Any]] = []
         self._last_user_prompt: str | None = None
@@ -543,6 +548,25 @@ class MainAgent:
         self._orchestration_runtime: OrchestrationRuntime | None = None
         setattr(self.agent, "_tool_event_callback", None)
         # tools are registered via add_all_tools during create()
+
+    @property
+    def session_id(self) -> str:
+        return self._session_id
+
+    @property
+    def conversation_history_store(self) -> ConversationHistoryStore:
+        return self._conversation_history_store
+
+    def _record_conversation_turn(self, user_prompt: str, assistant_reply: str) -> None:
+        try:
+            self._conversation_history_store.append_turn(
+                session_id=self._session_id,
+                user_text=user_prompt,
+                assistant_text=assistant_reply,
+                messages=self._last_messages,
+            )
+        except Exception:
+            logger.exception("Failed to persist conversation history")
 
     def _register_subagent_tools(self) -> None:
         @self.agent.tool_plain
@@ -707,6 +731,13 @@ class MainAgent:
             changed to 'completed'.
             """
             if not items:
+                normalized_phase = str(phase or "").strip().lower()
+                if normalized_phase not in self._TODO_ALLOWED_PHASES:
+                    allowed = ", ".join(sorted(self._TODO_ALLOWED_PHASES))
+                    raise ValueError(f"todo.phase must be one of: {allowed}")
+                if normalized_phase == "completed":
+                    snapshot = self._render_todo_snapshot(normalized_phase, [])
+                    return self._publish_todo_snapshot(snapshot, [])
                 # Calling with empty items would wipe the list — return current snapshot unchanged
                 current = self._todo_tool_snapshot
                 if current:
@@ -718,6 +749,29 @@ class MainAgent:
             )
             snapshot = self._render_todo_snapshot(normalized_phase, normalized_items)
             return self._publish_todo_snapshot(snapshot, normalized_items)
+
+        @self.agent.tool_plain
+        def SearchConversationHistory(
+            query: str,
+            scope: str = "all",
+            session_id: str = "",
+            limit: int = 20,
+        ) -> list[dict[str, str]]:
+            """Search persisted raw conversation history outside the active context.
+
+            Args:
+                query: Text to search for.
+                scope: "current", "session", or "all".
+                session_id: Required when scope is "session".
+                limit: Maximum number of matching turns to return.
+            """
+            return self._conversation_history_store.search(
+                query,
+                scope=scope,
+                session_id=session_id or None,
+                current_session_id=self._session_id,
+                limit=max(1, min(int(limit or 20), 100)),
+            )
 
         @self.agent.tool_plain
         def RenderRich(content: str) -> str:
@@ -820,6 +874,7 @@ class MainAgent:
     def _inject_todo_snapshot(self, prompt: str) -> str:
         guidance = (
             "<active-session-todos>\n"
+            "You must manage the todo list yourself with the `todo` tool; do not ask the user to maintain it.\n"
             "Use the `todo` tool whenever the task has more than one distinct step — use your judgment on what counts as a step.\n"
             "Skip it only for truly trivial one-shot responses (e.g. a factual question, a single-line fix).\n"
             "Break the task into as many items as naturally fit. Each item should be the smallest unit of work you can confidently track and complete independently.\n"
@@ -1392,13 +1447,33 @@ class MainAgent:
         message_history: list[ModelRequest | ModelResponse] | None = None,
         on_todo_update: Callable[[str], None] | None = None,
     ) -> AsyncIterator[str]:
-        result = await self.coordinator_handle_user_turn(
-            user_prompt,
-            message_history=message_history,
-            on_todo_update=on_todo_update,
-        )
-        if result:
-            yield result
+        def todo_callback(snapshot: str) -> None:
+            self._publish_todo_snapshot(snapshot, self._todo_tool_items, emit=False)
+            if on_todo_update:
+                on_todo_update(snapshot)
+
+        self._active_todo_update_callback = todo_callback
+        try:
+            stream_core = getattr(self, "_execute_turn_stream_core", None)
+            if callable(stream_core):
+                async for chunk in stream_core(
+                    user_prompt,
+                    message_history=message_history,
+                    skip_plan_execution=True,
+                ):
+                    yield chunk
+                return
+
+            # Fallback: deliver the full reply as a single chunk if no streaming core.
+            result = await self.coordinator_handle_user_turn(
+                user_prompt,
+                message_history=message_history,
+                on_todo_update=on_todo_update,
+            )
+            if result:
+                yield result
+        finally:
+            self._active_todo_update_callback = None
 
     async def _orchestration_execute_step(
         self,
@@ -1524,6 +1599,7 @@ class MainAgent:
         _ = skip_plan_execution  # backward compatibility
         self._reload_model_from_db()
 
+        original_prompt = prompt
         self._previous_user_prompt = self._last_user_prompt
         self._last_user_prompt = prompt
         prompt = self._inject_task_notifications(prompt)
@@ -1541,6 +1617,7 @@ class MainAgent:
             except Exception:
                 self._last_messages = None
             self._last_assistant_reply = self._extract_user_reply(output_text)
+            self._record_conversation_turn(original_prompt, output_text)
 
             return output_text
         except Exception as e:
@@ -1555,6 +1632,7 @@ class MainAgent:
                         except Exception:
                             self._last_messages = None
                         self._last_assistant_reply = self._extract_user_reply(output_text)
+                        self._record_conversation_turn(original_prompt, output_text)
                         return output_text
                     except Exception as retry_exc:
                         e = retry_exc
@@ -1581,6 +1659,7 @@ class MainAgent:
                 except Exception:
                     self._last_messages = None
                 self._last_assistant_reply = self._extract_user_reply(output_text)
+                self._record_conversation_turn(original_prompt, output_text)
                 return output_text
             except Exception as final_error:
                 logger.error("All retry attempts failed: %s", final_error)
@@ -1620,6 +1699,7 @@ class MainAgent:
         _ = skip_plan_execution  # backward compatibility
         self._reload_model_from_db()
 
+        original_prompt = prompt
         self._previous_user_prompt = self._last_user_prompt
         self._last_user_prompt = prompt
         prompt = self._inject_task_notifications(prompt)
@@ -1660,6 +1740,7 @@ class MainAgent:
                 except Exception:
                     self._last_messages = None
                 self._last_assistant_reply = self._extract_user_reply(collected)
+                self._record_conversation_turn(original_prompt, collected)
         except Exception as e:
             if self._is_context_overflow_error(e):
                 retry_history = self._overflow_retry_history(safe_history)
@@ -1686,6 +1767,7 @@ class MainAgent:
                             except Exception:
                                 self._last_messages = None
                             self._last_assistant_reply = self._extract_user_reply(collected)
+                            self._record_conversation_turn(original_prompt, collected)
                             return
                     except Exception as retry_exc:
                         e = retry_exc
@@ -1723,5 +1805,6 @@ class MainAgent:
                     except Exception:
                         self._last_messages = None
                     self._last_assistant_reply = self._extract_user_reply(collected)
+                    self._record_conversation_turn(original_prompt, collected)
             except Exception:
                 yield "抱歉，系統暫時無法處理您的請求。請稍後再試。"
