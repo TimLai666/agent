@@ -142,6 +142,7 @@ class SkillRegistry:
     ) -> None:
         self._skills = skills
         self._llm_scorer = llm_scorer
+        self._metadata_cache: dict[str, dict] | None = None
         logger.info(
             "SkillRegistry initialized with %d skills (LLM scorer: %s)",
             len(skills),
@@ -172,12 +173,14 @@ class SkillRegistry:
         """Get lightweight metadata for all skills (for progressive disclosure).
 
         Returns only name and description without loading full content.
-        This is the ~100 token metadata scan mentioned in Claude Code docs.
+        Result is cached for the lifetime of this registry instance.
         """
-        return {
-            name: spec.metadata_dict()
-            for name, spec in self._skills.items()
-        }
+        if self._metadata_cache is None:
+            self._metadata_cache = {
+                name: spec.metadata_dict()
+                for name, spec in self._skills.items()
+            }
+        return self._metadata_cache
 
     async def find_relevant_skills(
         self,

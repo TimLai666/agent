@@ -68,6 +68,8 @@ class ConversationHistoryStore:
 
         base = Path(root_dir).expanduser().resolve() if root_dir is not None else TIM_AGENT_CONVERSATIONS_DIR
         self.root_dir = base
+        # Per-session metadata cache; invalidated on write.
+        self._meta_cache: dict[str, dict[str, Any]] = {}
 
     def _session_dir(self, session_id: str) -> Path:
         return self.root_dir / _safe_session_id(session_id)
@@ -111,6 +113,7 @@ class ConversationHistoryStore:
             self._meta_path(session_id),
             json.dumps(meta, ensure_ascii=False, indent=2),
         )
+        self._meta_cache[session_id] = meta
 
         turn = {
             "session_id": session_id,
@@ -129,12 +132,16 @@ class ConversationHistoryStore:
             )
 
     def _read_meta(self, session_id: str) -> dict[str, Any]:
+        if session_id in self._meta_cache:
+            return self._meta_cache[session_id]
         path = self._meta_path(session_id)
         if not path.exists():
             return {}
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
-            return data if isinstance(data, dict) else {}
+            result = data if isinstance(data, dict) else {}
+            self._meta_cache[session_id] = result
+            return result
         except Exception:
             return {}
 
@@ -148,10 +155,16 @@ class ConversationHistoryStore:
             meta_path = child / "metadata.json"
             if not meta_path.exists():
                 continue
-            try:
-                meta = json.loads(meta_path.read_text(encoding="utf-8"))
-            except Exception:
-                continue
+            sid = child.name
+            if sid in self._meta_cache:
+                meta = self._meta_cache[sid]
+            else:
+                try:
+                    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                    if isinstance(meta, dict):
+                        self._meta_cache[sid] = meta
+                except Exception:
+                    continue
             sessions.append(
                 ConversationSession(
                     session_id=str(meta.get("session_id") or child.name),
@@ -194,6 +207,7 @@ class ConversationHistoryStore:
         path = self._session_dir(session_id)
         if not path.exists():
             return False
+        self._meta_cache.pop(session_id, None)
         try:
             shutil.rmtree(path)
         except OSError:

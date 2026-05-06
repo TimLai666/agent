@@ -3,7 +3,9 @@ from __future__ import annotations
 import asyncio
 import re
 import uuid
+from collections import deque
 from dataclasses import dataclass, replace
+from functools import lru_cache
 from datetime import datetime
 from typing import Any, Awaitable, Callable, Literal
 
@@ -218,17 +220,11 @@ CompactionRunner = Callable[[CompactJob, str], Awaitable[str]]
 def estimate_tokens(text: str) -> int:
     if not text:
         return 0
-    # Approximate token cost split by ASCII vs non-ASCII. ASCII is roughly
-    # 4 chars/token; CJK and other dense scripts are closer to 1 char/token
-    # for most BPE tokenizers, so the previous "len/4" undercount for
-    # Chinese-heavy sessions could miss the compaction threshold by 4×.
-    ascii_chars = 0
-    other_chars = 0
-    for ch in text:
-        if ord(ch) < 128:
-            ascii_chars += 1
-        else:
-            other_chars += 1
+    # encode('ascii','ignore') drops non-ASCII bytes via C-level loop — much
+    # faster than a Python for-loop over chars. The remaining byte count is
+    # the ASCII character count; the difference gives non-ASCII (CJK etc.).
+    ascii_chars = len(text.encode("ascii", "ignore"))
+    other_chars = len(text) - ascii_chars
     return max(1, ascii_chars // 4 + other_chars)
 
 
@@ -252,6 +248,7 @@ def should_compact(total_tokens: int) -> bool:
     return total_tokens >= int(MAX_CONTEXT_TOKENS * COMPACT_TRIGGER_RATIO)
 
 
+@lru_cache(maxsize=32)
 def get_compaction_prompt(mode: CompactMode, custom_instructions: str | None = None) -> str:
     prompt_map: dict[CompactMode, str] = {
         "base": BASE_COMPACT_PROMPT,
@@ -522,43 +519,57 @@ class CompactCoordinator:
             raise RuntimeError("Compaction failed: runner error") from last_error
         raise RuntimeError("Compaction failed: empty formatted summary")
 
+    # Role labels mirror serialize_compaction_input's ROLE_LABELS dict.
+    _ROLE_LABELS: dict[str, str] = {
+        "user": "USER",
+        "assistant": "ASSISTANT",
+        "tool": "TOOL RESULT",
+        "system": "SYSTEM",
+    }
+
     def _fit_job_to_input_budget(self, job: CompactJob) -> CompactJob:
         old_summary = trim_text_to_token_budget(
             job.oldSummary.strip(),
             COMPACTION_OLD_SUMMARY_TOKEN_BUDGET,
         )
-        selected: list[Message] = []
+
+        # Compute base job tokens once (empty message list) so we can add each
+        # message's contribution incrementally — O(n) instead of O(n²).
+        base_job = CompactJob(
+            jobId=job.jobId,
+            mode=job.mode,
+            oldSummary=old_summary,
+            messagesToCompress=[],
+            preservedRecentMessages=job.preservedRecentMessages,
+            suppressFollowUpQuestions=job.suppressFollowUpQuestions,
+        )
+        running_tokens = estimate_tokens(serialize_compaction_input(base_job))
+
+        selected: deque[Message] = deque()
 
         for message in reversed(job.messagesToCompress):
-            candidate = [message, *selected]
-            candidate_job = CompactJob(
-                jobId=job.jobId,
-                mode=job.mode,
-                oldSummary=old_summary,
-                messagesToCompress=candidate,
-                preservedRecentMessages=job.preservedRecentMessages,
-                suppressFollowUpQuestions=job.suppressFollowUpQuestions,
-            )
-            candidate_tokens = estimate_tokens(serialize_compaction_input(candidate_job))
-            if candidate_tokens <= COMPACTION_INPUT_TOKEN_BUDGET:
-                selected = candidate
-                continue
-
-            if not selected:
-                truncated = trim_text_to_token_budget(
-                    message.content,
-                    max(256, COMPACTION_INPUT_TOKEN_BUDGET // 2),
-                )
-                selected = [
-                    Message(
-                        id=message.id,
-                        role=message.role,
-                        content=truncated,
-                        tokenCount=estimate_tokens(truncated),
-                        createdAt=message.createdAt,
+            label = self._ROLE_LABELS.get(message.role, message.role.upper())
+            # Each message serialises as "[LABEL]\n{content}" plus a "\n\n" separator.
+            msg_tokens = estimate_tokens(f"[{label}]\n{message.content.strip()}") + 1
+            if running_tokens + msg_tokens <= COMPACTION_INPUT_TOKEN_BUDGET:
+                selected.appendleft(message)
+                running_tokens += msg_tokens
+            else:
+                if not selected:
+                    truncated = trim_text_to_token_budget(
+                        message.content,
+                        max(256, COMPACTION_INPUT_TOKEN_BUDGET // 2),
                     )
-                ]
-            break
+                    selected.appendleft(
+                        Message(
+                            id=message.id,
+                            role=message.role,
+                            content=truncated,
+                            tokenCount=estimate_tokens(truncated),
+                            createdAt=message.createdAt,
+                        )
+                    )
+                break
 
         if not selected and job.messagesToCompress:
             last = job.messagesToCompress[-1]
@@ -566,7 +577,7 @@ class CompactCoordinator:
                 last.content,
                 max(256, COMPACTION_INPUT_TOKEN_BUDGET // 2),
             )
-            selected = [
+            selected.appendleft(
                 Message(
                     id=last.id,
                     role=last.role,
@@ -574,13 +585,13 @@ class CompactCoordinator:
                     tokenCount=estimate_tokens(truncated),
                     createdAt=last.createdAt,
                 )
-            ]
+            )
 
         return CompactJob(
             jobId=job.jobId,
             mode=job.mode,
             oldSummary=old_summary,
-            messagesToCompress=selected,
+            messagesToCompress=list(selected),
             preservedRecentMessages=job.preservedRecentMessages,
             suppressFollowUpQuestions=job.suppressFollowUpQuestions,
         )

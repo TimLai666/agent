@@ -11,6 +11,30 @@ from internal.logger import logger
 from internal import paths as runtime_paths
 
 
+# Pre-compiled catastrophic command patterns (avoids recompiling per call).
+_HARD_BLOCK_COMPILED: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r"\brm\s+-rf\s+/(\s|$)"), "rm -rf /"),
+    (re.compile(r"\brm\s+-rf\s+--no-preserve-root\b"), "rm --no-preserve-root"),
+    (re.compile(r"\bdd\s+if=.*\s+of=/dev/(sd[a-z]|nvme\d+n\d+|disk\d+)\b"), "dd to raw disk"),
+    (re.compile(r"\bmkfs(\.[a-z0-9]+)?\b"), "mkfs"),
+    (re.compile(r"\bfdisk\b"), "fdisk"),
+    (re.compile(r"\bparted\b"), "parted"),
+    (re.compile(r"\bformat\s+[a-z]:\b"), "format drive"),
+    (re.compile(r"\bshutdown\b"), "shutdown"),
+    (re.compile(r"\breboot\b"), "reboot"),
+    (re.compile(r"\bhalt\b"), "halt"),
+    (re.compile(r"\bpoweroff\b"), "poweroff"),
+    (re.compile(r"\bstop-computer\b"), "Stop-Computer"),
+    (re.compile(r"\brestart-computer\b"), "Restart-Computer"),
+    (re.compile(r"\bformat-volume\b"), "Format-Volume"),
+    (re.compile(r"\bclear-disk\b"), "Clear-Disk"),
+    (re.compile(r"\bremove-item\s+.*-recurse.*-force\b"), "Remove-Item -Recurse -Force"),
+]
+
+# Cached platform info (static for process lifetime).
+_PLATFORM_INFO_CACHE: str | None = None
+
+
 def _workspace_root() -> Path:
     return runtime_paths.TIM_AGENT_SANDBOX_DIR
 
@@ -38,17 +62,20 @@ def get_platform_info() -> str:
     Get the current operating system and architecture information.
     Agent SHOULD call this before running any terminal commands to ensure compatibility.
     """
-    info = {
-        "system": platform.system(),
-        "node": platform.node(),
-        "release": platform.release(),
-        "version": platform.version(),
-        "machine": platform.machine(),
-        "processor": platform.processor(),
-        "architecture": str(platform.architecture()),
-    }
-    logger.info(f"Retrieved platform info: {info['system']} {info['machine']}")
-    return "\n".join([f"{k}: {v}" for k, v in info.items()])
+    global _PLATFORM_INFO_CACHE
+    if _PLATFORM_INFO_CACHE is None:
+        info = {
+            "system": platform.system(),
+            "node": platform.node(),
+            "release": platform.release(),
+            "version": platform.version(),
+            "machine": platform.machine(),
+            "processor": platform.processor(),
+            "architecture": str(platform.architecture()),
+        }
+        logger.info(f"Retrieved platform info: {info['system']} {info['machine']}")
+        _PLATFORM_INFO_CACHE = "\n".join([f"{k}: {v}" for k, v in info.items()])
+    return _PLATFORM_INFO_CACHE
 
 
 def get_workspace_info() -> str:
@@ -92,29 +119,9 @@ def run_terminal_command(command: str) -> str:
     logger.info(f"Agent attempting to run terminal command: {command}")
 
     # Hard-block only catastrophic, system-destroying command patterns.
-    hard_block_patterns = {
-        r"\brm\s+-rf\s+/(\s|$)": "rm -rf /",
-        r"\brm\s+-rf\s+--no-preserve-root\b": "rm --no-preserve-root",
-        r"\bdd\s+if=.*\s+of=/dev/(sd[a-z]|nvme\d+n\d+|disk\d+)\b": "dd to raw disk",
-        r"\bmkfs(\.[a-z0-9]+)?\b": "mkfs",
-        r"\bfdisk\b": "fdisk",
-        r"\bparted\b": "parted",
-        r"\bformat\s+[a-z]:\b": "format drive",
-        r"\bshutdown\b": "shutdown",
-        r"\breboot\b": "reboot",
-        r"\bhalt\b": "halt",
-        r"\bpoweroff\b": "poweroff",
-        # PowerShell equivalents
-        r"\bstop-computer\b": "Stop-Computer",
-        r"\brestart-computer\b": "Restart-Computer",
-        r"\bformat-volume\b": "Format-Volume",
-        r"\bclear-disk\b": "Clear-Disk",
-        r"\bremove-item\s+.*-recurse.*-force\b": "Remove-Item -Recurse -Force",
-    }
-
     normalized_command = command.lower()
-    for pattern, label in hard_block_patterns.items():
-        if re.search(pattern, normalized_command):
+    for pattern, label in _HARD_BLOCK_COMPILED:
+        if pattern.search(normalized_command):
             logger.warning(
                 "Blocked catastrophic command: %s (pattern: %s)",
                 command,

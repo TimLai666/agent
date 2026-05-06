@@ -386,6 +386,8 @@ class AutoWrapTextBrowser(QTextBrowser):
         self._constrain_images_active = False
         self._image_buttons = []
         self._refresh_image_buttons_pending = False
+        # Cache decoded data: URI images so base64.b64decode is not repeated per paint.
+        self._decoded_image_cache: dict[str, "QImage"] = {}
         try:
             self.document().contentsChanged.connect(self._on_contents_changed)
             self.document().resourceLoaded.connect(self._on_resource_loaded)
@@ -553,11 +555,15 @@ class AutoWrapTextBrowser(QTextBrowser):
             resource = None
 
         if name.startswith("data:image/"):
+            cached_img = self._decoded_image_cache.get(name)
+            if cached_img is not None:
+                return cached_img
             try:
-                header, b64data = name.split(",", 1)
+                _header, b64data = name.split(",", 1)
                 raw = base64.b64decode(b64data)
                 image = QImage.fromData(raw)
                 if not image.isNull():
+                    self._decoded_image_cache[name] = image
                     return image
             except Exception:
                 return None
@@ -2295,8 +2301,19 @@ class ArcWidget(QWidget):
         self.anim = QVariantAnimation(self, duration=10000)
         self.anim.setStartValue(0)
         self.anim.setEndValue(360)
+        self.anim.setLoopCount(-1)
         self.anim.valueChanged.connect(self.update)
         self.anim.start()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if hasattr(self, "anim") and self.anim.state() != self.anim.Running:
+            self.anim.start()
+
+    def hideEvent(self, event):
+        super().hideEvent(event)
+        if hasattr(self, "anim") and self.anim.state() == self.anim.Running:
+            self.anim.pause()
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -3609,6 +3626,19 @@ class MainWindow(QMainWindow):
         from PySide6.QtGui import QRegion
         from PySide6.QtCore import QRect
 
+        # Skip recomputing if key geometry parameters haven't changed.
+        mask_key = (
+            self.input_container.isVisible(),
+            self.collapse_button.isVisible(),
+            self.speech_bubble.isVisible(),
+            self.speech_bubble.geometry().getRect() if self.speech_bubble.isVisible() else None,
+            self.width(),
+            self.height(),
+        )
+        if getattr(self, "_mask_cache_key", None) == mask_key:
+            return
+        self._mask_cache_key = mask_key
+
         region = QRegion()
 
         # 添加輸入框區域（使用更寬鬆的範圍）
@@ -3701,22 +3731,24 @@ class MainWindow(QMainWindow):
             self._compact_pulse_timer.stop()
             self._compact_label.hide()
 
+    _COMPACT_PULSE_ON = (
+        "QLabel { background: rgba(110, 75, 190, 230); color: #eedeff; "
+        "border: 1px solid rgba(200,160,255,160); border-radius: 11px; "
+        "font-size: 8pt; padding: 0 10px; }"
+    )
+    _COMPACT_PULSE_OFF = (
+        "QLabel { background: rgba(70, 45, 130, 180); color: #c8aaee; "
+        "border: 1px solid rgba(160,120,220,90); border-radius: 11px; "
+        "font-size: 8pt; padding: 0 10px; }"
+    )
+
     def _pulse_compact_label(self) -> None:
         """Alternate label opacity to create a pulsing effect."""
         self._compact_pulse_phase = 1 - self._compact_pulse_phase
-        if self._compact_pulse_phase:
-            self._compact_label.setStyleSheet(
-                "QLabel { background: rgba(110, 75, 190, 230); color: #eedeff; "
-                "border: 1px solid rgba(200,160,255,160); border-radius: 11px; "
-                "font-size: 8pt; padding: 0 10px; }"
-            )
-        else:
-            self._compact_label.setStyleSheet(
-                "QLabel { background: rgba(70, 45, 130, 180); color: #c8aaee; "
-                "border: 1px solid rgba(160,120,220,90); border-radius: 11px; "
-                "font-size: 8pt; padding: 0 10px; }"
-            )
-    
+        new_style = self._COMPACT_PULSE_ON if self._compact_pulse_phase else self._COMPACT_PULSE_OFF
+        if self._compact_label.styleSheet() != new_style:
+            self._compact_label.setStyleSheet(new_style)
+
     def _update_bubble_geometry(self):
         """更新氣泡幾何形狀（延遲調用以避免阻塞）"""
         try:
@@ -5470,20 +5502,22 @@ class ChatWindow(QMainWindow):
             self._compact_pulse_timer.stop()
             self._compact_label.hide()
 
+    _COMPACT_PULSE_ON = (
+        "QLabel { background: rgba(110,75,190,230); color: #eedeff; "
+        "border: 1px solid rgba(200,160,255,160); border-radius: 11px; "
+        "font-size: 8pt; padding: 0 10px; }"
+    )
+    _COMPACT_PULSE_OFF = (
+        "QLabel { background: rgba(70,45,130,180); color: #c8aaee; "
+        "border: 1px solid rgba(160,120,220,90); border-radius: 11px; "
+        "font-size: 8pt; padding: 0 10px; }"
+    )
+
     def _pulse_compact_label(self) -> None:
         self._compact_pulse_phase = 1 - self._compact_pulse_phase
-        if self._compact_pulse_phase:
-            self._compact_label.setStyleSheet(
-                "QLabel { background: rgba(110,75,190,230); color: #eedeff; "
-                "border: 1px solid rgba(200,160,255,160); border-radius: 11px; "
-                "font-size: 8pt; padding: 0 10px; }"
-            )
-        else:
-            self._compact_label.setStyleSheet(
-                "QLabel { background: rgba(70,45,130,180); color: #c8aaee; "
-                "border: 1px solid rgba(160,120,220,90); border-radius: 11px; "
-                "font-size: 8pt; padding: 0 10px; }"
-            )
+        new_style = self._COMPACT_PULSE_ON if self._compact_pulse_phase else self._COMPACT_PULSE_OFF
+        if self._compact_label.styleSheet() != new_style:
+            self._compact_label.setStyleSheet(new_style)
 
     def update_context_meter(self, used_tokens: int, max_tokens: int, total_tokens: int = 0) -> None:
         def _fmt(n: int) -> str:
