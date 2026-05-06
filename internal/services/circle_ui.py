@@ -2301,19 +2301,8 @@ class ArcWidget(QWidget):
         self.anim = QVariantAnimation(self, duration=10000)
         self.anim.setStartValue(0)
         self.anim.setEndValue(360)
-        self.anim.setLoopCount(-1)
         self.anim.valueChanged.connect(self.update)
         self.anim.start()
-
-    def showEvent(self, event):
-        super().showEvent(event)
-        if hasattr(self, "anim") and self.anim.state() != self.anim.Running:
-            self.anim.start()
-
-    def hideEvent(self, event):
-        super().hideEvent(event)
-        if hasattr(self, "anim") and self.anim.state() == self.anim.Running:
-            self.anim.pause()
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -3625,19 +3614,6 @@ class MainWindow(QMainWindow):
         """更新窗口遮罩，定義可交互區域（跨平台方案）"""
         from PySide6.QtGui import QRegion
         from PySide6.QtCore import QRect
-
-        # Skip recomputing if key geometry parameters haven't changed.
-        mask_key = (
-            self.input_container.isVisible(),
-            self.collapse_button.isVisible(),
-            self.speech_bubble.isVisible(),
-            self.speech_bubble.geometry().getRect() if self.speech_bubble.isVisible() else None,
-            self.width(),
-            self.height(),
-        )
-        if getattr(self, "_mask_cache_key", None) == mask_key:
-            return
-        self._mask_cache_key = mask_key
 
         region = QRegion()
 
