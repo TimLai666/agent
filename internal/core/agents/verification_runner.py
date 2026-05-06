@@ -18,17 +18,19 @@ class VerificationRunner:
 
     def _build_prompt(self, input_data: SpawnVerificationInput) -> str:
         worker = input_data.workerResult
+        files = worker.filesChanged or []
+        commands = worker.commandsExecuted or []
         return (
             "ORIGINAL USER REQUEST:\n"
             f"{input_data.originalUserRequest}\n\n"
             "WORKER SUMMARY:\n"
-            f"{worker.summary}\n\n"
+            f"{worker.summary or ''}\n\n"
             "FILES CHANGED:\n"
-            + "\n".join(worker.filesChanged)
+            + ("\n".join(files) if files else "(none reported)")
             + "\n\n"
             "COMMANDS ALREADY RUN:\n"
-            + "\n".join(worker.commandsExecuted)
+            + ("\n".join(commands) if commands else "(none reported)")
             + "\n\n"
             "CLAIMS TO VERIFY:\n"
-            + worker.result
+            + (worker.result or "(no result text provided)")
         )

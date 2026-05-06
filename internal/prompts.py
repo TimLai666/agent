@@ -242,9 +242,13 @@ def _process_variables(text: str, variables: dict[str, str] | None = None) -> st
     # 移除複雜的函數調用（帶參數或複雜邏輯）
     text = re.sub(r'\$\{[^}]+\([^)]*\)[^}]*\}', '', text)
 
-    # 清除 Claude/Anthropic 身分注入（保留工具識別字串，不改 mcp__claude-in-chrome 這類名稱）
-    text = re.sub(r'\bClaude\b', 'assistant', text, flags=re.IGNORECASE)
-    text = re.sub(r'\bAnthropic\b', 'provider', text, flags=re.IGNORECASE)
+    # 清除 Claude/Anthropic 身分注入。排除路徑（.claude/、~/.claude/、/.claude/）、
+    # CLI 名稱（claude --foo）、副檔名前綴（mcp__claude-…）等不應改寫的場景。
+    # 採取保守策略：只在前面不是 . / - _ 等字元時才替換。
+    text = re.sub(r'(?<![./\-_\w])Claude\b', 'assistant', text)
+    text = re.sub(r'(?<![./\-_\w])claude\b(?!\s*(?:--|-)\w)', 'assistant', text)
+    text = re.sub(r'(?<![./\-_\w])Anthropic\b', 'provider', text)
+    text = re.sub(r'(?<![./\-_\w])anthropic\b', 'provider', text)
 
     return text
 

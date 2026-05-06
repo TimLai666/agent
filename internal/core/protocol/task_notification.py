@@ -8,6 +8,10 @@ from internal.core.tasks.task_types import TaskUsage, WorkerResult
 
 
 def _usage_xml(usage: TaskUsage | None, total_tokens: int | None, tool_uses: int | None) -> str:
+    # Fall back to the usage's own tokens so a round-trip writer→parser does not
+    # zero out token accounting when the caller doesn't pre-aggregate totals.
+    if total_tokens is None and usage is not None:
+        total_tokens = (usage.inputTokens or 0) + (usage.outputTokens or 0)
     return (
         "  <usage>\n"
         f"    <total_tokens>{(total_tokens if total_tokens is not None else 0)}</total_tokens>\n"

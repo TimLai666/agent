@@ -1,8 +1,11 @@
+import asyncio
 import random
-import time
 from pydantic_ai import Agent
 
 from internal.logger import logger
+
+
+_MAX_TIMEOUT_SECONDS = 300
 
 
 def add_basic_tools(agent: Agent) -> None:
@@ -22,13 +25,16 @@ def add_basic_tools(agent: Agent) -> None:
         return random.choice(items)
 
     @agent.tool_plain
-    def timeout(seconds: int) -> str:
-        """Wait for a specified number of seconds."""
+    async def timeout(seconds: int) -> str:
+        """Wait for a specified number of seconds (capped at 300s, max). Async-safe."""
         if seconds < 0:
             return "Cannot wait for negative time."
+        if seconds > _MAX_TIMEOUT_SECONDS:
+            logger.warning(
+                "timeout(%s) capped to %s seconds.", seconds, _MAX_TIMEOUT_SECONDS
+            )
+            seconds = _MAX_TIMEOUT_SECONDS
         logger.info(f"Start waiting for {seconds} seconds...")
-        time.sleep(seconds)
+        await asyncio.sleep(seconds)
         logger.info("Wait completed.")
-        # todo: 可以接個好看ui或鈴聲之類
         return f"Time's up after {seconds} seconds."
-

@@ -1,4 +1,4 @@
-from typing import Literal, Callable, Optional
+from typing import Callable, Optional
 import io
 import re
 import threading
@@ -147,7 +147,10 @@ def ask_user_question(question: str, options: list[str], multi: bool = False) ->
             try:
                 raw = input("> ").strip()
             except (EOFError, KeyboardInterrupt):
-                return options[0] if options else ""
+                # Refusing to silently auto-pick the first option, which could
+                # be destructive (e.g. ["Delete all", "Cancel"]). Return empty
+                # so the caller sees explicit cancellation.
+                return ""
 
             if multi:
                 # Accept comma-separated indices or option texts
@@ -229,15 +232,29 @@ def confirm(message: str, default_choice: str = '') -> bool:
         return result
     
     # Use CLI mode
-    yes_no_str: Literal['[y/n]'] | Literal['[Y/n]'] | Literal['[y/N]'] = "[y/n]" if not default_choice else "[Y/n]" if default_choice == 'Y' else "[y/N]"
-    response: str = r if (r := input(
-        f"<Confirmation> {message} {yes_no_str}: ")) else default_choice
+    yes_no_str: str = "[y/n]" if not default_choice else "[Y/n]" if default_choice == 'Y' else "[y/N]"
+
+    def _safe_input(prompt: str) -> str | None:
+        try:
+            return input(prompt)
+        except (EOFError, KeyboardInterrupt):
+            return None
+
+    initial = _safe_input(f"<Confirmation> {message} {yes_no_str}: ")
+    if initial is None:
+        # Treat aborted prompt as denial when there's no explicit default-yes,
+        # else honour the explicit default. Never quietly auto-approve when
+        # default_choice is empty.
+        return default_choice == 'Y'
+    response: str = initial if initial else default_choice
 
     while True:
         upper = response.strip().upper()
         if upper in ['Y', 'N']:
             return upper == 'Y'
-        response = input(
-            f"Please enter Y or N: {message} {yes_no_str}: ").strip()
+        next_resp = _safe_input(f"Please enter Y or N: {message} {yes_no_str}: ")
+        if next_resp is None:
+            return default_choice == 'Y'
+        response = next_resp.strip()
         if not response:
             response = default_choice

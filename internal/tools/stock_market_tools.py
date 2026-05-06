@@ -28,7 +28,14 @@ def add_stock_market_tools(agent: Agent) -> None:
         logger.info(f"Fetching stock price for ticker: {ticker_symbol}")
         try:
             stock = yf.Ticker(ticker_symbol)
-            price = stock.history(period="1d")["Close"].iloc[-1]
+            history = stock.history(period="1d")
+            if history.empty or "Close" not in history:
+                return (
+                    f"No price data available for {ticker_symbol}. "
+                    "The market may be closed, the ticker may be invalid, "
+                    "or the suffix (.TW for TWSE, .TWO for TPEx) may be wrong."
+                )
+            price = history["Close"].iloc[-1]
             return f"The current price of {ticker_symbol} is {price:.2f}."
         except Exception as e:
             return f"Error fetching stock price: {str(e)}"

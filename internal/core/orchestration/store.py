@@ -69,6 +69,8 @@ class OrchestrationStore:
     def _connect(self) -> Iterator[sqlite3.Connection]:
         conn = sqlite3.connect(str(self._db_path))
         conn.row_factory = sqlite3.Row
+        # Enable FK enforcement (cascades require it). Must be set per-connection.
+        conn.execute("PRAGMA foreign_keys = ON")
         try:
             yield conn
             conn.commit()
@@ -307,8 +309,6 @@ class OrchestrationStore:
         step = self.get_step_run(step_run_id)
         if step is None:
             raise KeyError(step_run_id)
-        if step.status != from_status:
-            raise ValueError(f"transition_step expected {from_status}, got {step.status}")
         if to_status not in _TRANSITIONS.get(from_status, set()):
             raise ValueError(f"Invalid transition {from_status} -> {to_status}")
         now = _now_ms()
@@ -320,13 +320,16 @@ class OrchestrationStore:
             attempt_count += 1
         if to_status in {"completed", "failed", "canceled"}:
             finished_at = now
+        # Conditional UPDATE on (step_run_id, status) prevents TOCTOU between
+        # the read above and this write — another writer that already moved the
+        # step out of from_status will leave 0 rowcount and we'll raise.
         with self._connect() as conn:
-            conn.execute(
+            cur = conn.execute(
                 """
                 UPDATE orchestration_step_runs
                 SET status = ?, summary = ?, failure_class = ?, last_checkpoint_id = ?,
                     updated_at = ?, started_at = ?, finished_at = ?, attempt_count = ?
-                WHERE step_run_id = ?
+                WHERE step_run_id = ? AND status = ?
                 """,
                 (
                     to_status,
@@ -338,8 +341,18 @@ class OrchestrationStore:
                     finished_at,
                     attempt_count,
                     step_run_id,
+                    from_status,
                 ),
             )
+            if cur.rowcount == 0:
+                current = conn.execute(
+                    "SELECT status FROM orchestration_step_runs WHERE step_run_id = ?",
+                    (step_run_id,),
+                ).fetchone()
+                actual = current["status"] if current else "<missing>"
+                raise ValueError(
+                    f"transition_step race: expected {from_status} but row is {actual}"
+                )
         return self.get_step_run(step_run_id)  # type: ignore[return-value]
 
     def set_step_ready(self, step_run_id: str, *, summary: str = "") -> StepRun:
@@ -470,18 +483,10 @@ class OrchestrationStore:
     def lease_step(self, step_run_id: str, *, lease_owner: str, lease_ttl_seconds: int = 30) -> bool:
         now = _now_ms()
         expires_at = now + lease_ttl_seconds * 1000
+        # Single conditional upsert: succeed only if no row exists, or the existing
+        # lease has expired, or the existing lease is owned by the same caller.
         with self._connect() as conn:
-            row = conn.execute(
-                """
-                SELECT lease_owner, expires_at
-                FROM orchestration_lease_heartbeats
-                WHERE step_run_id = ?
-                """,
-                (step_run_id,),
-            ).fetchone()
-            if row and row["expires_at"] > now and row["lease_owner"] != lease_owner:
-                return False
-            conn.execute(
+            cur = conn.execute(
                 """
                 INSERT INTO orchestration_lease_heartbeats (step_run_id, lease_owner, heartbeat_at, expires_at)
                 VALUES (?, ?, ?, ?)
@@ -489,14 +494,31 @@ class OrchestrationStore:
                     lease_owner = excluded.lease_owner,
                     heartbeat_at = excluded.heartbeat_at,
                     expires_at = excluded.expires_at
+                WHERE orchestration_lease_heartbeats.expires_at <= excluded.heartbeat_at
+                   OR orchestration_lease_heartbeats.lease_owner = excluded.lease_owner
                 """,
                 (step_run_id, lease_owner, now, expires_at),
             )
+            if cur.rowcount == 0:
+                # Conflict and the WHERE clause rejected the update: another live owner.
+                return False
         return True
 
-    def release_step_lease(self, step_run_id: str) -> None:
+    def release_step_lease(self, step_run_id: str, *, lease_owner: str | None = None) -> None:
+        # Owner-scoped release: never delete another runtime's lease. If lease_owner
+        # is None we keep the legacy behaviour (best-effort delete) for callers that
+        # genuinely need to drop any holder (e.g. administrative cleanup).
         with self._connect() as conn:
-            conn.execute("DELETE FROM orchestration_lease_heartbeats WHERE step_run_id = ?", (step_run_id,))
+            if lease_owner is None:
+                conn.execute(
+                    "DELETE FROM orchestration_lease_heartbeats WHERE step_run_id = ?",
+                    (step_run_id,),
+                )
+            else:
+                conn.execute(
+                    "DELETE FROM orchestration_lease_heartbeats WHERE step_run_id = ? AND lease_owner = ?",
+                    (step_run_id, lease_owner),
+                )
 
     def refresh_waiting_dependencies(self, task_run_id: str) -> None:
         steps = {step.stepId: step for step in self.list_steps(task_run_id)}

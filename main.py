@@ -304,7 +304,9 @@ class AgentRuntime(QThread):
             return
         request_id = self._active_request_id
         if session_id:
-            for candidate_id, candidate_session in reversed(self._request_sessions.items()):
+            # Snapshot to a list to avoid "dictionary changed size during
+            # iteration" if submit() inserts on another thread mid-iter.
+            for candidate_id, candidate_session in reversed(list(self._request_sessions.items())):
                 if candidate_session == session_id:
                     request_id = candidate_id
                     break
@@ -403,11 +405,9 @@ class AgentRuntime(QThread):
                 tokens_before = state.conversation_state.totalTokens
                 self.compaction_event.emit(True)
                 state.conversation_state = await state.compact_coordinator.maybeCompact(state.conversation_state)
-                if state.conversation_state.totalTokens < tokens_before:
-                    # tokens decreased → compaction actually ran
-                    self.compaction_event.emit(False)
-                else:
-                    self.compaction_event.emit(False)
+                # Single emit after the await; the value reflects whether
+                # compaction actually shrank the context.
+                self.compaction_event.emit(state.conversation_state.totalTokens < tokens_before)
             updated_history = state.conversation_state.fullMessages
         if self._current_session_id == session_id:
             self._activate_session_state(state)
@@ -800,7 +800,11 @@ class GUIAgentApp(QObject):
             self._current_session_id = session_id
             self.chat_history = store.load_message_history(session_id)
             self.runtime.set_session_history(session_id, self.chat_history)
-            self._gui_history = deque(store.load_display_history(session_id))
+            # Mutate in place so any holder of the original list reference
+            # (e.g. self.command_handler.history) sees the new contents and
+            # supports slicing (`self.history[-limit:]` would break on deque).
+            self._gui_history.clear()
+            self._gui_history.extend(store.load_display_history(session_id))
             self._display_text = ""
             self._last_user_input = ""
             self._last_assistant_reply = ""
@@ -982,7 +986,10 @@ class GUIAgentApp(QObject):
     def _load_session_ui_state(self, session_id: str) -> None:
         state = self._session_ui_state.get(session_id, {})
         self.chat_history = state.get("chat_history") if "chat_history" in state else None
-        self._gui_history = deque(state.get("gui_history", deque()))
+        # Preserve the original list reference (see resume_saved_conversation).
+        saved = state.get("gui_history", [])
+        self._gui_history.clear()
+        self._gui_history.extend(saved)
         self._display_text = str(state.get("display_text", ""))
         self._last_user_input = str(state.get("last_user_input", ""))
         self._last_assistant_reply = str(state.get("last_assistant_reply", ""))
@@ -1389,11 +1396,15 @@ class GUIAgentApp(QObject):
         logger.info(
             f"handle_result called with output: {output[:100] if output else 'None'}..."
         )
-        if output and output not in self._display_text:
-            self._display_text = f"{output}"
-            self._last_assistant_reply = output  # 記錄助手回覆
+        if output:
+            # Always record the latest assistant reply, even when its text already
+            # appears as a substring of streamed tokens — otherwise short replies
+            # like "OK" silently fail to update /last and command-handler state.
+            self._last_assistant_reply = output
             if self.command_handler:
                 self.command_handler.update_last_reply(output)
+        if output and output not in self._display_text:
+            self._display_text = f"{output}"
             self._pending.clear()
             self._stream_buffer = ""
             self._stream_mode = "normal"

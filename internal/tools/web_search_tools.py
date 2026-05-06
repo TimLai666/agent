@@ -7,11 +7,20 @@
 import asyncio
 import random
 from typing import Callable, Any
-from ddgs import DDGS
-from ddgs.exceptions import DDGSException
+
 from internal.logger import logger
 
 from pydantic_ai import Agent
+
+try:
+    from ddgs import DDGS
+    from ddgs.exceptions import DDGSException
+    _DDGS_AVAILABLE = True
+except Exception as _ddgs_import_err:  # pragma: no cover - optional dependency
+    DDGS = None  # type: ignore[assignment]
+    DDGSException = Exception  # type: ignore[assignment, misc]
+    _DDGS_AVAILABLE = False
+    logger.warning("ddgs not available; web search tools will be disabled: %s", _ddgs_import_err)
 
 safe_search_default = "off"
 
@@ -69,6 +78,9 @@ def add_web_search_tools(agent: Agent) -> None:
     - web_search_news: 新聞搜索（使用 DuckDuckGo News）
     - web_search_images: 圖片搜索（使用 DuckDuckGo Images）
     """
+    if not _DDGS_AVAILABLE:
+        logger.info("Skipping web_search tool registration (ddgs not available).")
+        return
     agent.tool_plain(web_search)
     agent.tool_plain(web_search_news)
     agent.tool_plain(web_search_images)
@@ -87,7 +99,7 @@ async def _run_backend_callable(
     Returns a dict with 'backend' and either 'results' (list) or 'error' (str).
     """
     last_err = None
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     for attempt in range(retries + 1):
         try:
             logger.info(f"Performing {backend} search (attempt {attempt})")
@@ -220,7 +232,6 @@ async def web_search(
     all_results: list[dict] = []  # 用於最後做全局去重：元素 = {"backend":..., "title":..., "url":..., "body":...}
     backend_errors: list[str] = []
 
-    loop = asyncio.get_event_loop()
 
     # 非同步並行查詢所有後端（使用共用 helper）
     async def _search_backend(backend: str) -> dict:
@@ -297,7 +308,6 @@ async def web_search_news(
     all_results: list[dict] = []
     backend_errors: list[str] = []
 
-    loop = asyncio.get_event_loop()
 
     async def _search_backend(backend: str) -> dict:
         def _call():
@@ -371,7 +381,6 @@ async def web_search_images(
     all_results: list[dict] = []
     backend_errors: list[str] = []
 
-    loop = asyncio.get_event_loop()
 
     async def _search_backend(backend: str) -> dict:
         def _call():

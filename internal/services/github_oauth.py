@@ -23,8 +23,12 @@ class GitHubOAuth:
     
     def __init__(self):
         self.auth_code: Optional[str] = None
+        self.expected_state: Optional[str] = None
+        self.state_mismatch: bool = False
         self.server: Optional[HTTPServer] = None
         self.server_thread: Optional[threading.Thread] = None
+        # Allow the polling loop to wait on a real condition instead of sleeping.
+        self._completed = threading.Event()
         
     class CallbackHandler(BaseHTTPRequestHandler):
         """處理 OAuth 回調的 HTTP 伺服器"""
@@ -41,8 +45,20 @@ class GitHubOAuth:
                 params = parse_qs(parsed_path.query)
                 
                 if 'code' in params:
+                    # CSRF protection: state must echo the value we sent.
+                    received_state = params.get('state', [None])[0]
+                    expected_state = self.oauth_instance.expected_state
+                    if expected_state is not None and received_state != expected_state:
+                        self.oauth_instance.state_mismatch = True
+                        self.send_response(400)
+                        self.send_header('Content-type', 'text/plain; charset=utf-8')
+                        self.end_headers()
+                        self.wfile.write("OAuth state mismatch — possible CSRF; request rejected.".encode("utf-8"))
+                        self.oauth_instance._completed.set()
+                        return
                     # 成功獲取授權碼
                     self.oauth_instance.auth_code = params['code'][0]
+                    self.oauth_instance._completed.set()
                     
                     # 返回成功頁面
                     self.send_response(200)
@@ -99,6 +115,8 @@ class GitHubOAuth:
                     self.wfile.write(success_html.encode('utf-8'))
                     
                 elif 'error' in params:
+                    # Mark completion so the waiting loop unblocks.
+                    self.oauth_instance._completed.set()
                     # 認證失敗
                     error = params['error'][0]
                     error_description = params.get('error_description', ['Unknown error'])[0]
@@ -174,7 +192,10 @@ class GitHubOAuth:
         """
         # 生成隨機 state 用於防止 CSRF 攻擊
         state = secrets.token_urlsafe(32)
-        
+        self.expected_state = state
+        self.state_mismatch = False
+        self._completed.clear()
+
         # 啟動本地伺服器
         try:
             self.server = HTTPServer(('localhost', 8765), self.CallbackHandler)
@@ -209,16 +230,19 @@ class GitHubOAuth:
         
         # 等待接收授權碼（最多等待 5 分鐘）
         print("⏳ 等待認證完成...")
-        for _ in range(300):  # 300 秒 = 5 分鐘
-            if self.auth_code:
-                break
-            threading.Event().wait(1)
-        
+        # Wait on the completion event with a 5-minute deadline; this avoids
+        # creating a fresh threading.Event() each iteration just to sleep.
+        self._completed.wait(timeout=300)
+
         # 停止伺服器
         if self.server:
             self.server.shutdown()
             self.server = None
-        
+
+        if self.state_mismatch:
+            print("✗ 偵測到 OAuth state 不符（可能是 CSRF），拒絕授權碼")
+            return None
+
         if not self.auth_code:
             print("✗ 認證超時（5 分鐘內未完成）")
             return None
