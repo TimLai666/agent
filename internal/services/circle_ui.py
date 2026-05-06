@@ -6,10 +6,12 @@ import sys
 import io
 import os
 import html
+import threading
 import weakref
 import urllib.request
 import concurrent.futures
 import base64
+from collections import OrderedDict
 from datetime import datetime
 from io import BytesIO
 try:
@@ -20,9 +22,30 @@ except Exception:
 # Thread pool for downloading/processing images (limit concurrency to avoid resource spikes)
 _image_executor = concurrent.futures.ThreadPoolExecutor(max_workers=4)
 # Cache for downloaded images: (url, max_width) -> data_uri or ""
-_image_data_cache: dict[tuple[str, int], str] = {}
+# LRU-bounded so long sessions don't accumulate hundreds of MB of base64.
+_IMAGE_CACHE_MAX = 256
+_image_data_cache: "OrderedDict[tuple[str, int], str]" = OrderedDict()
 _image_inflight: set[tuple[str, int]] = set()
 _image_failures: dict[tuple[str, int], int] = {}
+# Mutations to the dicts/set above can run on the executor's worker thread
+# (done_callback) AND on the GUI thread that reads them — guard with a lock.
+_image_state_lock = threading.Lock()
+
+
+def _image_cache_get(key: tuple[str, int]) -> str | None:
+    with _image_state_lock:
+        if key in _image_data_cache:
+            _image_data_cache.move_to_end(key)
+            return _image_data_cache[key]
+        return None
+
+
+def _image_cache_put(key: tuple[str, int], value: str) -> None:
+    with _image_state_lock:
+        _image_data_cache[key] = value
+        _image_data_cache.move_to_end(key)
+        while len(_image_data_cache) > _IMAGE_CACHE_MAX:
+            _image_data_cache.popitem(last=False)
 # Max bytes to read for an image (e.g., 8MB)
 _MAX_IMAGE_BYTES = 8 * 1024 * 1024
 # Max dimension (width or height) for images; images larger will be downscaled to this
@@ -184,10 +207,12 @@ def _process_markdown_images_async(text: str) -> tuple[str, list[tuple[str, int]
             return _render_image_block(url, alt)
 
         key = (url, width)
-        cached = _image_data_cache.get(key)
+        cached = _image_cache_get(key)
         if cached:
             return _render_image_block(cached, alt, url)
-        if cached == "" or _image_failures.get(key, 0) >= 2:
+        with _image_state_lock:
+            failures = _image_failures.get(key, 0)
+        if cached == "" or failures >= 2:
             return _render_image_link(url, alt) if url else ""
 
         pending.append(key)
@@ -410,6 +435,9 @@ class AutoWrapTextBrowser(QTextBrowser):
         self_ref = weakref.ref(self)
 
         def done_callback(future, key):
+            # Runs on the executor's worker thread; mutate shared state under
+            # the lock so the GUI thread reading these dicts can't observe a
+            # half-modified state or hit RuntimeError during iteration.
             try:
                 data_uri = future.result()
             except Exception:
@@ -417,11 +445,14 @@ class AutoWrapTextBrowser(QTextBrowser):
             if not isinstance(data_uri, str) or not data_uri.startswith("data:image/"):
                 data_uri = ""
             if data_uri:
-                _image_data_cache[key] = data_uri
-                _image_failures.pop(key, None)
+                _image_cache_put(key, data_uri)
+                with _image_state_lock:
+                    _image_failures.pop(key, None)
+                    _image_inflight.discard(key)
             else:
-                _image_failures[key] = _image_failures.get(key, 0) + 1
-            _image_inflight.discard(key)
+                with _image_state_lock:
+                    _image_failures[key] = _image_failures.get(key, 0) + 1
+                    _image_inflight.discard(key)
             widget = self_ref()
             if widget is None:
                 return
@@ -438,9 +469,10 @@ class AutoWrapTextBrowser(QTextBrowser):
                     pass
 
         for key in dict.fromkeys(pending):
-            if key in _image_inflight:
-                continue
-            _image_inflight.add(key)
+            with _image_state_lock:
+                if key in _image_inflight:
+                    continue
+                _image_inflight.add(key)
             url, width = key
             future = _image_executor.submit(_download_and_encode_image, url, width)
             future.add_done_callback(lambda fut, k=key: done_callback(fut, k))
@@ -542,11 +574,22 @@ class AutoWrapTextBrowser(QTextBrowser):
                     if not image.isNull():
                         return image
             elif name.startswith(("http://", "https://")):
-                with urllib.request.urlopen(name, timeout=8) as resp:
-                    raw = resp.read(_MAX_IMAGE_BYTES + 1)
-                image = QImage.fromData(raw)
-                if not image.isNull():
-                    return image
+                # _resolve_image_resource runs on the GUI thread (called from
+                # paint/layout / save handlers). A synchronous 8-second URL
+                # fetch would freeze the UI, so only return the resource if
+                # we already have it cached; otherwise return None and let
+                # the markdown image pipeline (with its background executor)
+                # populate the cache.
+                cached = _image_cache_get((name, 800))
+                if cached and cached.startswith("data:image/"):
+                    try:
+                        b64data = cached.split(",", 1)[1]
+                        image = QImage.fromData(base64.b64decode(b64data))
+                        if not image.isNull():
+                            return image
+                    except Exception:
+                        pass
+                return None
         except Exception:
             return None
         return None
@@ -2195,37 +2238,43 @@ class SiriResponseBubble(QWidget):
             return
 
         painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing)
+        try:
+            painter.setRenderHint(QPainter.Antialiasing)
 
-        rect = self.rect()
+            rect = self.rect()
 
-        colors = [
-            QColor("#6FD3C5"),
-            QColor("#6B8FE5"),
-            QColor("#9B8FEA"),
-            QColor("#6ED0B2"),
-        ]
+            colors = [
+                QColor("#6FD3C5"),
+                QColor("#6B8FE5"),
+                QColor("#9B8FEA"),
+                QColor("#6ED0B2"),
+            ]
 
-        progress = self._animation_angle / 360.0
-        color_index = int(progress * len(colors))
-        next_color_index = (color_index + 1) % len(colors)
-        t = (progress * len(colors)) - color_index
+            progress = self._animation_angle / 360.0
+            color_index = int(progress * len(colors)) % len(colors)
+            next_color_index = (color_index + 1) % len(colors)
+            t = (progress * len(colors)) - color_index
 
-        current_color = colors[color_index]
-        next_color = colors[next_color_index]
+            current_color = colors[color_index]
+            next_color = colors[next_color_index]
 
-        r = int(current_color.red() + (next_color.red() - current_color.red()) * t)
-        g = int(current_color.green() + (next_color.green() - current_color.green()) * t)
-        b = int(current_color.blue() + (next_color.blue() - current_color.blue()) * t)
+            r = int(current_color.red() + (next_color.red() - current_color.red()) * t)
+            g = int(current_color.green() + (next_color.green() - current_color.green()) * t)
+            b = int(current_color.blue() + (next_color.blue() - current_color.blue()) * t)
 
-        border_color = QColor(r, g, b, 190)
+            border_color = QColor(r, g, b, 190)
 
-        pen = QPen(border_color)
-        pen.setWidthF(1.6)
-        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-        painter.setPen(pen)
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.drawRoundedRect(rect.adjusted(1, 1, -1, -1), 30, 30)
+            pen = QPen(border_color)
+            pen.setWidthF(1.6)
+            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            painter.setPen(pen)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRoundedRect(rect.adjusted(1, 1, -1, -1), 30, 30)
+        finally:
+            # Explicitly end so a stray exception or GC delay can't leave the
+            # widget with an active painter ("a paint device can only be
+            # painted by one painter at a time").
+            painter.end()
 
 
 class ArcWidget(QWidget):
@@ -3135,18 +3184,24 @@ class MainWindow(QMainWindow):
     def set_running(self, running: bool) -> None:
         """Toggle send/stop button between run mode and stop mode."""
         self._is_running = running
+        # Bare disconnect() raises RuntimeError if no slot is currently
+        # connected (e.g. previous toggle path already disconnected, or the
+        # voice-mode path took over). Wrap defensively so a Run/Voice/Stop
+        # interleaving can't crash the GUI.
+        try:
+            self.send_button.clicked.disconnect()
+        except (RuntimeError, TypeError):
+            pass
         if running:
             self.send_button.setText("")
             self.send_button.setIcon(_make_stop_icon(20))
             self.send_button.setIconSize(QSize(20, 20))
             self.send_button.setStyleSheet(self._send_btn_stop_style)
-            self.send_button.clicked.disconnect()
             self.send_button.clicked.connect(self._on_stop_requested)
         else:
             self.send_button.setIcon(QIcon())  # clear icon
             self.send_button.setText("發送")
             self.send_button.setStyleSheet(self._send_btn_send_style)
-            self.send_button.clicked.disconnect()
             self.send_button.clicked.connect(self.on_input_submitted)
 
     def _on_stop_requested(self) -> None:
@@ -3510,6 +3565,38 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(100, self._update_window_mask)
 
     def closeEvent(self, event):
+        # Stop every long-lived QTimer / animation that still holds a
+        # reference to this widget so we don't get "wrapped C/C++ object
+        # has been deleted" warnings or crashes from late timer fires.
+        for attr in (
+            "_compact_pulse_timer",
+            "_bubble_update_timer",
+            "_mask_update_timer",
+            "_animation_timer",
+        ):
+            timer = getattr(self, attr, None)
+            if timer is not None:
+                try:
+                    timer.stop()
+                except Exception:
+                    pass
+        # Stop child animations that schedule further updates.
+        arc = getattr(self, "arcWidget", None)
+        if arc is not None:
+            try:
+                anim = getattr(arc, "anim", None)
+                if anim is not None and hasattr(anim, "stop"):
+                    anim.stop()
+            except Exception:
+                pass
+        bubble = getattr(self, "speech_bubble", None)
+        if bubble is not None:
+            try:
+                bubble_timer = getattr(bubble, "_animation_timer", None)
+                if bubble_timer is not None:
+                    bubble_timer.stop()
+            except Exception:
+                pass
         try:
             if self.todo_panel_window is not None:
                 self.todo_panel_window.close()
