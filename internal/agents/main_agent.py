@@ -917,7 +917,11 @@ class MainAgent:
 
         subagent_type = self._resolve_subagent_type(getattr(task, "subagentType", None))
         mode = getattr(task, "mode", "spawn")
-        enable_tools = subagent_type not in {"compaction", "verification"}
+        # Compaction is text-only by design. Verification still needs to run
+        # commands and read files to gather evidence — without tools it can
+        # only fabricate verdicts. The verification system prompt explicitly
+        # forbids writes, so we trust the prompt-level constraint there.
+        enable_tools = subagent_type != "compaction"
 
         if mode == "fork":
             model = getattr(self.agent, "_model", None) or getattr(self.agent, "model", None)

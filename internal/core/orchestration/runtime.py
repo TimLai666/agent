@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 import uuid
 from collections.abc import Awaitable, Callable
 
@@ -153,7 +154,7 @@ class OrchestrationRuntime:
                 return
             await self._record_regular_result(step_run.stepRunId, result)
         finally:
-            self.store.release_step_lease(step_run.stepRunId)
+            self.store.release_step_lease(step_run.stepRunId, lease_owner=self._lease_owner)
 
     async def _execute_verification_step(self, step_run: StepRun) -> None:
         if not self.store.lease_step(step_run.stepRunId, lease_owner=self._lease_owner):
@@ -182,7 +183,7 @@ class OrchestrationRuntime:
                 return
             await self._record_verification_result(step_run.stepRunId, report)
         finally:
-            self.store.release_step_lease(step_run.stepRunId)
+            self.store.release_step_lease(step_run.stepRunId, lease_owner=self._lease_owner)
 
     async def _record_regular_result(self, step_run_id: str, result: StepExecutionResult) -> None:
         step = self.store.get_step_run(step_run_id)
@@ -293,6 +294,11 @@ class OrchestrationRuntime:
             )
             return
 
+        # Repair steps must NOT depend on the failed verify step (the very step we
+        # are routing through them) — that would create a cycle once we point the
+        # verify step's dependsOn at the repair_ids below. Repair steps inherit
+        # only the verify step's UPSTREAM dependencies, so they can run as soon
+        # as those upstream artifacts are available.
         remediation_steps = list(report.remediationSteps)
         if not remediation_steps:
             remediation_steps = [
@@ -300,7 +306,7 @@ class OrchestrationRuntime:
                     stepId=f"repair_{step.stepId}_fallback",
                     kind="repair",
                     goal=report.summary or f"Repair {step.goal}",
-                    dependsOn=list(dict.fromkeys([*step.dependsOn, step.stepId])),
+                    dependsOn=list(dict.fromkeys(step.dependsOn)),
                     executor="worker",
                     inputs={"verificationSummary": report.summary, "failedItems": report.failedItems},
                     contract=step.contract,
@@ -312,10 +318,20 @@ class OrchestrationRuntime:
 
         repair_ids: list[str] = []
         for remediation in remediation_steps:
-            remediation.dependsOn = list(dict.fromkeys([*remediation.dependsOn, *step.dependsOn]))
+            # Inherit upstream deps but don't add a self-loop on the verify step.
+            remediation.dependsOn = list(
+                dict.fromkeys([
+                    dep for dep in [*remediation.dependsOn, *step.dependsOn] if dep != step.stepId
+                ])
+            )
             inserted = self.store.insert_step(task_run_id=step.taskRunId, step_spec=remediation, status="ready")
             repair_ids.append(inserted.stepId)
 
+        # Re-queue the verify step so it waits on the new repairs and can re-run
+        # once they complete. This bypasses the strict transition validator
+        # because waiting_dependency is not in _TRANSITIONS["verifying"]; we own
+        # the row right now (the verify executor still holds the lease) so the
+        # direct dependency rewrite is safe here.
         self.store.update_step_dependencies(
             step_run_id,
             list(dict.fromkeys([*step.dependsOn, *repair_ids])),
@@ -332,7 +348,7 @@ class OrchestrationRuntime:
                     report.summary or step.goal,
                     checkpoint.checkpointId,
                     "deterministic",
-                    __import__("time").time_ns() // 1_000_000,
+                    int(time.time() * 1000),
                     step_run_id,
                 ),
             )
@@ -397,7 +413,15 @@ class OrchestrationRuntime:
 
     def _handle_stalled_task(self, task_run_id: str, steps: list[StepRun]) -> str:
         steps_by_id = {step.stepId: step for step in steps}
-        stalled_steps = [step for step in steps if step.status in {"waiting_dependency", "ready", "queued", "planning"}]
+        # Include orphaned-running statuses so a step leaked by a crashed worker
+        # is force-failed instead of vanishing silently.
+        stalled_steps = [
+            step for step in steps
+            if step.status in {
+                "waiting_dependency", "ready", "queued", "planning",
+                "running", "verifying", "repairing",
+            }
+        ]
         if not stalled_steps:
             self.store.update_task_run_status(task_run_id, "failed")
             return "Task blocked because orchestration reached a non-terminal state with no runnable steps."

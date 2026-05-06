@@ -5,16 +5,25 @@ from internal.core.tasks.task_types import CompletionDecision, TaskKind, Verific
 
 def needs_verification(input_data: dict[str, object]) -> bool:
     task_kind = input_data.get("taskKind")
-    files_changed = input_data.get("filesChanged") or []
-    commands_executed = input_data.get("commandsExecuted") or []
+    raw_files = input_data.get("filesChanged") or []
+    raw_commands = input_data.get("commandsExecuted") or []
+    # Coerce non-list shapes (e.g. tuple, single string) so a malformed payload
+    # doesn't silently bypass verification.
+    if isinstance(raw_files, (list, tuple)):
+        files_changed: list = list(raw_files)
+    else:
+        files_changed = [raw_files]
+    if isinstance(raw_commands, (list, tuple)):
+        commands_executed: list = list(raw_commands)
+    else:
+        commands_executed = [raw_commands]
 
     if task_kind in {"implementation", "bugfix", "infra"}:
         return True
-    if isinstance(files_changed, list) and len(files_changed) >= 3:
+    if len(files_changed) >= 3:
         return True
-    if isinstance(files_changed, list) and isinstance(commands_executed, list):
-        if commands_executed and files_changed:
-            return True
+    if commands_executed and files_changed:
+        return True
     return False
 
 

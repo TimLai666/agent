@@ -348,13 +348,15 @@ Skills 管理：
         """顯示對話歷史"""
         limit = 5
         if args and args[0].isdigit():
-            limit = max(1, int(args[0]))
-        
+            limit = min(max(1, int(args[0])), 1000)
+
         if not self.history:
             self.output_callback("尚無對話歷史。")
             return
-        
-        recent = self.history[-limit:]
+
+        # Defensive list() so slicing works even if history is a deque or other
+        # non-sliceable sequence (deques don't support slice indexing).
+        recent = list(self.history)[-limit:]
         lines = ["對話歷史：", ""]
         for idx, (user_text, assistant_text) in enumerate(recent, start=1):
             lines.append(f"[{idx}] 用戶：{user_text}")

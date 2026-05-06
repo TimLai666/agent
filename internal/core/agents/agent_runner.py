@@ -9,6 +9,8 @@ from internal.core.tasks.task_types import TaskUsage, WorkerResult
 
 _FILES_PATTERN = re.compile(r"\b[\w./-]+\.(?:py|ts|tsx|js|json|md|yml|yaml|toml|ini|cfg)\b")
 _COMMAND_PATTERN = re.compile(r"^\s*(?:\$\s*)?(uv|python|pytest|npm|pnpm|yarn|make|git)\b.*$", re.IGNORECASE)
+_EVIDENCE_PATTERN = re.compile(r"^\s*(?:[-*]\s+)?\$\s+(.+)$")
+_UNRESOLVED_PATTERN = re.compile(r"\b(?:UNRESOLVED|TODO|FIXME|XXX|NOT[\s_-]?RUN)\b")
 
 
 def _extract_files(text: str) -> list[str]:
@@ -26,17 +28,25 @@ def _extract_commands(text: str) -> list[str]:
     commands: list[str] = []
     for line in text.splitlines():
         if _COMMAND_PATTERN.match(line):
-            commands.append(line.strip().removeprefix("$ "))
+            commands.append(re.sub(r"^\s*\$\s*", "", line.strip()))
     return commands
 
 
 def _extract_unresolved_issues(text: str) -> list[str]:
     issues: list[str] = []
     for line in text.splitlines():
-        lowered = line.lower()
-        if "unresolved" in lowered or "todo" in lowered or "not run" in lowered:
+        if _UNRESOLVED_PATTERN.search(line):
             issues.append(line.strip())
     return issues
+
+
+def _extract_evidence(text: str) -> list[str]:
+    evidence: list[str] = []
+    for line in text.splitlines():
+        match = _EVIDENCE_PATTERN.match(line)
+        if match:
+            evidence.append("$ " + match.group(1).strip())
+    return evidence
 
 
 class AgentRunner:
@@ -56,7 +66,7 @@ class AgentRunner:
             result=output,
             filesChanged=_extract_files(output),
             commandsExecuted=_extract_commands(output),
-            evidence=[line.strip() for line in output.splitlines() if line.strip().startswith("$ ")],
+            evidence=_extract_evidence(output),
             unresolvedIssues=_extract_unresolved_issues(output),
             usage=TaskUsage(durationMs=duration_ms),
         )

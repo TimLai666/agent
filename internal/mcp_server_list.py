@@ -7,8 +7,8 @@ from internal.mcp.remote_mcp_loader import load_remote_mcp_from_url
 from internal.logger import logger
 
 
-# Cache for MCP servers
-_mcp_cache: list[MCPServerStdio] | None = None
+# Cache timestamp only — full server list is intentionally rebuilt every call;
+# see get_all_mcp_servers() for why instances are not cached.
 _last_cache_timestamp: str | None = None
 
 

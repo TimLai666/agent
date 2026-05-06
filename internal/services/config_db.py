@@ -64,6 +64,8 @@ def get_connection():
     """Context manager for database connections"""
     conn = sqlite3.connect(str(_get_db_path()))
     conn.row_factory = sqlite3.Row
+    # Enable FK enforcement so cascades and constraint checks fire.
+    conn.execute("PRAGMA foreign_keys = ON")
     try:
         yield conn
         conn.commit()

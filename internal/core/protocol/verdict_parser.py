@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import json
 import re
+from typing import Literal
 
 from internal.core.tasks.task_types import CoordinatorTodo, VerificationEvidence, VerificationResult
 
 
 _REMEDIATION_JSON_MARKER = "REMEDIATION_TODOS_JSON:"
 _REMEDIATION_LINE = re.compile(r"^REMEDIATION_TODO:\s*(.+)$")
+_VERDICT_LINE = re.compile(r"^\s*VERDICT:\s*(PASS|FAIL|PARTIAL)\s*$", re.MULTILINE)
 
 
 def _parse_remediation_json(text: str) -> list[CoordinatorTodo]:
@@ -70,24 +72,22 @@ def _parse_remediation_lines(lines: list[str], offset: int = 0) -> list[Coordina
 
 
 def parse_verification_verdict(text: str, task_id: str = "") -> VerificationResult:
-    verdict = None
-    if "VERDICT: PASS" in text:
-        verdict = "PASS"
-    elif "VERDICT: FAIL" in text:
-        verdict = "FAIL"
-    elif "VERDICT: PARTIAL" in text:
-        verdict = "PARTIAL"
-
-    if not verdict:
-        verdict = "FAIL"
+    # Match anchored "VERDICT: X" lines only (avoids false positives in prose like
+    # `do not report "VERDICT: PASS" without evidence`). Take the LAST match so a
+    # final verdict overrides any earlier instructional mention.
+    verdict_matches = _VERDICT_LINE.findall(text)
+    verdict = verdict_matches[-1] if verdict_matches else "FAIL"
 
     evidence: list[VerificationEvidence] = []
+    # Evidence rows extracted from "$ command" lines have unknown per-command status;
+    # mirror the overall verdict so a FAIL verdict isn't misrepresented as all-PASS.
+    evidence_result: Literal["PASS", "FAIL"] = "PASS" if verdict == "PASS" else "FAIL"
     missing_requirements: list[str] = []
     suspected_problems: list[str] = []
     for line in text.splitlines():
         stripped = line.strip()
         if stripped.startswith("$ "):
-            evidence.append(VerificationEvidence(command=stripped[2:], output="", result="PASS"))
+            evidence.append(VerificationEvidence(command=stripped[2:], output="", result=evidence_result))
         elif stripped.startswith("MISSING_REQUIREMENT:"):
             missing_requirements.append(stripped.removeprefix("MISSING_REQUIREMENT:").strip())
         elif stripped.startswith("SUSPECTED_PROBLEM:"):

@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from internal.core.tasks.task_types import ToolExecutionRecord
 
 
 @dataclass
 class ToolUsageTracker:
-    records: list[ToolExecutionRecord]
+    records: list[ToolExecutionRecord] = field(default_factory=list)
 
     def record(
         self,
