@@ -1042,20 +1042,20 @@ class GUIAgentApp(QObject):
             label = line[4:]
             icon = self._tool_icon(label)
             return (
-                f'<div style="padding:1px 0 1px 2px;color:#6eaee8;font-size:11px;'
+                f'<div style="padding:1px 0 1px 2px;color:#6eaee8;font-size:8pt;'
                 f'font-family:monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">'
                 f'{icon} <span style="color:#8bbcf0;">{esc(label)}</span>'
                 f'</div>'
             )
         if line.startswith("[OK]"):
             return (
-                f'<div style="padding:1px 0 1px 2px;color:#4ec94e;font-size:11px;">'
+                f'<div style="padding:1px 0 1px 2px;color:#4ec94e;font-size:8pt;">'
                 f'✓</div>'
             )
         if line.startswith("[ERR] "):
             label = line[6:]
             return (
-                f'<div style="padding:1px 0 1px 2px;color:#f06b6b;font-size:11px;'
+                f'<div style="padding:1px 0 1px 2px;color:#f06b6b;font-size:8pt;'
                 f'font-family:monospace;">'
                 f'✗ {esc(label)}'
                 f'</div>'
@@ -1063,14 +1063,14 @@ class GUIAgentApp(QObject):
         if line.startswith("[SKILL] "):
             label = line[8:]
             return (
-                f'<div style="padding:1px 0 1px 2px;color:#c792ea;font-size:11px;">'
+                f'<div style="padding:1px 0 1px 2px;color:#c792ea;font-size:8pt;">'
                 f'⚡ {esc(label)}'
                 f'</div>'
             )
         if line.startswith("[*] "):
             label = line[4:]
             return (
-                f'<div style="padding:1px 0 1px 2px;color:#888;font-size:11px;'
+                f'<div style="padding:1px 0 1px 2px;color:#888;font-size:8pt;'
                 f'font-family:monospace;">'
                 f'· {esc(label)}'
                 f'</div>'
@@ -1104,7 +1104,7 @@ class GUIAgentApp(QObject):
                     label = in_flight.pop(0)
                     icon = self._tool_icon(label)
                     rows.append(
-                        f'<div style="padding:1px 0 1px 2px;color:#4db87a;font-size:11px;'
+                        f'<div style="padding:1px 0 1px 2px;color:#4db87a;font-size:8pt;'
                         f'font-family:monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">'
                         f'✓ {icon} <span style="color:#7ec8a0;">{esc(label)}</span>'
                         f'</div>'
@@ -1116,14 +1116,14 @@ class GUIAgentApp(QObject):
                     label = in_flight.pop(0)
                     icon = self._tool_icon(label)
                     rows.append(
-                        f'<div style="padding:1px 0 1px 2px;color:#f06b6b;font-size:11px;'
+                        f'<div style="padding:1px 0 1px 2px;color:#f06b6b;font-size:8pt;'
                         f'font-family:monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">'
                         f'✗ {icon} <span style="color:#f09090;">{esc(label)}: {esc(err)}</span>'
                         f'</div>'
                     )
                 else:
                     rows.append(
-                        f'<div style="padding:1px 0 1px 2px;color:#f06b6b;font-size:11px;">'
+                        f'<div style="padding:1px 0 1px 2px;color:#f06b6b;font-size:8pt;">'
                         f'✗ {esc(err)}'
                         f'</div>'
                     )
@@ -1136,7 +1136,7 @@ class GUIAgentApp(QObject):
         for label in in_flight:
             icon = self._tool_icon(label)
             rows.append(
-                f'<div style="padding:1px 0 1px 2px;color:#6eaee8;font-size:11px;'
+                f'<div style="padding:1px 0 1px 2px;color:#6eaee8;font-size:8pt;'
                 f'font-family:monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">'
                 f'▶ {icon} <span style="color:#8bbcf0;">{esc(label)}</span>'
                 f'</div>'
