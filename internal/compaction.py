@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import re
+import uuid
 from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Any, Awaitable, Callable, Literal
@@ -216,7 +218,18 @@ CompactionRunner = Callable[[CompactJob, str], Awaitable[str]]
 def estimate_tokens(text: str) -> int:
     if not text:
         return 0
-    return max(1, len(text) // 4)
+    # Approximate token cost split by ASCII vs non-ASCII. ASCII is roughly
+    # 4 chars/token; CJK and other dense scripts are closer to 1 char/token
+    # for most BPE tokenizers, so the previous "len/4" undercount for
+    # Chinese-heavy sessions could miss the compaction threshold by 4×.
+    ascii_chars = 0
+    other_chars = 0
+    for ch in text:
+        if ord(ch) < 128:
+            ascii_chars += 1
+        else:
+            other_chars += 1
+    return max(1, ascii_chars // 4 + other_chars)
 
 
 def trim_text_to_token_budget(text: str, token_budget: int) -> str:
@@ -251,6 +264,22 @@ def get_compaction_prompt(mode: CompactMode, custom_instructions: str | None = N
     return prompt
 
 
+def _stringify_part_content_item(item: Any) -> str:
+    """Render a single content item without exploding on binary blobs."""
+    if isinstance(item, str):
+        return item
+    media_type = getattr(item, "media_type", None)
+    if media_type:
+        kind = "image" if str(media_type).startswith("image/") else "binary"
+        return f"[{kind}: {media_type}]"
+    if hasattr(item, "url"):
+        return f"[url: {getattr(item, 'url', '')}]"
+    # Fallback: a short repr instead of str(item) to avoid mega-byte object
+    # reprs from BinaryContent dominating token counts.
+    text = repr(item)
+    return text if len(text) <= 200 else text[:200] + "..."
+
+
 def get_message_text(message: MessageLike) -> str:
     chunks: list[str] = []
     for part in getattr(message, "parts", []) or []:
@@ -259,15 +288,12 @@ def get_message_text(message: MessageLike) -> str:
         if isinstance(content, str):
             value = content
         elif isinstance(content, (list, tuple)):
-            values: list[str] = []
-            for item in content:
-                if isinstance(item, str):
-                    values.append(item)
-                else:
-                    values.append(str(item))
+            values = [_stringify_part_content_item(item) for item in content]
             value = "\n".join(values)
+        elif content is None:
+            value = ""
         else:
-            value = str(part)
+            value = _stringify_part_content_item(content)
         chunks.append(f"[{part_kind}] {value}".strip())
     return "\n".join(c for c in chunks if c.strip())
 
@@ -461,6 +487,11 @@ class CompactCoordinator:
     ) -> None:
         self._runner = runner
         self._recent_keep_count = recent_keep_count
+        # Serialise concurrent maybeCompact calls. Without a lock two near-
+        # simultaneous calls produce identical jobIds (datetime.timestamp()
+        # collisions on Windows where time.time() resolution is ~15ms) and
+        # both replace state.
+        self._lock = asyncio.Lock()
 
     async def runCompact(self, job: CompactJob) -> CompactSummary:
         attempts = [
@@ -577,9 +608,22 @@ class CompactCoordinator:
         return get_compact_user_summary_message(**args)
 
     async def maybeCompact(self, state: ConversationState) -> ConversationState:
+        async with self._lock:
+            return await self._maybeCompactLocked(state)
+
+    async def _maybeCompactLocked(self, state: ConversationState) -> ConversationState:
         if not should_compact(state.totalTokens):
-            state.recentMessages = list(state.fullMessages[-self._recent_keep_count :])
-            return state
+            # Always return a fresh ConversationState so the caller's reference
+            # isn't mutated under their feet — the compact path also returns
+            # new instances, so be consistent across both branches.
+            return ConversationState(
+                fullMessages=state.fullMessages,
+                compressedSummary=state.compressedSummary,
+                recentMessages=list(state.fullMessages[-self._recent_keep_count :]),
+                transcriptPath=state.transcriptPath,
+                totalTokens=state.totalTokens,
+                lastCompactedMessageId=state.lastCompactedMessageId,
+            )
 
         slim_full_messages = compact_tool_output_history(state.fullMessages)
         if slim_full_messages != state.fullMessages:
@@ -613,12 +657,17 @@ class CompactCoordinator:
                 keep_count=fallback_keep,
             )
         if not messages_to_compress:
-            state.recentMessages = preserved_recent_messages
-            state.totalTokens = recalc_total_tokens(state.fullMessages)
-            return state
+            return ConversationState(
+                fullMessages=state.fullMessages,
+                compressedSummary=state.compressedSummary,
+                recentMessages=preserved_recent_messages,
+                transcriptPath=state.transcriptPath,
+                totalTokens=recalc_total_tokens(state.fullMessages),
+                lastCompactedMessageId=state.lastCompactedMessageId,
+            )
 
         job = CompactJob(
-            jobId=f"compact-{datetime.now().timestamp()}",
+            jobId=f"compact-{uuid.uuid4()}",
             mode="base",
             oldSummary=state.compressedSummary or "",
             messagesToCompress=messages_to_compress,

@@ -1,3 +1,4 @@
+import asyncio
 import functools
 import inspect
 import json
@@ -532,6 +533,10 @@ class MainAgent:
         self._previous_user_prompt: str | None = None
         self._last_assistant_reply: str | None = None
         self._http_client = http_client  # 保存以便重載 model
+        self._model_reload_signature: tuple | None = None  # detect actual config drift
+        # Serialise turn execution so two concurrent submits don't interleave
+        # writes to _last_messages / _last_assistant_reply / agent._model.
+        self._turn_lock = asyncio.Lock()
         self.skill_root_dirs = list(skill_root_dirs or [])
         self._session_id = str(uuid.uuid4())
         self._task_notifications: list[str] = []
@@ -1053,7 +1058,13 @@ class MainAgent:
         return self._orchestration_store
 
     def _reload_model_from_db(self) -> None:
-        """Pick up any model config changes made via the UI since the last call."""
+        """Pick up any model config changes made via the UI since the last call.
+
+        Skip the swap when the resolved model is identical to the one we
+        already installed — the assignment to `agent._model` mutates a private
+        attribute of the running pydantic_ai Agent and we want to do it as
+        rarely as possible.
+        """
         if not self._http_client:
             logger.warning("無法重載 model：沒有 http_client")
             return
@@ -1067,9 +1078,21 @@ class MainAgent:
                 temperature=0.5,
             )
             new_model = create_openai_model(config, self._http_client)
+            if new_model is None:
+                logger.warning("model reload returned None; keeping previous model")
+                return
 
+            # Cheap signature; if create_openai_model returns the same instance
+            # or one whose model_name matches, skip mutation entirely.
+            new_signature = (
+                getattr(new_model, "model_name", None),
+                getattr(getattr(new_model, "_provider", None), "base_url", None),
+                id(new_model),
+            )
+            if new_signature == self._model_reload_signature:
+                return
             self.agent._model = new_model
-            
+            self._model_reload_signature = new_signature
             logger.debug("已從資料庫重載 model 配置")
         except Exception:
             logger.exception("重載 model 配置失敗，繼續使用現有配置")
@@ -1192,8 +1215,11 @@ class MainAgent:
             if isinstance(part, str):
                 total += estimate_tokens(part)
             else:
-                # Non-text content (image/url/binary) still consumes request budget.
-                total += 512
+                # Non-text content (image/url/binary) consumes request budget.
+                # 512 dramatically under-counts: a single 4K image is typically
+                # 1500–8000 tokens on OpenAI / Anthropic. Using 2000 keeps the
+                # history-trim conservative without being wildly pessimistic.
+                total += 2000
         return total
 
     def _trim_message_history_for_budget(
@@ -1601,6 +1627,14 @@ class MainAgent:
         skip_plan_execution: bool = True,
     ) -> str:
         _ = skip_plan_execution  # backward compatibility
+        async with self._turn_lock:
+            return await self._execute_turn_core_locked(prompt, message_history)
+
+    async def _execute_turn_core_locked(
+        self,
+        prompt: str,
+        message_history: list[ModelRequest | ModelResponse] | None,
+    ) -> str:
         self._reload_model_from_db()
 
         original_prompt = prompt
@@ -1612,6 +1646,9 @@ class MainAgent:
         prompt = self._inject_memory(prompt)
         user_content, _ = self._build_user_prompt_content(prompt)
         safe_history = self._trim_message_history_for_budget(message_history, user_content)
+        # Track whichever history shape we last used for a turn so the
+        # error-context fallback below doesn't reuse a too-large history.
+        history_in_use = safe_history
 
         try:
             result = await self.agent.run(user_content, message_history=safe_history)
@@ -1640,6 +1677,10 @@ class MainAgent:
                         return output_text
                     except Exception as retry_exc:
                         e = retry_exc
+                        # On overflow we already proved the trimmed history
+                        # works — keep it for the error-context fallback so
+                        # we don't immediately re-overflow there.
+                        history_in_use = retry_history
 
             error_msg = str(e)
             logger.warning("Tool execution error in agent.run(): %s", error_msg)
@@ -1655,7 +1696,7 @@ class MainAgent:
                     user_content, error_context
                 )
                 result = await self.agent.run(
-                    user_content_with_error, message_history=safe_history
+                    user_content_with_error, message_history=history_in_use
                 )
                 output_text = enforce_absolute_image_paths(result.output or "")
                 try:
@@ -1701,114 +1742,126 @@ class MainAgent:
         skip_plan_execution: bool = True,
     ):
         _ = skip_plan_execution  # backward compatibility
-        self._reload_model_from_db()
-
-        original_prompt = prompt
-        self._previous_user_prompt = self._last_user_prompt
-        self._last_user_prompt = prompt
-        prompt = self._inject_task_notifications(prompt)
-        prompt = self._inject_todo_snapshot(prompt)
-        prompt = self._inject_local_timestamp(prompt)
-        prompt = self._inject_memory(prompt)
-        user_content, _ = self._build_user_prompt_content(prompt)
-        safe_history = self._trim_message_history_for_budget(message_history, user_content)
-
+        # Acquire the turn lock for the whole stream so concurrent turns don't
+        # interleave model swaps or _last_messages writes. The try/finally
+        # release runs even if the consumer aborts iteration (.aclose()
+        # raises GeneratorExit inside the generator).
+        await self._turn_lock.acquire()
         try:
-            async with self.agent.run_stream(
-                user_prompt=user_content, message_history=safe_history
-            ) as result:
-                collected = ""
-                normalizer = ImagePathStreamNormalizer()
-                try:
-                    async for chunk in result.stream_text(delta=True):
-                        if not chunk:
-                            continue
-                        normalized_chunk = normalizer.feed(chunk)
-                        if normalized_chunk:
-                            collected += normalized_chunk
-                            yield normalized_chunk
-                    tail = normalizer.flush()
-                    if tail:
-                        collected += tail
-                        yield tail
-                except Exception as stream_error:
-                    error_msg = str(stream_error)
-                    logger.warning("Tool execution error during streaming: %s", error_msg)
-                    yield (
-                        f"\n\n[System Note: A tool execution error occurred: {error_msg}. "
-                        "Please provide a helpful response explaining the service is temporarily unavailable.]"
-                    )
+            self._reload_model_from_db()
 
-                try:
-                    self._last_messages = result.all_messages()
-                except Exception:
-                    self._last_messages = None
-                self._last_assistant_reply = self._extract_user_reply(collected)
-                self._record_conversation_turn(original_prompt, collected)
-        except Exception as e:
-            if self._is_context_overflow_error(e):
-                retry_history = self._overflow_retry_history(safe_history)
-                if retry_history is not safe_history:
-                    try:
-                        async with self.agent.run_stream(
-                            user_prompt=user_content, message_history=retry_history
-                        ) as result:
-                            collected = ""
-                            normalizer = ImagePathStreamNormalizer()
-                            async for chunk in result.stream_text(delta=True):
-                                if not chunk:
-                                    continue
-                                normalized_chunk = normalizer.feed(chunk)
-                                if normalized_chunk:
-                                    collected += normalized_chunk
-                                    yield normalized_chunk
-                            tail = normalizer.flush()
-                            if tail:
-                                collected += tail
-                                yield tail
-                            try:
-                                self._last_messages = result.all_messages()
-                            except Exception:
-                                self._last_messages = None
-                            self._last_assistant_reply = self._extract_user_reply(collected)
-                            self._record_conversation_turn(original_prompt, collected)
-                            return
-                    except Exception as retry_exc:
-                        e = retry_exc
+            original_prompt = prompt
+            self._previous_user_prompt = self._last_user_prompt
+            self._last_user_prompt = prompt
+            prompt = self._inject_task_notifications(prompt)
+            prompt = self._inject_todo_snapshot(prompt)
+            prompt = self._inject_local_timestamp(prompt)
+            prompt = self._inject_memory(prompt)
+            user_content, _ = self._build_user_prompt_content(prompt)
+            safe_history = self._trim_message_history_for_budget(message_history, user_content)
+            # Track which history shape we last used so the error-context
+            # fallback doesn't reuse a too-large history after an overflow.
+            history_in_use = safe_history
 
-            error_msg = str(e)
-            logger.warning("Error in agent.run_stream(): %s", error_msg)
-
-            error_context = (
-                f"\n\nTool execution error:\n{error_msg}\n\n"
-                "Please provide a helpful response to the user explaining that the external service "
-                "is temporarily unavailable and suggest alternatives if possible."
-            )
             try:
-                user_content_with_error = self._append_error_to_user_content(
-                    user_content, error_context
-                )
                 async with self.agent.run_stream(
-                    user_prompt=user_content_with_error, message_history=safe_history
+                    user_prompt=user_content, message_history=safe_history
                 ) as result:
                     collected = ""
                     normalizer = ImagePathStreamNormalizer()
-                    async for chunk in result.stream_text(delta=True):
-                        if not chunk:
-                            continue
-                        normalized_chunk = normalizer.feed(chunk)
-                        if normalized_chunk:
-                            collected += normalized_chunk
-                            yield normalized_chunk
-                    tail = normalizer.flush()
-                    if tail:
-                        collected += tail
-                        yield tail
+                    try:
+                        async for chunk in result.stream_text(delta=True):
+                            if not chunk:
+                                continue
+                            normalized_chunk = normalizer.feed(chunk)
+                            if normalized_chunk:
+                                collected += normalized_chunk
+                                yield normalized_chunk
+                        tail = normalizer.flush()
+                        if tail:
+                            collected += tail
+                            yield tail
+                    except Exception as stream_error:
+                        error_msg = str(stream_error)
+                        logger.warning("Tool execution error during streaming: %s", error_msg)
+                        yield (
+                            f"\n\n[System Note: A tool execution error occurred: {error_msg}. "
+                            "Please provide a helpful response explaining the service is temporarily unavailable.]"
+                        )
+
                     try:
                         self._last_messages = result.all_messages()
                     except Exception:
                         self._last_messages = None
                     self._last_assistant_reply = self._extract_user_reply(collected)
                     self._record_conversation_turn(original_prompt, collected)
-            except Exception:
-                yield "抱歉，系統暫時無法處理您的請求。請稍後再試。"
+            except Exception as e:
+                if self._is_context_overflow_error(e):
+                    retry_history = self._overflow_retry_history(safe_history)
+                    if retry_history is not safe_history:
+                        try:
+                            async with self.agent.run_stream(
+                                user_prompt=user_content, message_history=retry_history
+                            ) as result:
+                                collected = ""
+                                normalizer = ImagePathStreamNormalizer()
+                                async for chunk in result.stream_text(delta=True):
+                                    if not chunk:
+                                        continue
+                                    normalized_chunk = normalizer.feed(chunk)
+                                    if normalized_chunk:
+                                        collected += normalized_chunk
+                                        yield normalized_chunk
+                                tail = normalizer.flush()
+                                if tail:
+                                    collected += tail
+                                    yield tail
+                                try:
+                                    self._last_messages = result.all_messages()
+                                except Exception:
+                                    self._last_messages = None
+                                self._last_assistant_reply = self._extract_user_reply(collected)
+                                self._record_conversation_turn(original_prompt, collected)
+                                return
+                        except Exception as retry_exc:
+                            e = retry_exc
+                            history_in_use = retry_history
+
+                error_msg = str(e)
+                logger.warning("Error in agent.run_stream(): %s", error_msg)
+
+                error_context = (
+                    f"\n\nTool execution error:\n{error_msg}\n\n"
+                    "Please provide a helpful response to the user explaining that the external service "
+                    "is temporarily unavailable and suggest alternatives if possible."
+                )
+                try:
+                    user_content_with_error = self._append_error_to_user_content(
+                        user_content, error_context
+                    )
+                    async with self.agent.run_stream(
+                        user_prompt=user_content_with_error, message_history=history_in_use
+                    ) as result:
+                        collected = ""
+                        normalizer = ImagePathStreamNormalizer()
+                        async for chunk in result.stream_text(delta=True):
+                            if not chunk:
+                                continue
+                            normalized_chunk = normalizer.feed(chunk)
+                            if normalized_chunk:
+                                collected += normalized_chunk
+                                yield normalized_chunk
+                        tail = normalizer.flush()
+                        if tail:
+                            collected += tail
+                            yield tail
+                        try:
+                            self._last_messages = result.all_messages()
+                        except Exception:
+                            self._last_messages = None
+                        self._last_assistant_reply = self._extract_user_reply(collected)
+                        self._record_conversation_turn(original_prompt, collected)
+                except Exception:
+                    yield "抱歉，系統暫時無法處理您的請求。請稍後再試。"
+        finally:
+            self._turn_lock.release()
