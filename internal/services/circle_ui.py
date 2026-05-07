@@ -1738,6 +1738,11 @@ class SiriResponseBubble(QWidget):
         re.IGNORECASE,
     )
 
+    # Fires when an inner child's height grew (e.g. async image download finished and
+    # markdown was re-rendered with the actual image). Listeners should re-measure
+    # content_height() and resize the outer bubble to fit.
+    contentSizeChanged = Signal()
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setAttribute(Qt.WA_StyledBackground, True)
@@ -1747,6 +1752,7 @@ class SiriResponseBubble(QWidget):
         self._animation_angle = 0
         self._animation_timer = QTimer(self)
         self._animation_timer.timeout.connect(self._update_animation)
+        self._content_size_emit_pending = False
 
         self.setStyleSheet(
             "SiriResponseBubble { "
@@ -1801,6 +1807,21 @@ class SiriResponseBubble(QWidget):
             self.container.adjustSize()
             if process_events:
                 QApplication.processEvents()
+        except Exception:
+            pass
+
+    def _emit_content_size_changed(self) -> None:
+        # Coalesce bursts of inner-height changes (image loads can arrive back-to-back)
+        # into a single outer-bubble resize on the next event-loop tick.
+        if self._content_size_emit_pending:
+            return
+        self._content_size_emit_pending = True
+        QTimer.singleShot(0, self._do_emit_content_size_changed)
+
+    def _do_emit_content_size_changed(self) -> None:
+        self._content_size_emit_pending = False
+        try:
+            self.contentSizeChanged.emit()
         except Exception:
             pass
 
@@ -2050,8 +2071,11 @@ class SiriResponseBubble(QWidget):
                                 doc_size = b.document().documentLayout().documentSize()
                                 height = doc_size.height()
                                 min_height = max(int(height) + 16, 32)
+                                prev = b.minimumHeight()
                                 b.setMinimumHeight(min_height)
                                 b.setMaximumHeight(min_height)
+                                if min_height != prev:
+                                    self._emit_content_size_changed()
                             except RuntimeError:
                                 pass
 
@@ -2108,8 +2132,11 @@ class SiriResponseBubble(QWidget):
                                         doc_size = doc.documentLayout().documentSize()
                                         h2 = doc_size.height()
                                         min_height = max(int(h2) + 16, 32)
+                                        prev = b.minimumHeight()
                                         b.setMinimumHeight(min_height)
                                         b.setMaximumHeight(min_height)
+                                        if min_height != prev:
+                                            self._emit_content_size_changed()
                                     except RuntimeError:
                                         pass
 
@@ -2715,6 +2742,13 @@ class MainWindow(QMainWindow):
         self.speech_bubble.setParent(self)
         self.speech_bubble.setFixedSize(140, 160)
         self.speech_bubble.show()  # 初始顯示
+        # When async image loads grow inner content, re-fit the bubble.
+        try:
+            self.speech_bubble.contentSizeChanged.connect(
+                lambda: QTimer.singleShot(0, self._update_bubble_geometry)
+            )
+        except Exception:
+            pass
 
         # Debounce speech bubble refresh to avoid flicker when streaming many chunks.
         self._pending_bubble_text = ""
@@ -4328,6 +4362,19 @@ class _AgentBubble(QFrame):
             self._stream_browser.document().contentsChanged.connect(self._resize_stream)
         except Exception:
             pass
+
+        # When async image downloads complete after finalization, the inner browsers
+        # grow but _full_bubble's min/max height is already locked by _resize_full —
+        # listen for the bubble's contentSizeChanged and re-fit.
+        try:
+            self._full_bubble.contentSizeChanged.connect(self._on_full_bubble_grew)
+        except Exception:
+            pass
+
+    def _on_full_bubble_grew(self) -> None:
+        if not self._finalized:
+            return
+        QTimer.singleShot(0, self._resize_full)
 
     # ── Tool events ────────────────────────────────────────────────────
 
