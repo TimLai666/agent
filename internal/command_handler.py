@@ -148,13 +148,18 @@ class CommandHandler:
         # /config-web - 開啟設定 Web UI 頁面（GUI 模式下使用 webview，CLI 模式下使用瀏覽器）
         elif name == "/config-web":
             try:
+                logger.info("[/config-web] step 1: ensure_webui_running")
                 url = config_webui.ensure_webui_running()
-                
+                logger.info(f"[/config-web] step 2: got url={url}, gui_window={self.gui_window!r}")
+
                 # 檢查是否為 GUI 模式（有 gui_window 且非 None）
                 if self.gui_window is not None:
                     # GUI 模式：使用內建 webview
+                    logger.info("[/config-web] step 3a: calling gui_window.open_config_webview()")
                     self.gui_window.open_config_webview()
+                    logger.info("[/config-web] step 3b: open_config_webview returned")
                     self.output_callback("已打開配置頁面")
+                    logger.info("[/config-web] step 4: output_callback returned")
                 else:
                     # CLI 模式：使用外部瀏覽器
                     opened = webbrowser.open(url, new=2)
@@ -163,7 +168,7 @@ class CommandHandler:
                     else:
                         self.output_callback(f"設定頁位置：{url}（請手動打開）")
             except Exception as e:
-                logger.error(f"Failed to open config web UI: {e}")
+                logger.error(f"Failed to open config web UI: {e}", exc_info=True)
                 self.output_callback(f"無法開啟設定頁: {e}")
             return None
         

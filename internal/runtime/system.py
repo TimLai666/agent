@@ -188,6 +188,7 @@ async def run_cli(
             }
 
         config_webui.register_skills_reload_handler(reload_skills_from_webui)
+        config_webui.register_mcp_reload_handler(main_agent.reload_mcp_servers_threadsafe)
 
         def emit_tool_event(event: dict) -> None:
             try:
@@ -218,25 +219,9 @@ async def run_cli(
 
         try:
             async with AsyncExitStack() as stack:
-                # MCP servers are run by the main agent (contains browser tools)
-                mcp_started = False
-                try:
-                    await stack.enter_async_context(main_agent.agent.run_mcp_servers())
-                except Exception as exc:  # pragma: no cover - best effort when MCP fails
-                    reason = _summarize_exception(exc)
-                    logger.warning(
-                        "MCP browser tools failed to start; continuing without them. Root cause: %s",
-                        reason,
-                    )
-                    # Keep CLI behavior consistent with GUI: remove unavailable MCP toolsets
-                    # so the agent won't repeatedly attempt calls to broken MCP servers.
-                    try:
-                        main_agent.agent._user_toolsets = []
-                        logger.info("Cleared MCP toolsets from agent to prevent tool call failures")
-                    except Exception as clear_exc:
-                        logger.debug("Failed to clear MCP toolsets in CLI", exc_info=clear_exc)
-                else:
-                    mcp_started = True
+                # MCP servers are owned by MainAgent so the WebUI can hot-reload
+                # them without tearing down the outer session lifespan.
+                mcp_started = await stack.enter_async_context(main_agent.mcp_lifespan())
 
                 ready_msg = "\nAgent ready. Type /help for commands."
                 if not mcp_started:
@@ -406,3 +391,4 @@ async def run_cli(
                         print("\nError: " + str(exc) + "\n")
         finally:
             config_webui.register_skills_reload_handler(None)
+            config_webui.register_mcp_reload_handler(None)

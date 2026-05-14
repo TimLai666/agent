@@ -104,6 +104,10 @@ class AgentRuntime(QThread):
                 config_webui.register_skills_reload_handler(None)
             except Exception:
                 pass
+            try:
+                config_webui.register_mcp_reload_handler(None)
+            except Exception:
+                pass
             loop.close()
 
     @staticmethod
@@ -153,6 +157,13 @@ class AgentRuntime(QThread):
 
             config_webui.register_skills_reload_handler(_reload_skills_from_webui)
 
+            def _reload_mcp_from_webui() -> dict[str, object]:
+                if self.main_agent is None:
+                    return {"success": False, "message": "Agent 尚未就緒"}
+                return self.main_agent.reload_mcp_servers_threadsafe()
+
+            config_webui.register_mcp_reload_handler(_reload_mcp_from_webui)
+
             if self._ready_event:
                 self._ready_event.set()
             self.ready.emit()
@@ -182,17 +193,14 @@ class AgentRuntime(QThread):
             compact_coordinator=CompactCoordinator(runner=main_agent.run_compaction_subagent),
         )
         state.mcp_stack = AsyncExitStack()
-        try:
-            await state.mcp_stack.enter_async_context(main_agent.agent.run_mcp_servers())
+        mcp_started = await state.mcp_stack.enter_async_context(main_agent.mcp_lifespan())
+        if mcp_started:
             logger.info("MCP servers started for session %s", session_id)
-        except Exception as exc:
-            reason = self._summarize_exception(exc)
+        else:
             logger.warning(
-                "MCP servers failed to start for session %s; continuing without them. Root cause: %s",
+                "MCP servers failed to start for session %s; continuing without them.",
                 session_id,
-                reason,
             )
-            main_agent.agent._user_toolsets = []
         return state
 
     def _activate_session_state(self, state: RuntimeSessionState) -> None:

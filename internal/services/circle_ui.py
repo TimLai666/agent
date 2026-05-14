@@ -249,6 +249,7 @@ from PySide6.QtCore import (
     Property,
     QRect,
     QSize,
+    QThread,
     Signal,
     QTimer,
     Qt,
@@ -2707,6 +2708,9 @@ class MainWindow(QMainWindow):
     collapse_state_changed = Signal(bool)
     # 當使用者正在編輯輸入框（鍵入文字）時發出
     typing = Signal()
+    # Cross-thread trigger for opening the config webview. Emitting this signal
+    # from any thread is safe; the connected slot runs on the GUI thread.
+    _open_config_webview_request = Signal()
     
     def __init__(self):
         super().__init__()
@@ -3007,6 +3011,10 @@ class MainWindow(QMainWindow):
         # 连接确认信号到槽
         self.confirm_requested.connect(self._handle_confirm_request)
         self.question_requested.connect(self._handle_question_request)
+        # Cross-thread open-config trigger lands here (queued via default
+        # auto-connection because emitter and receiver may be on different
+        # threads).
+        self._open_config_webview_request.connect(self._open_config_webview_on_gui_thread)
 
         # 初始化窗口遮罩（點擊穿透）- 多次延遲更新確保完全渲染
         QTimer.singleShot(0, self._update_window_mask)
@@ -3022,7 +3030,17 @@ class MainWindow(QMainWindow):
         self._stop_callback = callback
     
     def open_config_webview(self):
-        """打開配置頁面 WebView"""
+        """Open the config webview. Safe to call from any thread — if invoked
+        off the GUI thread it bounces back to the GUI thread via a queued
+        signal before touching any QWidget."""
+        if QThread.currentThread() != self.thread():
+            self._open_config_webview_request.emit()
+            return
+        self._open_config_webview_on_gui_thread()
+
+    @Slot()
+    def _open_config_webview_on_gui_thread(self):
+        """打開配置頁面 WebView（必須在 GUI thread 執行）"""
         try:
             if not HAS_WEBENGINE:
                 error_msg = (
@@ -3035,12 +3053,12 @@ class MainWindow(QMainWindow):
                 self.update_speech_bubble(error_msg)
                 logger.warning("WebEngine not available")
                 return
-            
+
             from internal.services import config_webui
-            
+
             # 確保 Web UI 正在運行
             url = config_webui.ensure_webui_running()
-            
+
             # 如果窗口已存在，顯示並激活
             if self.config_webview_window is not None:
                 try:
@@ -3051,13 +3069,13 @@ class MainWindow(QMainWindow):
                 except RuntimeError:
                     # 窗口已被刪除，重新創建
                     self.config_webview_window = None
-            
+
             if self.config_webview_window is None:
                 # 創建新窗口
                 self.config_webview_window = ConfigWebViewWindow(url, parent=self)
                 self.config_webview_window.show()
                 logger.info(f"Created new config webview: {url}")
-            
+
         except ImportError as e:
             error_msg = f"無法打開配置頁面：\n{str(e)}\n\n請安裝 PySide6-WebEngine"
             self.update_speech_bubble(error_msg)
@@ -4682,6 +4700,8 @@ class ChatWindow(QMainWindow):
     new_conversation_requested = Signal()
     history_resume_requested = Signal(str)
     history_delete_requested = Signal(str)
+    # Cross-thread trigger for opening the config webview (queued connection).
+    _open_config_webview_request = Signal()
 
     _CHIP_STYLE = (
         "QLabel { background: rgba(45,55,80,200); color: #a8d4ff; "
@@ -4737,6 +4757,8 @@ class ChatWindow(QMainWindow):
         self.confirm_requested.connect(self._handle_confirm_request)
         self.question_requested.connect(self._handle_question_request)
         self.render_rich_requested.connect(self.insert_rich_content)
+        # Cross-thread open-config trigger.
+        self._open_config_webview_request.connect(self._open_config_webview_on_gui_thread)
 
     def set_history_sessions(self, sessions: list[dict[str, object]]) -> None:
         self._history_sessions = list(sessions or [])
@@ -5609,6 +5631,15 @@ class ChatWindow(QMainWindow):
         return paths
 
     def open_config_webview(self) -> None:
+        """Open the config webview. Thread-safe: bounces to GUI thread via a
+        queued signal when called from a worker thread."""
+        if QThread.currentThread() != self.thread():
+            self._open_config_webview_request.emit()
+            return
+        self._open_config_webview_on_gui_thread()
+
+    @Slot()
+    def _open_config_webview_on_gui_thread(self) -> None:
         try:
             if not HAS_WEBENGINE:
                 return

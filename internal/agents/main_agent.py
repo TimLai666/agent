@@ -6,6 +6,7 @@ import re
 import sys
 import uuid
 from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -35,7 +36,7 @@ from internal.services.agent_factory import (
     create_openai_model,
     load_agent_config_chain,
 )
-from internal.services.config_manager import create_model_for_agent
+from internal.services.config_manager import create_model_for_agent, get_model_config
 from internal.services.subagent_tasks import (
     AgentToolInput,
     SendMessageToolInput,
@@ -220,19 +221,19 @@ class MainAgent:
             additional_prompts = list_available_system_prompts()
             logger.info("Auto-loading %d system prompts", len(additional_prompts))
 
-        active_model = model_name or "unknown"
+        # NOTE: Active model name is intentionally NOT baked into the static
+        # system prompt. It is injected per-turn (see `_inject_active_model`)
+        # so that hot-reloading the model config takes effect immediately,
+        # without rebuilding the system prompt.
+        _ = model_name  # accepted for backward compat; no longer used here
 
         environment_context = build_environment_context()
         runtime_info = f"""
-    # Model Information
-
-- **Active Model**: {active_model}
-
     # Runtime Environment
 
     {environment_context}
 
-**IMPORTANT**: Each user turn includes an auto-injected local timestamp. Use that timestamp as the primary time reference for the current reply.
+**IMPORTANT**: Each user turn includes an auto-injected local timestamp and the active model name. Use that timestamp as the primary time reference for the current reply.
 """
 
         base_prompt = (system_prompt_override or SYSTEM_PROMPT).strip()
@@ -534,6 +535,17 @@ class MainAgent:
         self._last_assistant_reply: str | None = None
         self._http_client = http_client  # 保存以便重載 model
         self._model_reload_signature: tuple | None = None  # detect actual config drift
+        # Active model name for per-turn prompt injection. Updated whenever
+        # _reload_model_from_db swaps the underlying model so the agent always
+        # sees the live model name without rebuilding the static system prompt.
+        self._active_model_name: str | None = None
+        # MCP lifecycle is owned by MainAgent so that reload_mcp_servers can
+        # tear down and re-enter the agent context without breaking the outer
+        # caller's session-scoped lifespan. _mcp_main_loop is captured on the
+        # first start so cross-thread reload requests (e.g. from the Flask
+        # WebUI) can dispatch coroutines back to the agent's event loop.
+        self._mcp_running: bool = False
+        self._mcp_main_loop: asyncio.AbstractEventLoop | None = None
         # Serialise turn execution so two concurrent submits don't interleave
         # writes to _last_messages / _last_assistant_reply / agent._model.
         self._turn_lock = asyncio.Lock()
@@ -1060,16 +1072,32 @@ class MainAgent:
     def _reload_model_from_db(self) -> None:
         """Pick up any model config changes made via the UI since the last call.
 
-        Skip the swap when the resolved model is identical to the one we
-        already installed — the assignment to `agent._model` mutates a private
-        attribute of the running pydantic_ai Agent and we want to do it as
-        rarely as possible.
+        Skip the swap when the resolved config is identical to what we already
+        installed — the assignment to `agent._model` mutates a private attribute
+        of the running pydantic_ai Agent and we want to do it as rarely as
+        possible. Temperature lives in the public `agent.model_settings` and is
+        synced alongside the model so UI changes to either take effect on the
+        next turn without a restart.
         """
         if not self._http_client:
             logger.warning("無法重載 model：沒有 http_client")
             return
 
         try:
+            resolved = get_model_config("main")
+            if resolved is None:
+                logger.warning("model reload: no resolved config; keeping previous model")
+                return
+
+            new_signature = (
+                resolved.provider_type,
+                resolved.base_url,
+                resolved.model_name,
+                resolved.temperature,
+            )
+            if new_signature == self._model_reload_signature:
+                return
+
             config = AgentConfig(
                 name="main",
                 base_url=None,
@@ -1082,20 +1110,143 @@ class MainAgent:
                 logger.warning("model reload returned None; keeping previous model")
                 return
 
-            # Cheap signature; if create_openai_model returns the same instance
-            # or one whose model_name matches, skip mutation entirely.
-            new_signature = (
-                getattr(new_model, "model_name", None),
-                getattr(getattr(new_model, "_provider", None), "base_url", None),
-                id(new_model),
-            )
-            if new_signature == self._model_reload_signature:
-                return
             self.agent._model = new_model
+            current_settings = dict(self.agent.model_settings or {})
+            current_settings["temperature"] = resolved.temperature
+            self.agent.model_settings = current_settings
             self._model_reload_signature = new_signature
-            logger.debug("已從資料庫重載 model 配置")
+            self._active_model_name = resolved.model_name
+            logger.debug(
+                "已從資料庫重載 model 配置: %s @ temp=%s",
+                resolved.model_name,
+                resolved.temperature,
+            )
         except Exception:
             logger.exception("重載 model 配置失敗，繼續使用現有配置")
+
+    async def start_mcp_servers(self) -> bool:
+        """Enter the agent context to bring up MCP servers. Idempotent.
+
+        Returns True on success (or if already running), False if MCP could
+        not start. On failure the agent's user toolsets are cleared so the
+        agent stays usable without MCP.
+        """
+        if self._mcp_running:
+            return True
+        try:
+            self._mcp_main_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self._mcp_main_loop = None
+        try:
+            await self.agent.__aenter__()
+            self._mcp_running = True
+            return True
+        except Exception:
+            logger.exception("Failed to start MCP servers")
+            try:
+                self.agent._user_toolsets = []
+            except Exception:
+                logger.debug("Failed to clear MCP toolsets after start failure", exc_info=True)
+            return False
+
+    async def stop_mcp_servers(self) -> None:
+        """Exit the agent context to shut MCP servers down. Idempotent."""
+        if not self._mcp_running:
+            return
+        try:
+            await self.agent.__aexit__(None, None, None)
+        except Exception:
+            logger.exception("Failed to stop MCP servers cleanly")
+        finally:
+            self._mcp_running = False
+
+    @asynccontextmanager
+    async def mcp_lifespan(self) -> AsyncIterator[bool]:
+        """Async context manager that starts/stops MCP servers around a session.
+
+        Yields True if MCP successfully started, False otherwise. Callers
+        should treat False the same way as the previous fallback path —
+        continue running but without MCP toolsets.
+        """
+        ok = await self.start_mcp_servers()
+        try:
+            yield ok
+        finally:
+            await self.stop_mcp_servers()
+
+    async def reload_mcp_servers_async(self) -> dict[str, object]:
+        """Tear down current MCP toolsets, rebuild from DB, restart.
+
+        Serialises against in-flight turns via ``_turn_lock`` so the agent
+        never observes a toolset swap mid-call. If MCP wasn't running before
+        the reload we still rebuild the toolset list but don't enter the
+        context — a later ``start_mcp_servers`` call will pick it up.
+        """
+        async with self._turn_lock:
+            was_running = self._mcp_running
+            if was_running:
+                await self.stop_mcp_servers()
+            try:
+                new_servers = list(get_all_mcp_servers())
+            except Exception as exc:
+                logger.exception("Failed to rebuild MCP server list during reload")
+                return {"success": False, "message": f"重建 MCP 失敗：{exc}"}
+            try:
+                self.agent._user_toolsets = new_servers
+            except Exception as exc:
+                logger.exception("Failed to assign MCP toolsets during reload")
+                return {"success": False, "message": f"指派 MCP toolsets 失敗：{exc}"}
+            if was_running:
+                started = await self.start_mcp_servers()
+                if not started:
+                    return {
+                        "success": False,
+                        "count": 0,
+                        "message": "啟動新 MCP 失敗，已清空 toolsets",
+                    }
+            return {
+                "success": True,
+                "count": len(new_servers),
+                "message": f"MCP 已重新載入（{len(new_servers)} 個）",
+            }
+
+    def reload_mcp_servers_threadsafe(self) -> dict[str, object]:
+        """Sync entry point for callers on a different thread (e.g. Flask).
+
+        Schedules the async reload on the agent's event loop and returns
+        immediately. The reload runs in the background and will block until
+        any in-flight turn finishes (because it acquires ``_turn_lock``);
+        callers should NOT wait on the result, otherwise long turns would
+        freeze the calling thread (and any UI driving it).
+        """
+        loop = self._mcp_main_loop
+        if loop is None or not loop.is_running():
+            return {
+                "success": False,
+                "scheduled": False,
+                "message": "Agent 主事件迴圈尚未啟動，無法重載 MCP",
+            }
+
+        async def _runner() -> None:
+            try:
+                result = await self.reload_mcp_servers_async()
+                if not result.get("success"):
+                    logger.warning("Background MCP reload reported failure: %s", result)
+                else:
+                    logger.info("Background MCP reload finished: %s", result)
+            except Exception:
+                logger.exception("Background MCP reload crashed")
+
+        try:
+            asyncio.run_coroutine_threadsafe(_runner(), loop)
+            return {
+                "success": True,
+                "scheduled": True,
+                "message": "MCP 重載已在背景排程",
+            }
+        except Exception as exc:
+            logger.exception("MCP reload threadsafe dispatch failed")
+            return {"success": False, "scheduled": False, "message": str(exc)}
 
     def _extract_user_reply(self, output: str | None) -> str | None:
         if not output:
@@ -1185,6 +1336,23 @@ class MainAgent:
         if not block:
             return prompt
         return f"{block}\n\n{prompt}"
+
+    def _inject_active_model(self, prompt: str) -> str:
+        """Inject the currently-active model name so the agent always sees the
+        live value after a config hot-reload (rather than the value baked at
+        startup time)."""
+        model_obj = getattr(self.agent, "_model", None)
+        active_model = (
+            self._active_model_name
+            or getattr(model_obj, "model_name", None)
+            or getattr(model_obj, "model", None)
+            or "unknown"
+        )
+        return (
+            "[ACTIVE_MODEL_FOR_THIS_USER_TURN]\n"
+            f"- model: {active_model}\n\n"
+            f"{prompt}"
+        )
 
     def _inject_local_timestamp(self, prompt: str) -> str:
         """Inject per-turn local timestamp into user prompt context."""
@@ -1642,6 +1810,7 @@ class MainAgent:
         self._last_user_prompt = prompt
         prompt = self._inject_task_notifications(prompt)
         prompt = self._inject_todo_snapshot(prompt)
+        prompt = self._inject_active_model(prompt)
         prompt = self._inject_local_timestamp(prompt)
         prompt = self._inject_memory(prompt)
         user_content, _ = self._build_user_prompt_content(prompt)
@@ -1755,6 +1924,7 @@ class MainAgent:
             self._last_user_prompt = prompt
             prompt = self._inject_task_notifications(prompt)
             prompt = self._inject_todo_snapshot(prompt)
+            prompt = self._inject_active_model(prompt)
             prompt = self._inject_local_timestamp(prompt)
             prompt = self._inject_memory(prompt)
             user_content, _ = self._build_user_prompt_content(prompt)

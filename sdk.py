@@ -217,24 +217,13 @@ class Agent:
 
         if self.start_mcp_servers:
             self._mcp_stack = AsyncExitStack()
-            try:
-                await self._mcp_stack.enter_async_context(
-                    self._main_agent.agent.run_mcp_servers()
-                )
-            except Exception as exc:
-                reason = self._summarize_exception(exc)
+            mcp_started = await self._mcp_stack.enter_async_context(
+                self._main_agent.mcp_lifespan()
+            )
+            if not mcp_started:
                 logger.warning(
-                    "MCP servers failed to start in programmatic Agent; continuing without MCP. Root cause: %s",
-                    reason,
+                    "MCP servers failed to start in programmatic Agent; continuing without MCP."
                 )
-                # Tear down whatever was partially entered, then drop the stack
-                # so close() won't double-aclose.
-                try:
-                    await self._mcp_stack.aclose()
-                except Exception:
-                    pass
-                self._mcp_stack = None
-                self._main_agent.agent._user_toolsets = []
 
     async def close(self) -> None:
         if self._mcp_stack is not None:
