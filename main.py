@@ -104,6 +104,10 @@ class AgentRuntime(QThread):
                 config_webui.register_skills_reload_handler(None)
             except Exception:
                 pass
+            try:
+                config_webui.register_mcp_reload_handler(None)
+            except Exception:
+                pass
             loop.close()
 
     @staticmethod
@@ -153,6 +157,13 @@ class AgentRuntime(QThread):
 
             config_webui.register_skills_reload_handler(_reload_skills_from_webui)
 
+            def _reload_mcp_from_webui() -> dict[str, object]:
+                if self.main_agent is None:
+                    return {"success": False, "message": "Agent 尚未就緒"}
+                return self.main_agent.reload_mcp_servers_threadsafe()
+
+            config_webui.register_mcp_reload_handler(_reload_mcp_from_webui)
+
             if self._ready_event:
                 self._ready_event.set()
             self.ready.emit()
@@ -182,17 +193,14 @@ class AgentRuntime(QThread):
             compact_coordinator=CompactCoordinator(runner=main_agent.run_compaction_subagent),
         )
         state.mcp_stack = AsyncExitStack()
-        try:
-            await state.mcp_stack.enter_async_context(main_agent.agent.run_mcp_servers())
+        mcp_started = await state.mcp_stack.enter_async_context(main_agent.mcp_lifespan())
+        if mcp_started:
             logger.info("MCP servers started for session %s", session_id)
-        except Exception as exc:
-            reason = self._summarize_exception(exc)
+        else:
             logger.warning(
-                "MCP servers failed to start for session %s; continuing without them. Root cause: %s",
+                "MCP servers failed to start for session %s; continuing without them.",
                 session_id,
-                reason,
             )
-            main_agent.agent._user_toolsets = []
         return state
 
     def _activate_session_state(self, state: RuntimeSessionState) -> None:
@@ -304,7 +312,9 @@ class AgentRuntime(QThread):
             return
         request_id = self._active_request_id
         if session_id:
-            for candidate_id, candidate_session in reversed(self._request_sessions.items()):
+            # Snapshot to a list to avoid "dictionary changed size during
+            # iteration" if submit() inserts on another thread mid-iter.
+            for candidate_id, candidate_session in reversed(list(self._request_sessions.items())):
                 if candidate_session == session_id:
                     request_id = candidate_id
                     break
@@ -403,11 +413,9 @@ class AgentRuntime(QThread):
                 tokens_before = state.conversation_state.totalTokens
                 self.compaction_event.emit(True)
                 state.conversation_state = await state.compact_coordinator.maybeCompact(state.conversation_state)
-                if state.conversation_state.totalTokens < tokens_before:
-                    # tokens decreased → compaction actually ran
-                    self.compaction_event.emit(False)
-                else:
-                    self.compaction_event.emit(False)
+                # Single emit after the await; the value reflects whether
+                # compaction actually shrank the context.
+                self.compaction_event.emit(state.conversation_state.totalTokens < tokens_before)
             updated_history = state.conversation_state.fullMessages
         if self._current_session_id == session_id:
             self._activate_session_state(state)
@@ -800,7 +808,11 @@ class GUIAgentApp(QObject):
             self._current_session_id = session_id
             self.chat_history = store.load_message_history(session_id)
             self.runtime.set_session_history(session_id, self.chat_history)
-            self._gui_history = deque(store.load_display_history(session_id))
+            # Mutate in place so any holder of the original list reference
+            # (e.g. self.command_handler.history) sees the new contents and
+            # supports slicing (`self.history[-limit:]` would break on deque).
+            self._gui_history.clear()
+            self._gui_history.extend(store.load_display_history(session_id))
             self._display_text = ""
             self._last_user_input = ""
             self._last_assistant_reply = ""
@@ -982,7 +994,10 @@ class GUIAgentApp(QObject):
     def _load_session_ui_state(self, session_id: str) -> None:
         state = self._session_ui_state.get(session_id, {})
         self.chat_history = state.get("chat_history") if "chat_history" in state else None
-        self._gui_history = deque(state.get("gui_history", deque()))
+        # Preserve the original list reference (see resume_saved_conversation).
+        saved = state.get("gui_history", [])
+        self._gui_history.clear()
+        self._gui_history.extend(saved)
         self._display_text = str(state.get("display_text", ""))
         self._last_user_input = str(state.get("last_user_input", ""))
         self._last_assistant_reply = str(state.get("last_assistant_reply", ""))
@@ -1035,20 +1050,20 @@ class GUIAgentApp(QObject):
             label = line[4:]
             icon = self._tool_icon(label)
             return (
-                f'<div style="padding:1px 0 1px 2px;color:#6eaee8;font-size:11px;'
+                f'<div style="padding:1px 0 1px 2px;color:#6eaee8;font-size:8pt;'
                 f'font-family:monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">'
                 f'{icon} <span style="color:#8bbcf0;">{esc(label)}</span>'
                 f'</div>'
             )
         if line.startswith("[OK]"):
             return (
-                f'<div style="padding:1px 0 1px 2px;color:#4ec94e;font-size:11px;">'
+                f'<div style="padding:1px 0 1px 2px;color:#4ec94e;font-size:8pt;">'
                 f'✓</div>'
             )
         if line.startswith("[ERR] "):
             label = line[6:]
             return (
-                f'<div style="padding:1px 0 1px 2px;color:#f06b6b;font-size:11px;'
+                f'<div style="padding:1px 0 1px 2px;color:#f06b6b;font-size:8pt;'
                 f'font-family:monospace;">'
                 f'✗ {esc(label)}'
                 f'</div>'
@@ -1056,14 +1071,14 @@ class GUIAgentApp(QObject):
         if line.startswith("[SKILL] "):
             label = line[8:]
             return (
-                f'<div style="padding:1px 0 1px 2px;color:#c792ea;font-size:11px;">'
+                f'<div style="padding:1px 0 1px 2px;color:#c792ea;font-size:8pt;">'
                 f'⚡ {esc(label)}'
                 f'</div>'
             )
         if line.startswith("[*] "):
             label = line[4:]
             return (
-                f'<div style="padding:1px 0 1px 2px;color:#888;font-size:11px;'
+                f'<div style="padding:1px 0 1px 2px;color:#888;font-size:8pt;'
                 f'font-family:monospace;">'
                 f'· {esc(label)}'
                 f'</div>'
@@ -1097,7 +1112,7 @@ class GUIAgentApp(QObject):
                     label = in_flight.pop(0)
                     icon = self._tool_icon(label)
                     rows.append(
-                        f'<div style="padding:1px 0 1px 2px;color:#4db87a;font-size:11px;'
+                        f'<div style="padding:1px 0 1px 2px;color:#4db87a;font-size:8pt;'
                         f'font-family:monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">'
                         f'✓ {icon} <span style="color:#7ec8a0;">{esc(label)}</span>'
                         f'</div>'
@@ -1109,14 +1124,14 @@ class GUIAgentApp(QObject):
                     label = in_flight.pop(0)
                     icon = self._tool_icon(label)
                     rows.append(
-                        f'<div style="padding:1px 0 1px 2px;color:#f06b6b;font-size:11px;'
+                        f'<div style="padding:1px 0 1px 2px;color:#f06b6b;font-size:8pt;'
                         f'font-family:monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">'
                         f'✗ {icon} <span style="color:#f09090;">{esc(label)}: {esc(err)}</span>'
                         f'</div>'
                     )
                 else:
                     rows.append(
-                        f'<div style="padding:1px 0 1px 2px;color:#f06b6b;font-size:11px;">'
+                        f'<div style="padding:1px 0 1px 2px;color:#f06b6b;font-size:8pt;">'
                         f'✗ {esc(err)}'
                         f'</div>'
                     )
@@ -1129,7 +1144,7 @@ class GUIAgentApp(QObject):
         for label in in_flight:
             icon = self._tool_icon(label)
             rows.append(
-                f'<div style="padding:1px 0 1px 2px;color:#6eaee8;font-size:11px;'
+                f'<div style="padding:1px 0 1px 2px;color:#6eaee8;font-size:8pt;'
                 f'font-family:monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">'
                 f'▶ {icon} <span style="color:#8bbcf0;">{esc(label)}</span>'
                 f'</div>'
@@ -1389,11 +1404,15 @@ class GUIAgentApp(QObject):
         logger.info(
             f"handle_result called with output: {output[:100] if output else 'None'}..."
         )
-        if output and output not in self._display_text:
-            self._display_text = f"{output}"
-            self._last_assistant_reply = output  # 記錄助手回覆
+        if output:
+            # Always record the latest assistant reply, even when its text already
+            # appears as a substring of streamed tokens — otherwise short replies
+            # like "OK" silently fail to update /last and command-handler state.
+            self._last_assistant_reply = output
             if self.command_handler:
                 self.command_handler.update_last_reply(output)
+        if output and output not in self._display_text:
+            self._display_text = f"{output}"
             self._pending.clear()
             self._stream_buffer = ""
             self._stream_mode = "normal"

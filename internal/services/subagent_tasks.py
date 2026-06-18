@@ -165,7 +165,11 @@ class SubagentTaskManager:
         self._wake_events[task_id] = asyncio.Event()
 
         if input_data.run_in_background:
-            self._runner_tasks[task_id] = asyncio.create_task(self.runAgentTask(task_id))
+            t = asyncio.create_task(self.runAgentTask(task_id))
+            self._runner_tasks[task_id] = t
+            # Clean up bookkeeping dicts when the task finishes so they don't
+            # grow unboundedly across many spawn/finish cycles.
+            t.add_done_callback(lambda _t, tid=task_id: self._cleanup_task(tid))
             return {"task_id": task_id, "status": "started", "name": input_data.name or ""}
 
         await self.runAgentTask(task_id, one_shot=True)
@@ -371,6 +375,12 @@ class SubagentTaskManager:
             for t in items
         ]
 
+    def _cleanup_task(self, task_id: str) -> None:
+        """Drop transient bookkeeping after a runner task finishes."""
+        self._runner_tasks.pop(task_id, None)
+        self._wake_events.pop(task_id, None)
+        self._cancel_flags.discard(task_id)
+
     def _enqueue_once(self, task_id: str) -> None:
         def updater(t: BaseTask) -> BaseTask:
             if t.notified:
@@ -422,7 +432,13 @@ class SubagentTaskManager:
             result_body = text
             files_changed = list(dict.fromkeys(match.group(0) for match in _FILES_PATTERN.finditer(text)))
             commands = [line.strip().removeprefix("$ ") for line in text.splitlines() if _COMMAND_PATTERN.match(line)]
-            unresolved = [line.strip() for line in text.splitlines() if "unresolved" in line.lower()]
+            # Word-boundary match so legitimate prose like "I used the unresolved
+            # tracker tool" doesn't get flagged as an unresolved issue.
+            unresolved = [
+                line.strip()
+                for line in text.splitlines()
+                if re.search(r"\b(?:UNRESOLVED|TODO|FIXME|XXX)\b", line, re.IGNORECASE)
+            ]
             evidence = [line.strip() for line in text.splitlines() if line.strip().startswith("$ ")]
 
         return WorkerResult(
@@ -460,17 +476,19 @@ class SubagentTaskManager:
         return sections
 
     def _build_verification_prompt(self, task: BaseTask, worker_result: WorkerResult) -> str:
+        files = worker_result.filesChanged or []
+        commands = worker_result.commandsExecuted or []
         return (
             "ORIGINAL USER REQUEST:\n"
             f"{task.prompt}\n\n"
             "WORKER SUMMARY:\n"
-            f"{worker_result.summary}\n\n"
+            f"{worker_result.summary or ''}\n\n"
             "FILES CHANGED:\n"
-            + "\n".join(worker_result.filesChanged)
+            + ("\n".join(files) if files else "(none reported)")
             + "\n\n"
             "COMMANDS ALREADY RUN:\n"
-            + "\n".join(worker_result.commandsExecuted)
+            + ("\n".join(commands) if commands else "(none reported)")
             + "\n\n"
             "CLAIMS TO VERIFY:\n"
-            + worker_result.result
+            + (worker_result.result or "(no result text provided)")
         )

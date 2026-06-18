@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from typing import Literal
 
 from internal.core.agents.agent_types import SpawnVerificationInput, SpawnWorkerInput
 from internal.core.tasks.task_types import (
@@ -91,7 +92,10 @@ def _build_stuck_report(todos: list[CoordinatorTodo], reason: str) -> str:
     return "\n".join(lines)
 
 
-def _build_aggregate_worker_result(todos: list[CoordinatorTodo]) -> WorkerResult:
+def _build_aggregate_worker_result(
+    todos: list[CoordinatorTodo],
+    worker_results: dict[str, WorkerResult] | None = None,
+) -> WorkerResult:
     completed = [todo for todo in todos if todo.status == "completed"]
     summary = completed[-1].title if completed else "coordinator-run"
     result_lines: list[str] = []
@@ -99,19 +103,35 @@ def _build_aggregate_worker_result(todos: list[CoordinatorTodo]) -> WorkerResult
     commands: list[str] = []
     evidence: list[str] = []
     unresolved: list[str] = []
+    worker_results = worker_results or {}
 
     for todo in completed:
         if todo.result.strip():
             result_lines.append(f"[{todo.id}] {todo.result.strip()}")
         _merge_unique(evidence, todo.evidence)
+        wr = worker_results.get(todo.id)
+        if wr is not None:
+            _merge_unique(files_changed, wr.filesChanged or [])
+            _merge_unique(commands, wr.commandsExecuted or [])
 
     for todo in todos:
         if todo.status in {"blocked", "failed", "impossible"}:
             unresolved.append(f"{todo.id}: {todo.blockingReason or todo.notes or todo.title}")
 
+    has_completed = bool(completed)
+    has_failed = any(todo.status in {"blocked", "failed", "impossible"} for todo in todos)
+    aggregate_status: Literal["completed", "failed", "killed"]
+    if has_completed and not has_failed:
+        aggregate_status = "completed"
+    elif has_completed:
+        # Mixed outcome: report completion but with unresolved issues populated.
+        aggregate_status = "completed"
+    else:
+        aggregate_status = "failed"
+
     return WorkerResult(
         taskId="coordinator-run",
-        status="completed",
+        status=aggregate_status,
         summary=summary,
         result="\n".join(result_lines).strip() or summary,
         filesChanged=files_changed,
@@ -176,6 +196,7 @@ async def run_coordinator_turn(
 ) -> str:
     todos: list[CoordinatorTodo] = []
     todo_plans: dict[str, CoordinatorPlan] = {}
+    todo_worker_results: dict[str, WorkerResult] = {}
     loop_count = 0
     stuck_turns = 0
     validation_failures = 0
@@ -236,6 +257,7 @@ async def run_coordinator_turn(
                 worker_result = await spawn_worker(plan.workerSpec)
                 next_todo.result = worker_result.result
                 _merge_unique(next_todo.evidence, worker_result.evidence)
+                todo_worker_results[next_todo.id] = worker_result
 
                 if worker_result.status == "completed" and not worker_result.unresolvedIssues:
                     next_todo.status = "completed"
@@ -267,7 +289,7 @@ async def run_coordinator_turn(
             _emit_todo_snapshot("blocked", todos, on_todo_update)
             return _build_stuck_report(todos, "todos unresolved but no runnable task found")
 
-        aggregate_worker = _build_aggregate_worker_result(todos)
+        aggregate_worker = _build_aggregate_worker_result(todos, todo_worker_results)
         completed_todo_ids = {todo.id for todo in todos if todo.status == "completed"}
         has_executed_worker_todo = any(
             todo_id in completed_todo_ids and plan.type == "spawn-worker"

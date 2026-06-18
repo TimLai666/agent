@@ -66,8 +66,23 @@ class ImagePathStreamNormalizer:
         if len(self._buffer) <= self._keep_tail:
             return ""
 
-        emit = self._buffer[:-self._keep_tail]
-        self._buffer = self._buffer[-self._keep_tail :]
+        # Don't split inside an in-progress markdown image. If the last `![`
+        # in the buffer hasn't been closed by `)`, hold everything from that
+        # `![` until flush so we never emit a half-formed image.
+        cut_index = len(self._buffer) - self._keep_tail
+        last_open = self._buffer.rfind("![", 0, len(self._buffer))
+        if last_open >= 0:
+            close_after = self._buffer.find(")", last_open)
+            if close_after == -1 or close_after >= cut_index:
+                # Image starts before the cut and is not yet closed in the prefix —
+                # back the cut up to the start of the image so the regex sees it whole.
+                cut_index = min(cut_index, last_open)
+
+        if cut_index <= 0:
+            return ""
+
+        emit = self._buffer[:cut_index]
+        self._buffer = self._buffer[cut_index:]
         return enforce_absolute_image_paths(emit, self._base_dir)
 
     def flush(self) -> str:

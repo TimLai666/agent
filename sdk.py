@@ -159,62 +159,71 @@ class Agent:
         if self._main_agent is not None:
             return
 
+        # If a previous start() partially initialised state and then raised, an
+        # http_client is still alive — close it before allocating a new one to
+        # avoid leaking an httpx connection pool.
+        if self._http_client is not None:
+            try:
+                await self._http_client.aclose()
+            except Exception:
+                pass
+            self._http_client = None
+
         self._http_client = AsyncClient(verify=False)
-        base_config = load_base_config()
-        model_override, temperature = self._create_model_override()
+        try:
+            base_config = load_base_config()
+            model_override, temperature = self._create_model_override()
 
-        if self.model is not None:
-            base_config = AgentConfig(
-                name="base",
-                base_url=self.model.base_url,
-                api_key=self.model.api_key,
-                model_name=self.model.model_name,
-                temperature=self.model.temperature,
+            if self.model is not None:
+                base_config = AgentConfig(
+                    name="base",
+                    base_url=self.model.base_url,
+                    api_key=self.model.api_key,
+                    model_name=self.model.model_name,
+                    temperature=self.model.temperature,
+                )
+
+            self._main_agent = MainAgent.create(
+                base_config,
+                self._http_client,
+                skill_root_dirs=self.skill_root_dirs,
+                additional_system_prompts=self.additional_system_prompts,
+                auto_load_all_prompts=self.auto_load_all_prompts,
+                system_name=self.system_name,
+                system_prompt_override=self.system_prompt_override,
+                system_prompt_append=self.system_prompt_append,
+                model_override=model_override,
+                model_temperature=temperature,
+                mcp_servers_override=self.mcp_servers,
+                use_default_tools=self.use_default_tools,
+                extra_tools=self.extra_tools,
+                include_skill_tool=self.include_skill_tool,
+                include_subagent_tools=self.include_subagent_tools,
+                memory_manager=self._memory_manager,
+                conversation_history_store=self._conversation_history_store,
+                disabled_skills=self.disabled_skills,
+                extra_mcp_servers=self.extra_mcp_servers,
+                runtime_mode="sdk",
             )
-
-        self._main_agent = MainAgent.create(
-            base_config,
-            self._http_client,
-            skill_root_dirs=self.skill_root_dirs,
-            additional_system_prompts=self.additional_system_prompts,
-            auto_load_all_prompts=self.auto_load_all_prompts,
-            system_name=self.system_name,
-            system_prompt_override=self.system_prompt_override,
-            system_prompt_append=self.system_prompt_append,
-            model_override=model_override,
-            model_temperature=temperature,
-            mcp_servers_override=self.mcp_servers,
-            use_default_tools=self.use_default_tools,
-            extra_tools=self.extra_tools,
-            include_skill_tool=self.include_skill_tool,
-            include_subagent_tools=self.include_subagent_tools,
-            memory_manager=self._memory_manager,
-            conversation_history_store=self._conversation_history_store,
-            disabled_skills=self.disabled_skills,
-            extra_mcp_servers=self.extra_mcp_servers,
-            runtime_mode="sdk",
-        )
+        except Exception:
+            # Rewind the partial state so the next start() begins clean.
+            try:
+                await self._http_client.aclose()
+            except Exception:
+                pass
+            self._http_client = None
+            self._main_agent = None
+            raise
 
         if self.start_mcp_servers:
             self._mcp_stack = AsyncExitStack()
-            try:
-                await self._mcp_stack.enter_async_context(
-                    self._main_agent.agent.run_mcp_servers()
-                )
-            except Exception as exc:
-                reason = self._summarize_exception(exc)
+            mcp_started = await self._mcp_stack.enter_async_context(
+                self._main_agent.mcp_lifespan()
+            )
+            if not mcp_started:
                 logger.warning(
-                    "MCP servers failed to start in programmatic Agent; continuing without MCP. Root cause: %s",
-                    reason,
+                    "MCP servers failed to start in programmatic Agent; continuing without MCP."
                 )
-                # Tear down whatever was partially entered, then drop the stack
-                # so close() won't double-aclose.
-                try:
-                    await self._mcp_stack.aclose()
-                except Exception:
-                    pass
-                self._mcp_stack = None
-                self._main_agent.agent._user_toolsets = []
 
     async def close(self) -> None:
         if self._mcp_stack is not None:
@@ -266,7 +275,18 @@ class Agent:
         prompt: str,
         message_history: list[ModelRequest | ModelResponse] | None = None,
     ) -> str:
-        return asyncio.run(self.run(prompt, message_history=message_history))
+        async def _go() -> str:
+            try:
+                return await self.run(prompt, message_history=message_history)
+            finally:
+                # Each asyncio.run() call creates a fresh loop and closes it on
+                # exit. Anything we instantiated inside this run (HTTP client,
+                # MCP exit stack) is bound to that loop, so we must tear it
+                # down here — otherwise a second run_sync() call hits
+                # "Event loop is closed" on the leftover objects.
+                await self.close()
+
+        return asyncio.run(_go())
 
     def run_stream_sync(
         self,
@@ -276,10 +296,13 @@ class Agent:
     ) -> str:
         async def _consume() -> str:
             chunks: list[str] = []
-            async for chunk in self.run_stream(prompt, message_history=message_history):
-                chunks.append(chunk)
-                on_chunk(chunk)
-            return "".join(chunks)
+            try:
+                async for chunk in self.run_stream(prompt, message_history=message_history):
+                    chunks.append(chunk)
+                    on_chunk(chunk)
+                return "".join(chunks)
+            finally:
+                await self.close()
 
         return asyncio.run(_consume())
 

@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import re
+import uuid
+from collections import deque
 from dataclasses import dataclass, replace
+from functools import lru_cache
 from datetime import datetime
 from typing import Any, Awaitable, Callable, Literal
 
@@ -216,7 +220,12 @@ CompactionRunner = Callable[[CompactJob, str], Awaitable[str]]
 def estimate_tokens(text: str) -> int:
     if not text:
         return 0
-    return max(1, len(text) // 4)
+    # encode('ascii','ignore') drops non-ASCII bytes via C-level loop — much
+    # faster than a Python for-loop over chars. The remaining byte count is
+    # the ASCII character count; the difference gives non-ASCII (CJK etc.).
+    ascii_chars = len(text.encode("ascii", "ignore"))
+    other_chars = len(text) - ascii_chars
+    return max(1, ascii_chars // 4 + other_chars)
 
 
 def trim_text_to_token_budget(text: str, token_budget: int) -> str:
@@ -239,6 +248,7 @@ def should_compact(total_tokens: int) -> bool:
     return total_tokens >= int(MAX_CONTEXT_TOKENS * COMPACT_TRIGGER_RATIO)
 
 
+@lru_cache(maxsize=32)
 def get_compaction_prompt(mode: CompactMode, custom_instructions: str | None = None) -> str:
     prompt_map: dict[CompactMode, str] = {
         "base": BASE_COMPACT_PROMPT,
@@ -251,6 +261,22 @@ def get_compaction_prompt(mode: CompactMode, custom_instructions: str | None = N
     return prompt
 
 
+def _stringify_part_content_item(item: Any) -> str:
+    """Render a single content item without exploding on binary blobs."""
+    if isinstance(item, str):
+        return item
+    media_type = getattr(item, "media_type", None)
+    if media_type:
+        kind = "image" if str(media_type).startswith("image/") else "binary"
+        return f"[{kind}: {media_type}]"
+    if hasattr(item, "url"):
+        return f"[url: {getattr(item, 'url', '')}]"
+    # Fallback: a short repr instead of str(item) to avoid mega-byte object
+    # reprs from BinaryContent dominating token counts.
+    text = repr(item)
+    return text if len(text) <= 200 else text[:200] + "..."
+
+
 def get_message_text(message: MessageLike) -> str:
     chunks: list[str] = []
     for part in getattr(message, "parts", []) or []:
@@ -259,15 +285,12 @@ def get_message_text(message: MessageLike) -> str:
         if isinstance(content, str):
             value = content
         elif isinstance(content, (list, tuple)):
-            values: list[str] = []
-            for item in content:
-                if isinstance(item, str):
-                    values.append(item)
-                else:
-                    values.append(str(item))
+            values = [_stringify_part_content_item(item) for item in content]
             value = "\n".join(values)
+        elif content is None:
+            value = ""
         else:
-            value = str(part)
+            value = _stringify_part_content_item(content)
         chunks.append(f"[{part_kind}] {value}".strip())
     return "\n".join(c for c in chunks if c.strip())
 
@@ -461,6 +484,11 @@ class CompactCoordinator:
     ) -> None:
         self._runner = runner
         self._recent_keep_count = recent_keep_count
+        # Serialise concurrent maybeCompact calls. Without a lock two near-
+        # simultaneous calls produce identical jobIds (datetime.timestamp()
+        # collisions on Windows where time.time() resolution is ~15ms) and
+        # both replace state.
+        self._lock = asyncio.Lock()
 
     async def runCompact(self, job: CompactJob) -> CompactSummary:
         attempts = [
@@ -491,43 +519,57 @@ class CompactCoordinator:
             raise RuntimeError("Compaction failed: runner error") from last_error
         raise RuntimeError("Compaction failed: empty formatted summary")
 
+    # Role labels mirror serialize_compaction_input's ROLE_LABELS dict.
+    _ROLE_LABELS: dict[str, str] = {
+        "user": "USER",
+        "assistant": "ASSISTANT",
+        "tool": "TOOL RESULT",
+        "system": "SYSTEM",
+    }
+
     def _fit_job_to_input_budget(self, job: CompactJob) -> CompactJob:
         old_summary = trim_text_to_token_budget(
             job.oldSummary.strip(),
             COMPACTION_OLD_SUMMARY_TOKEN_BUDGET,
         )
-        selected: list[Message] = []
+
+        # Compute base job tokens once (empty message list) so we can add each
+        # message's contribution incrementally — O(n) instead of O(n²).
+        base_job = CompactJob(
+            jobId=job.jobId,
+            mode=job.mode,
+            oldSummary=old_summary,
+            messagesToCompress=[],
+            preservedRecentMessages=job.preservedRecentMessages,
+            suppressFollowUpQuestions=job.suppressFollowUpQuestions,
+        )
+        running_tokens = estimate_tokens(serialize_compaction_input(base_job))
+
+        selected: deque[Message] = deque()
 
         for message in reversed(job.messagesToCompress):
-            candidate = [message, *selected]
-            candidate_job = CompactJob(
-                jobId=job.jobId,
-                mode=job.mode,
-                oldSummary=old_summary,
-                messagesToCompress=candidate,
-                preservedRecentMessages=job.preservedRecentMessages,
-                suppressFollowUpQuestions=job.suppressFollowUpQuestions,
-            )
-            candidate_tokens = estimate_tokens(serialize_compaction_input(candidate_job))
-            if candidate_tokens <= COMPACTION_INPUT_TOKEN_BUDGET:
-                selected = candidate
-                continue
-
-            if not selected:
-                truncated = trim_text_to_token_budget(
-                    message.content,
-                    max(256, COMPACTION_INPUT_TOKEN_BUDGET // 2),
-                )
-                selected = [
-                    Message(
-                        id=message.id,
-                        role=message.role,
-                        content=truncated,
-                        tokenCount=estimate_tokens(truncated),
-                        createdAt=message.createdAt,
+            label = self._ROLE_LABELS.get(message.role, message.role.upper())
+            # Each message serialises as "[LABEL]\n{content}" plus a "\n\n" separator.
+            msg_tokens = estimate_tokens(f"[{label}]\n{message.content.strip()}") + 1
+            if running_tokens + msg_tokens <= COMPACTION_INPUT_TOKEN_BUDGET:
+                selected.appendleft(message)
+                running_tokens += msg_tokens
+            else:
+                if not selected:
+                    truncated = trim_text_to_token_budget(
+                        message.content,
+                        max(256, COMPACTION_INPUT_TOKEN_BUDGET // 2),
                     )
-                ]
-            break
+                    selected.appendleft(
+                        Message(
+                            id=message.id,
+                            role=message.role,
+                            content=truncated,
+                            tokenCount=estimate_tokens(truncated),
+                            createdAt=message.createdAt,
+                        )
+                    )
+                break
 
         if not selected and job.messagesToCompress:
             last = job.messagesToCompress[-1]
@@ -535,7 +577,7 @@ class CompactCoordinator:
                 last.content,
                 max(256, COMPACTION_INPUT_TOKEN_BUDGET // 2),
             )
-            selected = [
+            selected.appendleft(
                 Message(
                     id=last.id,
                     role=last.role,
@@ -543,13 +585,13 @@ class CompactCoordinator:
                     tokenCount=estimate_tokens(truncated),
                     createdAt=last.createdAt,
                 )
-            ]
+            )
 
         return CompactJob(
             jobId=job.jobId,
             mode=job.mode,
             oldSummary=old_summary,
-            messagesToCompress=selected,
+            messagesToCompress=list(selected),
             preservedRecentMessages=job.preservedRecentMessages,
             suppressFollowUpQuestions=job.suppressFollowUpQuestions,
         )
@@ -577,9 +619,22 @@ class CompactCoordinator:
         return get_compact_user_summary_message(**args)
 
     async def maybeCompact(self, state: ConversationState) -> ConversationState:
+        async with self._lock:
+            return await self._maybeCompactLocked(state)
+
+    async def _maybeCompactLocked(self, state: ConversationState) -> ConversationState:
         if not should_compact(state.totalTokens):
-            state.recentMessages = list(state.fullMessages[-self._recent_keep_count :])
-            return state
+            # Always return a fresh ConversationState so the caller's reference
+            # isn't mutated under their feet — the compact path also returns
+            # new instances, so be consistent across both branches.
+            return ConversationState(
+                fullMessages=state.fullMessages,
+                compressedSummary=state.compressedSummary,
+                recentMessages=list(state.fullMessages[-self._recent_keep_count :]),
+                transcriptPath=state.transcriptPath,
+                totalTokens=state.totalTokens,
+                lastCompactedMessageId=state.lastCompactedMessageId,
+            )
 
         slim_full_messages = compact_tool_output_history(state.fullMessages)
         if slim_full_messages != state.fullMessages:
@@ -613,12 +668,17 @@ class CompactCoordinator:
                 keep_count=fallback_keep,
             )
         if not messages_to_compress:
-            state.recentMessages = preserved_recent_messages
-            state.totalTokens = recalc_total_tokens(state.fullMessages)
-            return state
+            return ConversationState(
+                fullMessages=state.fullMessages,
+                compressedSummary=state.compressedSummary,
+                recentMessages=preserved_recent_messages,
+                transcriptPath=state.transcriptPath,
+                totalTokens=recalc_total_tokens(state.fullMessages),
+                lastCompactedMessageId=state.lastCompactedMessageId,
+            )
 
         job = CompactJob(
-            jobId=f"compact-{datetime.now().timestamp()}",
+            jobId=f"compact-{uuid.uuid4()}",
             mode="base",
             oldSummary=state.compressedSummary or "",
             messagesToCompress=messages_to_compress,

@@ -20,9 +20,15 @@ def add_memory_tools(agent: Agent, memory_manager: MemoryManager) -> None:
         Args:
             file_name: One of ME.md, USER.md, TOOLS.md, MEMORY.md, TODO.md
         """
-        content = memory_manager.read_file(file_name)
+        # Validate first so an unknown name surfaces an error rather than a
+        # misleading "(empty)" message.
+        try:
+            canonical = memory_manager._validate_name(file_name)  # noqa: SLF001
+        except ValueError as exc:
+            return f"Error: {exc}"
+        content = memory_manager.read_file(canonical)
         if not content:
-            return f"(empty — {file_name} has no content yet)"
+            return f"(empty — {canonical} has no content yet)"
         return content
 
     @agent.tool_plain

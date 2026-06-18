@@ -1,3 +1,4 @@
+import asyncio
 import functools
 import inspect
 import json
@@ -5,6 +6,7 @@ import re
 import sys
 import uuid
 from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -34,7 +36,7 @@ from internal.services.agent_factory import (
     create_openai_model,
     load_agent_config_chain,
 )
-from internal.services.config_manager import create_model_for_agent
+from internal.services.config_manager import create_model_for_agent, get_model_config
 from internal.services.subagent_tasks import (
     AgentToolInput,
     SendMessageToolInput,
@@ -219,19 +221,19 @@ class MainAgent:
             additional_prompts = list_available_system_prompts()
             logger.info("Auto-loading %d system prompts", len(additional_prompts))
 
-        active_model = model_name or "unknown"
+        # NOTE: Active model name is intentionally NOT baked into the static
+        # system prompt. It is injected per-turn (see `_inject_active_model`)
+        # so that hot-reloading the model config takes effect immediately,
+        # without rebuilding the system prompt.
+        _ = model_name  # accepted for backward compat; no longer used here
 
         environment_context = build_environment_context()
         runtime_info = f"""
-    # Model Information
-
-- **Active Model**: {active_model}
-
     # Runtime Environment
 
     {environment_context}
 
-**IMPORTANT**: Each user turn includes an auto-injected local timestamp. Use that timestamp as the primary time reference for the current reply.
+**IMPORTANT**: Each user turn includes an auto-injected local timestamp and the active model name. Use that timestamp as the primary time reference for the current reply.
 """
 
         base_prompt = (system_prompt_override or SYSTEM_PROMPT).strip()
@@ -532,6 +534,21 @@ class MainAgent:
         self._previous_user_prompt: str | None = None
         self._last_assistant_reply: str | None = None
         self._http_client = http_client  # 保存以便重載 model
+        self._model_reload_signature: tuple | None = None  # detect actual config drift
+        # Active model name for per-turn prompt injection. Updated whenever
+        # _reload_model_from_db swaps the underlying model so the agent always
+        # sees the live model name without rebuilding the static system prompt.
+        self._active_model_name: str | None = None
+        # MCP lifecycle is owned by MainAgent so that reload_mcp_servers can
+        # tear down and re-enter the agent context without breaking the outer
+        # caller's session-scoped lifespan. _mcp_main_loop is captured on the
+        # first start so cross-thread reload requests (e.g. from the Flask
+        # WebUI) can dispatch coroutines back to the agent's event loop.
+        self._mcp_running: bool = False
+        self._mcp_main_loop: asyncio.AbstractEventLoop | None = None
+        # Serialise turn execution so two concurrent submits don't interleave
+        # writes to _last_messages / _last_assistant_reply / agent._model.
+        self._turn_lock = asyncio.Lock()
         self.skill_root_dirs = list(skill_root_dirs or [])
         self._session_id = str(uuid.uuid4())
         self._task_notifications: list[str] = []
@@ -917,7 +934,11 @@ class MainAgent:
 
         subagent_type = self._resolve_subagent_type(getattr(task, "subagentType", None))
         mode = getattr(task, "mode", "spawn")
-        enable_tools = subagent_type not in {"compaction", "verification"}
+        # Compaction is text-only by design. Verification still needs to run
+        # commands and read files to gather evidence — without tools it can
+        # only fabricate verdicts. The verification system prompt explicitly
+        # forbids writes, so we trust the prompt-level constraint there.
+        enable_tools = subagent_type != "compaction"
 
         if mode == "fork":
             model = getattr(self.agent, "_model", None) or getattr(self.agent, "model", None)
@@ -1049,12 +1070,34 @@ class MainAgent:
         return self._orchestration_store
 
     def _reload_model_from_db(self) -> None:
-        """Pick up any model config changes made via the UI since the last call."""
+        """Pick up any model config changes made via the UI since the last call.
+
+        Skip the swap when the resolved config is identical to what we already
+        installed — the assignment to `agent._model` mutates a private attribute
+        of the running pydantic_ai Agent and we want to do it as rarely as
+        possible. Temperature lives in the public `agent.model_settings` and is
+        synced alongside the model so UI changes to either take effect on the
+        next turn without a restart.
+        """
         if not self._http_client:
             logger.warning("無法重載 model：沒有 http_client")
             return
 
         try:
+            resolved = get_model_config("main")
+            if resolved is None:
+                logger.warning("model reload: no resolved config; keeping previous model")
+                return
+
+            new_signature = (
+                resolved.provider_type,
+                resolved.base_url,
+                resolved.model_name,
+                resolved.temperature,
+            )
+            if new_signature == self._model_reload_signature:
+                return
+
             config = AgentConfig(
                 name="main",
                 base_url=None,
@@ -1063,12 +1106,147 @@ class MainAgent:
                 temperature=0.5,
             )
             new_model = create_openai_model(config, self._http_client)
+            if new_model is None:
+                logger.warning("model reload returned None; keeping previous model")
+                return
 
             self.agent._model = new_model
-            
-            logger.debug("已從資料庫重載 model 配置")
+            current_settings = dict(self.agent.model_settings or {})
+            current_settings["temperature"] = resolved.temperature
+            self.agent.model_settings = current_settings
+            self._model_reload_signature = new_signature
+            self._active_model_name = resolved.model_name
+            logger.debug(
+                "已從資料庫重載 model 配置: %s @ temp=%s",
+                resolved.model_name,
+                resolved.temperature,
+            )
         except Exception:
             logger.exception("重載 model 配置失敗，繼續使用現有配置")
+
+    async def start_mcp_servers(self) -> bool:
+        """Enter the agent context to bring up MCP servers. Idempotent.
+
+        Returns True on success (or if already running), False if MCP could
+        not start. On failure the agent's user toolsets are cleared so the
+        agent stays usable without MCP.
+        """
+        if self._mcp_running:
+            return True
+        try:
+            self._mcp_main_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self._mcp_main_loop = None
+        try:
+            await self.agent.__aenter__()
+            self._mcp_running = True
+            return True
+        except Exception:
+            logger.exception("Failed to start MCP servers")
+            try:
+                self.agent._user_toolsets = []
+            except Exception:
+                logger.debug("Failed to clear MCP toolsets after start failure", exc_info=True)
+            return False
+
+    async def stop_mcp_servers(self) -> None:
+        """Exit the agent context to shut MCP servers down. Idempotent."""
+        if not self._mcp_running:
+            return
+        try:
+            await self.agent.__aexit__(None, None, None)
+        except Exception:
+            logger.exception("Failed to stop MCP servers cleanly")
+        finally:
+            self._mcp_running = False
+
+    @asynccontextmanager
+    async def mcp_lifespan(self) -> AsyncIterator[bool]:
+        """Async context manager that starts/stops MCP servers around a session.
+
+        Yields True if MCP successfully started, False otherwise. Callers
+        should treat False the same way as the previous fallback path —
+        continue running but without MCP toolsets.
+        """
+        ok = await self.start_mcp_servers()
+        try:
+            yield ok
+        finally:
+            await self.stop_mcp_servers()
+
+    async def reload_mcp_servers_async(self) -> dict[str, object]:
+        """Tear down current MCP toolsets, rebuild from DB, restart.
+
+        Serialises against in-flight turns via ``_turn_lock`` so the agent
+        never observes a toolset swap mid-call. If MCP wasn't running before
+        the reload we still rebuild the toolset list but don't enter the
+        context — a later ``start_mcp_servers`` call will pick it up.
+        """
+        async with self._turn_lock:
+            was_running = self._mcp_running
+            if was_running:
+                await self.stop_mcp_servers()
+            try:
+                new_servers = list(get_all_mcp_servers())
+            except Exception as exc:
+                logger.exception("Failed to rebuild MCP server list during reload")
+                return {"success": False, "message": f"重建 MCP 失敗：{exc}"}
+            try:
+                self.agent._user_toolsets = new_servers
+            except Exception as exc:
+                logger.exception("Failed to assign MCP toolsets during reload")
+                return {"success": False, "message": f"指派 MCP toolsets 失敗：{exc}"}
+            if was_running:
+                started = await self.start_mcp_servers()
+                if not started:
+                    return {
+                        "success": False,
+                        "count": 0,
+                        "message": "啟動新 MCP 失敗，已清空 toolsets",
+                    }
+            return {
+                "success": True,
+                "count": len(new_servers),
+                "message": f"MCP 已重新載入（{len(new_servers)} 個）",
+            }
+
+    def reload_mcp_servers_threadsafe(self) -> dict[str, object]:
+        """Sync entry point for callers on a different thread (e.g. Flask).
+
+        Schedules the async reload on the agent's event loop and returns
+        immediately. The reload runs in the background and will block until
+        any in-flight turn finishes (because it acquires ``_turn_lock``);
+        callers should NOT wait on the result, otherwise long turns would
+        freeze the calling thread (and any UI driving it).
+        """
+        loop = self._mcp_main_loop
+        if loop is None or not loop.is_running():
+            return {
+                "success": False,
+                "scheduled": False,
+                "message": "Agent 主事件迴圈尚未啟動，無法重載 MCP",
+            }
+
+        async def _runner() -> None:
+            try:
+                result = await self.reload_mcp_servers_async()
+                if not result.get("success"):
+                    logger.warning("Background MCP reload reported failure: %s", result)
+                else:
+                    logger.info("Background MCP reload finished: %s", result)
+            except Exception:
+                logger.exception("Background MCP reload crashed")
+
+        try:
+            asyncio.run_coroutine_threadsafe(_runner(), loop)
+            return {
+                "success": True,
+                "scheduled": True,
+                "message": "MCP 重載已在背景排程",
+            }
+        except Exception as exc:
+            logger.exception("MCP reload threadsafe dispatch failed")
+            return {"success": False, "scheduled": False, "message": str(exc)}
 
     def _extract_user_reply(self, output: str | None) -> str | None:
         if not output:
@@ -1159,6 +1337,23 @@ class MainAgent:
             return prompt
         return f"{block}\n\n{prompt}"
 
+    def _inject_active_model(self, prompt: str) -> str:
+        """Inject the currently-active model name so the agent always sees the
+        live value after a config hot-reload (rather than the value baked at
+        startup time)."""
+        model_obj = getattr(self.agent, "_model", None)
+        active_model = (
+            self._active_model_name
+            or getattr(model_obj, "model_name", None)
+            or getattr(model_obj, "model", None)
+            or "unknown"
+        )
+        return (
+            "[ACTIVE_MODEL_FOR_THIS_USER_TURN]\n"
+            f"- model: {active_model}\n\n"
+            f"{prompt}"
+        )
+
     def _inject_local_timestamp(self, prompt: str) -> str:
         """Inject per-turn local timestamp into user prompt context."""
         dt = datetime.now().astimezone()
@@ -1188,8 +1383,11 @@ class MainAgent:
             if isinstance(part, str):
                 total += estimate_tokens(part)
             else:
-                # Non-text content (image/url/binary) still consumes request budget.
-                total += 512
+                # Non-text content (image/url/binary) consumes request budget.
+                # 512 dramatically under-counts: a single 4K image is typically
+                # 1500–8000 tokens on OpenAI / Anthropic. Using 2000 keeps the
+                # history-trim conservative without being wildly pessimistic.
+                total += 2000
         return total
 
     def _trim_message_history_for_budget(
@@ -1597,6 +1795,14 @@ class MainAgent:
         skip_plan_execution: bool = True,
     ) -> str:
         _ = skip_plan_execution  # backward compatibility
+        async with self._turn_lock:
+            return await self._execute_turn_core_locked(prompt, message_history)
+
+    async def _execute_turn_core_locked(
+        self,
+        prompt: str,
+        message_history: list[ModelRequest | ModelResponse] | None,
+    ) -> str:
         self._reload_model_from_db()
 
         original_prompt = prompt
@@ -1604,10 +1810,14 @@ class MainAgent:
         self._last_user_prompt = prompt
         prompt = self._inject_task_notifications(prompt)
         prompt = self._inject_todo_snapshot(prompt)
+        prompt = self._inject_active_model(prompt)
         prompt = self._inject_local_timestamp(prompt)
         prompt = self._inject_memory(prompt)
         user_content, _ = self._build_user_prompt_content(prompt)
         safe_history = self._trim_message_history_for_budget(message_history, user_content)
+        # Track whichever history shape we last used for a turn so the
+        # error-context fallback below doesn't reuse a too-large history.
+        history_in_use = safe_history
 
         try:
             result = await self.agent.run(user_content, message_history=safe_history)
@@ -1636,6 +1846,10 @@ class MainAgent:
                         return output_text
                     except Exception as retry_exc:
                         e = retry_exc
+                        # On overflow we already proved the trimmed history
+                        # works — keep it for the error-context fallback so
+                        # we don't immediately re-overflow there.
+                        history_in_use = retry_history
 
             error_msg = str(e)
             logger.warning("Tool execution error in agent.run(): %s", error_msg)
@@ -1651,7 +1865,7 @@ class MainAgent:
                     user_content, error_context
                 )
                 result = await self.agent.run(
-                    user_content_with_error, message_history=safe_history
+                    user_content_with_error, message_history=history_in_use
                 )
                 output_text = enforce_absolute_image_paths(result.output or "")
                 try:
@@ -1697,114 +1911,127 @@ class MainAgent:
         skip_plan_execution: bool = True,
     ):
         _ = skip_plan_execution  # backward compatibility
-        self._reload_model_from_db()
-
-        original_prompt = prompt
-        self._previous_user_prompt = self._last_user_prompt
-        self._last_user_prompt = prompt
-        prompt = self._inject_task_notifications(prompt)
-        prompt = self._inject_todo_snapshot(prompt)
-        prompt = self._inject_local_timestamp(prompt)
-        prompt = self._inject_memory(prompt)
-        user_content, _ = self._build_user_prompt_content(prompt)
-        safe_history = self._trim_message_history_for_budget(message_history, user_content)
-
+        # Acquire the turn lock for the whole stream so concurrent turns don't
+        # interleave model swaps or _last_messages writes. The try/finally
+        # release runs even if the consumer aborts iteration (.aclose()
+        # raises GeneratorExit inside the generator).
+        await self._turn_lock.acquire()
         try:
-            async with self.agent.run_stream(
-                user_prompt=user_content, message_history=safe_history
-            ) as result:
-                collected = ""
-                normalizer = ImagePathStreamNormalizer()
-                try:
-                    async for chunk in result.stream_text(delta=True):
-                        if not chunk:
-                            continue
-                        normalized_chunk = normalizer.feed(chunk)
-                        if normalized_chunk:
-                            collected += normalized_chunk
-                            yield normalized_chunk
-                    tail = normalizer.flush()
-                    if tail:
-                        collected += tail
-                        yield tail
-                except Exception as stream_error:
-                    error_msg = str(stream_error)
-                    logger.warning("Tool execution error during streaming: %s", error_msg)
-                    yield (
-                        f"\n\n[System Note: A tool execution error occurred: {error_msg}. "
-                        "Please provide a helpful response explaining the service is temporarily unavailable.]"
-                    )
+            self._reload_model_from_db()
 
-                try:
-                    self._last_messages = result.all_messages()
-                except Exception:
-                    self._last_messages = None
-                self._last_assistant_reply = self._extract_user_reply(collected)
-                self._record_conversation_turn(original_prompt, collected)
-        except Exception as e:
-            if self._is_context_overflow_error(e):
-                retry_history = self._overflow_retry_history(safe_history)
-                if retry_history is not safe_history:
-                    try:
-                        async with self.agent.run_stream(
-                            user_prompt=user_content, message_history=retry_history
-                        ) as result:
-                            collected = ""
-                            normalizer = ImagePathStreamNormalizer()
-                            async for chunk in result.stream_text(delta=True):
-                                if not chunk:
-                                    continue
-                                normalized_chunk = normalizer.feed(chunk)
-                                if normalized_chunk:
-                                    collected += normalized_chunk
-                                    yield normalized_chunk
-                            tail = normalizer.flush()
-                            if tail:
-                                collected += tail
-                                yield tail
-                            try:
-                                self._last_messages = result.all_messages()
-                            except Exception:
-                                self._last_messages = None
-                            self._last_assistant_reply = self._extract_user_reply(collected)
-                            self._record_conversation_turn(original_prompt, collected)
-                            return
-                    except Exception as retry_exc:
-                        e = retry_exc
+            original_prompt = prompt
+            self._previous_user_prompt = self._last_user_prompt
+            self._last_user_prompt = prompt
+            prompt = self._inject_task_notifications(prompt)
+            prompt = self._inject_todo_snapshot(prompt)
+            prompt = self._inject_active_model(prompt)
+            prompt = self._inject_local_timestamp(prompt)
+            prompt = self._inject_memory(prompt)
+            user_content, _ = self._build_user_prompt_content(prompt)
+            safe_history = self._trim_message_history_for_budget(message_history, user_content)
+            # Track which history shape we last used so the error-context
+            # fallback doesn't reuse a too-large history after an overflow.
+            history_in_use = safe_history
 
-            error_msg = str(e)
-            logger.warning("Error in agent.run_stream(): %s", error_msg)
-
-            error_context = (
-                f"\n\nTool execution error:\n{error_msg}\n\n"
-                "Please provide a helpful response to the user explaining that the external service "
-                "is temporarily unavailable and suggest alternatives if possible."
-            )
             try:
-                user_content_with_error = self._append_error_to_user_content(
-                    user_content, error_context
-                )
                 async with self.agent.run_stream(
-                    user_prompt=user_content_with_error, message_history=safe_history
+                    user_prompt=user_content, message_history=safe_history
                 ) as result:
                     collected = ""
                     normalizer = ImagePathStreamNormalizer()
-                    async for chunk in result.stream_text(delta=True):
-                        if not chunk:
-                            continue
-                        normalized_chunk = normalizer.feed(chunk)
-                        if normalized_chunk:
-                            collected += normalized_chunk
-                            yield normalized_chunk
-                    tail = normalizer.flush()
-                    if tail:
-                        collected += tail
-                        yield tail
+                    try:
+                        async for chunk in result.stream_text(delta=True):
+                            if not chunk:
+                                continue
+                            normalized_chunk = normalizer.feed(chunk)
+                            if normalized_chunk:
+                                collected += normalized_chunk
+                                yield normalized_chunk
+                        tail = normalizer.flush()
+                        if tail:
+                            collected += tail
+                            yield tail
+                    except Exception as stream_error:
+                        error_msg = str(stream_error)
+                        logger.warning("Tool execution error during streaming: %s", error_msg)
+                        yield (
+                            f"\n\n[System Note: A tool execution error occurred: {error_msg}. "
+                            "Please provide a helpful response explaining the service is temporarily unavailable.]"
+                        )
+
                     try:
                         self._last_messages = result.all_messages()
                     except Exception:
                         self._last_messages = None
                     self._last_assistant_reply = self._extract_user_reply(collected)
                     self._record_conversation_turn(original_prompt, collected)
-            except Exception:
-                yield "抱歉，系統暫時無法處理您的請求。請稍後再試。"
+            except Exception as e:
+                if self._is_context_overflow_error(e):
+                    retry_history = self._overflow_retry_history(safe_history)
+                    if retry_history is not safe_history:
+                        try:
+                            async with self.agent.run_stream(
+                                user_prompt=user_content, message_history=retry_history
+                            ) as result:
+                                collected = ""
+                                normalizer = ImagePathStreamNormalizer()
+                                async for chunk in result.stream_text(delta=True):
+                                    if not chunk:
+                                        continue
+                                    normalized_chunk = normalizer.feed(chunk)
+                                    if normalized_chunk:
+                                        collected += normalized_chunk
+                                        yield normalized_chunk
+                                tail = normalizer.flush()
+                                if tail:
+                                    collected += tail
+                                    yield tail
+                                try:
+                                    self._last_messages = result.all_messages()
+                                except Exception:
+                                    self._last_messages = None
+                                self._last_assistant_reply = self._extract_user_reply(collected)
+                                self._record_conversation_turn(original_prompt, collected)
+                                return
+                        except Exception as retry_exc:
+                            e = retry_exc
+                            history_in_use = retry_history
+
+                error_msg = str(e)
+                logger.warning("Error in agent.run_stream(): %s", error_msg)
+
+                error_context = (
+                    f"\n\nTool execution error:\n{error_msg}\n\n"
+                    "Please provide a helpful response to the user explaining that the external service "
+                    "is temporarily unavailable and suggest alternatives if possible."
+                )
+                try:
+                    user_content_with_error = self._append_error_to_user_content(
+                        user_content, error_context
+                    )
+                    async with self.agent.run_stream(
+                        user_prompt=user_content_with_error, message_history=history_in_use
+                    ) as result:
+                        collected = ""
+                        normalizer = ImagePathStreamNormalizer()
+                        async for chunk in result.stream_text(delta=True):
+                            if not chunk:
+                                continue
+                            normalized_chunk = normalizer.feed(chunk)
+                            if normalized_chunk:
+                                collected += normalized_chunk
+                                yield normalized_chunk
+                        tail = normalizer.flush()
+                        if tail:
+                            collected += tail
+                            yield tail
+                        try:
+                            self._last_messages = result.all_messages()
+                        except Exception:
+                            self._last_messages = None
+                        self._last_assistant_reply = self._extract_user_reply(collected)
+                        self._record_conversation_turn(original_prompt, collected)
+                except Exception:
+                    yield "抱歉，系統暫時無法處理您的請求。請稍後再試。"
+        finally:
+            self._turn_lock.release()

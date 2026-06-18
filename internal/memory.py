@@ -13,6 +13,7 @@ Supported files:
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 MEMORY_FILES = ("ME.md", "USER.md", "TOOLS.md", "MEMORY.md", "TODO.md")
@@ -55,6 +56,8 @@ class MemoryManager:
             self._dir = TIM_AGENT_MEMORY_DIR
 
         self._dir.mkdir(parents=True, exist_ok=True)
+        # Cache: (content_str, max_mtime_float) — invalidated when any file changes.
+        self._context_cache: tuple[str, float] | None = None
 
     @property
     def memory_dir(self) -> Path | None:
@@ -107,6 +110,7 @@ class MemoryManager:
             with _os.fdopen(fd, "w", encoding="utf-8", newline="") as fh:
                 fh.write(content.strip() + "\n")
             _os.replace(tmp_name, path)
+            self._invalidate_context_cache()
         except Exception:
             try:
                 _os.unlink(tmp_name)
@@ -129,9 +133,20 @@ class MemoryManager:
         """Build context block for ME.md, USER.md, TODO.md — always injected per turn.
 
         TOOLS.md and MEMORY.md are not auto-injected; use memory_read to access them.
+        Result is cached and only rebuilt when a file's mtime changes.
         """
         if not self.enabled or self._dir is None:
             return ""
+        # Check max mtime across auto-inject files.
+        max_mtime: float = 0.0
+        for fname in AUTO_INJECT_FILES:
+            path = self._dir / fname
+            try:
+                max_mtime = max(max_mtime, os.path.getmtime(path))
+            except OSError:
+                pass
+        if self._context_cache is not None and self._context_cache[1] >= max_mtime:
+            return self._context_cache[0]
         parts: list[str] = []
         for fname in AUTO_INJECT_FILES:
             content = self.read_file(fname)
@@ -139,11 +154,17 @@ class MemoryManager:
                 label = _FILE_LABELS[fname]
                 parts.append(f"### {label} ({fname})\n{content}")
         if not parts:
-            return ""
-        header = ["<persistent-memory>"]
-        footer = [
-            "\n[Auto-injected memory. Use memory_write to update. "
-            "TOOLS.md / MEMORY.md are available via memory_read.]",
-            "</persistent-memory>",
-        ]
-        return "\n\n".join(header + parts + footer)
+            result = ""
+        else:
+            header = ["<persistent-memory>"]
+            footer = [
+                "\n[Auto-injected memory. Use memory_write to update. "
+                "TOOLS.md / MEMORY.md are available via memory_read.]",
+                "</persistent-memory>",
+            ]
+            result = "\n\n".join(header + parts + footer)
+        self._context_cache = (result, max_mtime)
+        return result
+
+    def _invalidate_context_cache(self) -> None:
+        self._context_cache = None

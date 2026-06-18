@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+import threading
 import time
 import uuid
 from contextlib import contextmanager
@@ -63,23 +64,43 @@ class OrchestrationStore:
     def __init__(self, db_path: str | Path | None = None) -> None:
         self._db_path = Path(db_path or DB_PATH).expanduser().resolve()
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
+        # Persistent connection avoids per-operation open/close overhead.
+        # check_same_thread=False is safe because _lock serialises all access.
+        self._conn = sqlite3.connect(str(self._db_path), check_same_thread=False)
+        self._conn.row_factory = sqlite3.Row
+        self._conn.execute("PRAGMA foreign_keys = ON")
+        self._lock = threading.Lock()
         self.init_schema()
 
     @contextmanager
-    def _connect(self) -> Iterator[sqlite3.Connection]:
-        conn = sqlite3.connect(str(self._db_path))
-        conn.row_factory = sqlite3.Row
+    def _tx(self) -> Iterator[sqlite3.Connection]:
+        """Acquire lock, yield the shared connection, commit or rollback."""
+        with self._lock:
+            try:
+                yield self._conn
+                self._conn.commit()
+            except Exception:
+                self._conn.rollback()
+                raise
+
+    # Keep _connect as an alias so any external callers aren't broken.
+    _connect = _tx
+
+    def close(self) -> None:
+        with self._lock:
+            try:
+                self._conn.close()
+            except Exception:
+                pass
+
+    def __del__(self) -> None:
         try:
-            yield conn
-            conn.commit()
+            self.close()
         except Exception:
-            conn.rollback()
-            raise
-        finally:
-            conn.close()
+            pass
 
     def init_schema(self) -> None:
-        with self._connect() as conn:
+        with self._tx() as conn:
             cur = conn.cursor()
             cur.execute(
                 """
@@ -176,6 +197,14 @@ class OrchestrationStore:
                 )
                 """
             )
+            # Indices for hot query paths (idempotent — IF NOT EXISTS).
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_step_runs_task_id ON orchestration_step_runs(task_run_id)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_step_runs_status ON orchestration_step_runs(status)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_task_runs_session_id ON orchestration_task_runs(session_id)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_artifacts_step_id ON orchestration_step_artifacts(step_run_id)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_checkpoints_step_id ON orchestration_checkpoints(step_run_id)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_recovery_events_task_id ON orchestration_recovery_events(task_run_id)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_lease_expires ON orchestration_lease_heartbeats(expires_at)")
 
     def create_task_run(
         self,
@@ -193,7 +222,7 @@ class OrchestrationStore:
                 "steps": [self._serialize_step_spec(step) for step in plan.steps],
             }
         )
-        with self._connect() as conn:
+        with self._tx() as conn:
             conn.execute(
                 """
                 INSERT INTO orchestration_task_runs (
@@ -242,7 +271,7 @@ class OrchestrationStore:
         return self.get_task_run(task_run_id)  # type: ignore[return-value]
 
     def get_task_run(self, task_run_id: str) -> TaskRun | None:
-        with self._connect() as conn:
+        with self._tx() as conn:
             row = conn.execute(
                 "SELECT * FROM orchestration_task_runs WHERE task_run_id = ?",
                 (task_run_id,),
@@ -250,7 +279,7 @@ class OrchestrationStore:
         return self._row_to_task_run(row) if row else None
 
     def update_task_run_status(self, task_run_id: str, status: StepStatus) -> TaskRun:
-        with self._connect() as conn:
+        with self._tx() as conn:
             conn.execute(
                 "UPDATE orchestration_task_runs SET status = ?, updated_at = ? WHERE task_run_id = ?",
                 (status, _now_ms(), task_run_id),
@@ -258,7 +287,7 @@ class OrchestrationStore:
         return self.get_task_run(task_run_id)  # type: ignore[return-value]
 
     def list_steps(self, task_run_id: str) -> list[StepRun]:
-        with self._connect() as conn:
+        with self._tx() as conn:
             rows = conn.execute(
                 "SELECT * FROM orchestration_step_runs WHERE task_run_id = ? ORDER BY created_at, step_id",
                 (task_run_id,),
@@ -266,7 +295,7 @@ class OrchestrationStore:
         return [self._row_to_step_run(row) for row in rows]
 
     def list_steps_by_session(self, session_id: str) -> list[StepRun]:
-        with self._connect() as conn:
+        with self._tx() as conn:
             rows = conn.execute(
                 """
                 SELECT s.* FROM orchestration_step_runs s
@@ -279,7 +308,7 @@ class OrchestrationStore:
         return [self._row_to_step_run(row) for row in rows]
 
     def get_step_run(self, step_run_id: str) -> StepRun | None:
-        with self._connect() as conn:
+        with self._tx() as conn:
             row = conn.execute(
                 "SELECT * FROM orchestration_step_runs WHERE step_run_id = ?",
                 (step_run_id,),
@@ -287,7 +316,7 @@ class OrchestrationStore:
         return self._row_to_step_run(row) if row else None
 
     def find_step_run(self, task_run_id: str, step_id: str) -> StepRun | None:
-        with self._connect() as conn:
+        with self._tx() as conn:
             row = conn.execute(
                 "SELECT * FROM orchestration_step_runs WHERE task_run_id = ? AND step_id = ?",
                 (task_run_id, step_id),
@@ -307,8 +336,6 @@ class OrchestrationStore:
         step = self.get_step_run(step_run_id)
         if step is None:
             raise KeyError(step_run_id)
-        if step.status != from_status:
-            raise ValueError(f"transition_step expected {from_status}, got {step.status}")
         if to_status not in _TRANSITIONS.get(from_status, set()):
             raise ValueError(f"Invalid transition {from_status} -> {to_status}")
         now = _now_ms()
@@ -320,13 +347,16 @@ class OrchestrationStore:
             attempt_count += 1
         if to_status in {"completed", "failed", "canceled"}:
             finished_at = now
-        with self._connect() as conn:
-            conn.execute(
+        # Conditional UPDATE on (step_run_id, status) prevents TOCTOU between
+        # the read above and this write — another writer that already moved the
+        # step out of from_status will leave 0 rowcount and we'll raise.
+        with self._tx() as conn:
+            cur = conn.execute(
                 """
                 UPDATE orchestration_step_runs
                 SET status = ?, summary = ?, failure_class = ?, last_checkpoint_id = ?,
                     updated_at = ?, started_at = ?, finished_at = ?, attempt_count = ?
-                WHERE step_run_id = ?
+                WHERE step_run_id = ? AND status = ?
                 """,
                 (
                     to_status,
@@ -338,12 +368,22 @@ class OrchestrationStore:
                     finished_at,
                     attempt_count,
                     step_run_id,
+                    from_status,
                 ),
             )
+            if cur.rowcount == 0:
+                current = conn.execute(
+                    "SELECT status FROM orchestration_step_runs WHERE step_run_id = ?",
+                    (step_run_id,),
+                ).fetchone()
+                actual = current["status"] if current else "<missing>"
+                raise ValueError(
+                    f"transition_step race: expected {from_status} but row is {actual}"
+                )
         return self.get_step_run(step_run_id)  # type: ignore[return-value]
 
     def set_step_ready(self, step_run_id: str, *, summary: str = "") -> StepRun:
-        with self._connect() as conn:
+        with self._tx() as conn:
             conn.execute(
                 """
                 UPDATE orchestration_step_runs
@@ -372,7 +412,7 @@ class OrchestrationStore:
             createdBy=created_by,
             createdAt=_now_ms(),
         )
-        with self._connect() as conn:
+        with self._tx() as conn:
             conn.execute(
                 """
                 INSERT INTO orchestration_step_artifacts (
@@ -411,7 +451,7 @@ class OrchestrationStore:
         return artifact
 
     def list_step_artifacts(self, step_run_id: str) -> list[StepArtifact]:
-        with self._connect() as conn:
+        with self._tx() as conn:
             rows = conn.execute(
                 "SELECT * FROM orchestration_step_artifacts WHERE step_run_id = ? ORDER BY created_at",
                 (step_run_id,),
@@ -436,7 +476,7 @@ class OrchestrationStore:
             payload=payload,
             createdAt=_now_ms(),
         )
-        with self._connect() as conn:
+        with self._tx() as conn:
             conn.execute(
                 """
                 INSERT INTO orchestration_checkpoints (checkpoint_id, step_run_id, payload_json, created_at)
@@ -470,18 +510,10 @@ class OrchestrationStore:
     def lease_step(self, step_run_id: str, *, lease_owner: str, lease_ttl_seconds: int = 30) -> bool:
         now = _now_ms()
         expires_at = now + lease_ttl_seconds * 1000
-        with self._connect() as conn:
-            row = conn.execute(
-                """
-                SELECT lease_owner, expires_at
-                FROM orchestration_lease_heartbeats
-                WHERE step_run_id = ?
-                """,
-                (step_run_id,),
-            ).fetchone()
-            if row and row["expires_at"] > now and row["lease_owner"] != lease_owner:
-                return False
-            conn.execute(
+        # Single conditional upsert: succeed only if no row exists, or the existing
+        # lease has expired, or the existing lease is owned by the same caller.
+        with self._tx() as conn:
+            cur = conn.execute(
                 """
                 INSERT INTO orchestration_lease_heartbeats (step_run_id, lease_owner, heartbeat_at, expires_at)
                 VALUES (?, ?, ?, ?)
@@ -489,18 +521,35 @@ class OrchestrationStore:
                     lease_owner = excluded.lease_owner,
                     heartbeat_at = excluded.heartbeat_at,
                     expires_at = excluded.expires_at
+                WHERE orchestration_lease_heartbeats.expires_at <= excluded.heartbeat_at
+                   OR orchestration_lease_heartbeats.lease_owner = excluded.lease_owner
                 """,
                 (step_run_id, lease_owner, now, expires_at),
             )
+            if cur.rowcount == 0:
+                # Conflict and the WHERE clause rejected the update: another live owner.
+                return False
         return True
 
-    def release_step_lease(self, step_run_id: str) -> None:
-        with self._connect() as conn:
-            conn.execute("DELETE FROM orchestration_lease_heartbeats WHERE step_run_id = ?", (step_run_id,))
+    def release_step_lease(self, step_run_id: str, *, lease_owner: str | None = None) -> None:
+        # Owner-scoped release: never delete another runtime's lease. If lease_owner
+        # is None we keep the legacy behaviour (best-effort delete) for callers that
+        # genuinely need to drop any holder (e.g. administrative cleanup).
+        with self._tx() as conn:
+            if lease_owner is None:
+                conn.execute(
+                    "DELETE FROM orchestration_lease_heartbeats WHERE step_run_id = ?",
+                    (step_run_id,),
+                )
+            else:
+                conn.execute(
+                    "DELETE FROM orchestration_lease_heartbeats WHERE step_run_id = ? AND lease_owner = ?",
+                    (step_run_id, lease_owner),
+                )
 
     def refresh_waiting_dependencies(self, task_run_id: str) -> None:
         steps = {step.stepId: step for step in self.list_steps(task_run_id)}
-        with self._connect() as conn:
+        with self._tx() as conn:
             for step in steps.values():
                 if step.status != "waiting_dependency":
                     continue
@@ -520,7 +569,7 @@ class OrchestrationStore:
     def insert_step(self, *, task_run_id: str, step_spec: StepSpec, status: StepStatus = "ready") -> StepRun:
         now = _now_ms()
         step_run_id = str(uuid.uuid4())
-        with self._connect() as conn:
+        with self._tx() as conn:
             conn.execute(
                 """
                 INSERT INTO orchestration_step_runs (
@@ -560,7 +609,7 @@ class OrchestrationStore:
         return self.get_step_run(step_run_id)  # type: ignore[return-value]
 
     def update_step_dependencies(self, step_run_id: str, depends_on: list[str], *, status: StepStatus | None = None) -> None:
-        with self._connect() as conn:
+        with self._tx() as conn:
             if status is None:
                 conn.execute(
                     """
@@ -581,7 +630,7 @@ class OrchestrationStore:
                 )
 
     def add_recovery_event(self, *, task_run_id: str, step_run_id: str | None, event_type: str, detail: str) -> None:
-        with self._connect() as conn:
+        with self._tx() as conn:
             conn.execute(
                 """
                 INSERT INTO orchestration_recovery_events (
@@ -593,7 +642,7 @@ class OrchestrationStore:
 
     def resume_incomplete_runs(self) -> list[str]:
         recovered: list[str] = []
-        with self._connect() as conn:
+        with self._tx() as conn:
             rows = conn.execute(
                 """
                 SELECT step_run_id, task_run_id, step_id, status

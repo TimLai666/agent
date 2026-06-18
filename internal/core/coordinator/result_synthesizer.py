@@ -5,7 +5,7 @@ import re
 from internal.core.tasks.task_types import VerificationResult, WorkerResult
 
 
-_TODO_PREFIX = re.compile(r"^\[todo_\d+\]\s*")
+_TODO_PREFIX = re.compile(r"^\[todo_[A-Za-z0-9_]+\]\s*")
 
 
 def _normalize_result_text(text: str) -> str:

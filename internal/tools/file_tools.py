@@ -90,7 +90,7 @@ class FileTools:
             )
         except Exception as e:
             logger.error(f"Error reading binary file {file_path}: {str(e)}")
-            return str(e)
+            return f"Error: {e}"
 
     def read_image_resized(
         self,

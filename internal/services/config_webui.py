@@ -49,6 +49,7 @@ app = Flask(
 _webui_thread: threading.Thread | None = None
 _webui_url: str | None = None
 _skills_reload_handler: Callable[[], dict[str, object]] | None = None
+_mcp_reload_handler: Callable[[], dict[str, object]] | None = None
 
 DEFAULT_WEBUI_HOST = "127.0.0.1"
 DEFAULT_WEBUI_PORT = 5000
@@ -89,6 +90,43 @@ def _trigger_skills_reload() -> dict[str, object]:
             "attempted": True,
             "success": False,
             "message": f"自動 reload 失敗: {e}",
+        }
+
+
+def register_mcp_reload_handler(handler: Callable[[], dict[str, object]] | None) -> None:
+    """Register a callback used to hot-reload MCP servers after WebUI changes."""
+    global _mcp_reload_handler
+    _mcp_reload_handler = handler
+
+
+def _trigger_mcp_reload() -> dict[str, object]:
+    """Try to reload runtime MCP servers, returning status metadata for API responses."""
+    if _mcp_reload_handler is None:
+        return {
+            "attempted": False,
+            "success": False,
+            "message": "沒有可用的執行中 Agent，MCP 變更將在下次啟動後生效",
+        }
+
+    try:
+        result = _mcp_reload_handler()
+        if isinstance(result, dict):
+            return {
+                "attempted": True,
+                "success": bool(result.get("success", True)),
+                **result,
+            }
+        return {
+            "attempted": True,
+            "success": True,
+            "message": "MCP 已自動重新載入",
+        }
+    except Exception as e:
+        logger.exception(f"Failed to auto reload MCP servers: {e}")
+        return {
+            "attempted": True,
+            "success": False,
+            "message": f"MCP 自動 reload 失敗: {e}",
         }
 
 
@@ -646,7 +684,12 @@ def api_add_mcp_tool():
     )
     
     if add_mcp_tool(config):
-        return jsonify({"success": True, "message": "MCP 工具新增成功"})
+        reload_result = _trigger_mcp_reload()
+        return jsonify({
+            "success": True,
+            "message": "MCP 工具新增成功",
+            "reload": reload_result,
+        })
     else:
         return jsonify({"success": False, "error": "MCP 工具新增失敗"}), 400
 
@@ -655,7 +698,12 @@ def api_add_mcp_tool():
 def api_delete_mcp_tool(mcp_tool_id: str):
     """Delete a custom MCP tool"""
     if delete_mcp_tool(mcp_tool_id):
-        return jsonify({"success": True, "message": "MCP 工具刪除成功"})
+        reload_result = _trigger_mcp_reload()
+        return jsonify({
+            "success": True,
+            "message": "MCP 工具刪除成功",
+            "reload": reload_result,
+        })
     else:
         return jsonify({"success": False, "error": "MCP 工具刪除失敗"}), 400
 
@@ -691,7 +739,12 @@ def api_add_remote_mcp():
     )
     
     if add_remote_mcp(config):
-        return jsonify({"success": True, "message": "遠端 MCP 新增成功"})
+        reload_result = _trigger_mcp_reload()
+        return jsonify({
+            "success": True,
+            "message": "遠端 MCP 新增成功",
+            "reload": reload_result,
+        })
     else:
         return jsonify({"success": False, "error": "遠端 MCP 新增失敗"}), 400
 
@@ -700,7 +753,12 @@ def api_add_remote_mcp():
 def api_delete_remote_mcp(remote_mcp_id: str):
     """Delete a remote MCP configuration"""
     if delete_remote_mcp(remote_mcp_id):
-        return jsonify({"success": True, "message": "遠端 MCP 刪除成功"})
+        reload_result = _trigger_mcp_reload()
+        return jsonify({
+            "success": True,
+            "message": "遠端 MCP 刪除成功",
+            "reload": reload_result,
+        })
     else:
         return jsonify({"success": False, "error": "遠端 MCP 刪除失敗"}), 400
 

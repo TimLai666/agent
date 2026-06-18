@@ -6,10 +6,12 @@ import sys
 import io
 import os
 import html
+import threading
 import weakref
 import urllib.request
 import concurrent.futures
 import base64
+from collections import OrderedDict
 from datetime import datetime
 from io import BytesIO
 try:
@@ -20,9 +22,30 @@ except Exception:
 # Thread pool for downloading/processing images (limit concurrency to avoid resource spikes)
 _image_executor = concurrent.futures.ThreadPoolExecutor(max_workers=4)
 # Cache for downloaded images: (url, max_width) -> data_uri or ""
-_image_data_cache: dict[tuple[str, int], str] = {}
+# LRU-bounded so long sessions don't accumulate hundreds of MB of base64.
+_IMAGE_CACHE_MAX = 256
+_image_data_cache: "OrderedDict[tuple[str, int], str]" = OrderedDict()
 _image_inflight: set[tuple[str, int]] = set()
 _image_failures: dict[tuple[str, int], int] = {}
+# Mutations to the dicts/set above can run on the executor's worker thread
+# (done_callback) AND on the GUI thread that reads them — guard with a lock.
+_image_state_lock = threading.Lock()
+
+
+def _image_cache_get(key: tuple[str, int]) -> str | None:
+    with _image_state_lock:
+        if key in _image_data_cache:
+            _image_data_cache.move_to_end(key)
+            return _image_data_cache[key]
+        return None
+
+
+def _image_cache_put(key: tuple[str, int], value: str) -> None:
+    with _image_state_lock:
+        _image_data_cache[key] = value
+        _image_data_cache.move_to_end(key)
+        while len(_image_data_cache) > _IMAGE_CACHE_MAX:
+            _image_data_cache.popitem(last=False)
 # Max bytes to read for an image (e.g., 8MB)
 _MAX_IMAGE_BYTES = 8 * 1024 * 1024
 # Max dimension (width or height) for images; images larger will be downscaled to this
@@ -112,7 +135,7 @@ def _render_image_block(data_uri: str, alt: str, source_url: str | None = None) 
         f'<a href="{safe_uri}" '
         f'style="display: inline-block; padding: 2px 6px; '
         f'background: rgba(0, 0, 0, 0.55); color: #CFE9FF; text-decoration: none; '
-        f'border-radius: 6px; font-size: 10px;">Save</a>'
+        f'border-radius: 6px; font-size: 8pt;">Save</a>'
     )
     if source_url:
         safe_src = html.escape(source_url, quote=True)
@@ -120,7 +143,7 @@ def _render_image_block(data_uri: str, alt: str, source_url: str | None = None) 
             f' <a href="{safe_src}" '
             f'style="display: inline-block; padding: 2px 6px; '
             f'background: rgba(0, 0, 0, 0.35); color: #CFE9FF; text-decoration: none; '
-            f'border-radius: 6px; font-size: 10px;">Open</a>'
+            f'border-radius: 6px; font-size: 8pt;">Open</a>'
         )
     return (
         f'<div style="margin: 6px 0 10px 0;">'
@@ -135,7 +158,7 @@ def _render_image_placeholder(alt: str) -> str:
     label = alt if alt else "Loading image..."
     return (
         f'<div style="margin: 6px 0; color: rgba(255, 255, 255, 0.7); '
-        f'font-size: 11px;">{label}</div>'
+        f'font-size: 8pt;">{label}</div>'
     )
 
 
@@ -184,10 +207,12 @@ def _process_markdown_images_async(text: str) -> tuple[str, list[tuple[str, int]
             return _render_image_block(url, alt)
 
         key = (url, width)
-        cached = _image_data_cache.get(key)
+        cached = _image_cache_get(key)
         if cached:
             return _render_image_block(cached, alt, url)
-        if cached == "" or _image_failures.get(key, 0) >= 2:
+        with _image_state_lock:
+            failures = _image_failures.get(key, 0)
+        if cached == "" or failures >= 2:
             return _render_image_link(url, alt) if url else ""
 
         pending.append(key)
@@ -224,6 +249,7 @@ from PySide6.QtCore import (
     Property,
     QRect,
     QSize,
+    QThread,
     Signal,
     QTimer,
     Qt,
@@ -361,6 +387,8 @@ class AutoWrapTextBrowser(QTextBrowser):
         self._constrain_images_active = False
         self._image_buttons = []
         self._refresh_image_buttons_pending = False
+        # Cache decoded data: URI images so base64.b64decode is not repeated per paint.
+        self._decoded_image_cache: dict[str, "QImage"] = {}
         try:
             self.document().contentsChanged.connect(self._on_contents_changed)
             self.document().resourceLoaded.connect(self._on_resource_loaded)
@@ -410,6 +438,9 @@ class AutoWrapTextBrowser(QTextBrowser):
         self_ref = weakref.ref(self)
 
         def done_callback(future, key):
+            # Runs on the executor's worker thread; mutate shared state under
+            # the lock so the GUI thread reading these dicts can't observe a
+            # half-modified state or hit RuntimeError during iteration.
             try:
                 data_uri = future.result()
             except Exception:
@@ -417,11 +448,14 @@ class AutoWrapTextBrowser(QTextBrowser):
             if not isinstance(data_uri, str) or not data_uri.startswith("data:image/"):
                 data_uri = ""
             if data_uri:
-                _image_data_cache[key] = data_uri
-                _image_failures.pop(key, None)
+                _image_cache_put(key, data_uri)
+                with _image_state_lock:
+                    _image_failures.pop(key, None)
+                    _image_inflight.discard(key)
             else:
-                _image_failures[key] = _image_failures.get(key, 0) + 1
-            _image_inflight.discard(key)
+                with _image_state_lock:
+                    _image_failures[key] = _image_failures.get(key, 0) + 1
+                    _image_inflight.discard(key)
             widget = self_ref()
             if widget is None:
                 return
@@ -438,9 +472,10 @@ class AutoWrapTextBrowser(QTextBrowser):
                     pass
 
         for key in dict.fromkeys(pending):
-            if key in _image_inflight:
-                continue
-            _image_inflight.add(key)
+            with _image_state_lock:
+                if key in _image_inflight:
+                    continue
+                _image_inflight.add(key)
             url, width = key
             future = _image_executor.submit(_download_and_encode_image, url, width)
             future.add_done_callback(lambda fut, k=key: done_callback(fut, k))
@@ -521,11 +556,15 @@ class AutoWrapTextBrowser(QTextBrowser):
             resource = None
 
         if name.startswith("data:image/"):
+            cached_img = self._decoded_image_cache.get(name)
+            if cached_img is not None:
+                return cached_img
             try:
-                header, b64data = name.split(",", 1)
+                _header, b64data = name.split(",", 1)
                 raw = base64.b64decode(b64data)
                 image = QImage.fromData(raw)
                 if not image.isNull():
+                    self._decoded_image_cache[name] = image
                     return image
             except Exception:
                 return None
@@ -542,11 +581,22 @@ class AutoWrapTextBrowser(QTextBrowser):
                     if not image.isNull():
                         return image
             elif name.startswith(("http://", "https://")):
-                with urllib.request.urlopen(name, timeout=8) as resp:
-                    raw = resp.read(_MAX_IMAGE_BYTES + 1)
-                image = QImage.fromData(raw)
-                if not image.isNull():
-                    return image
+                # _resolve_image_resource runs on the GUI thread (called from
+                # paint/layout / save handlers). A synchronous 8-second URL
+                # fetch would freeze the UI, so only return the resource if
+                # we already have it cached; otherwise return None and let
+                # the markdown image pipeline (with its background executor)
+                # populate the cache.
+                cached = _image_cache_get((name, 800))
+                if cached and cached.startswith("data:image/"):
+                    try:
+                        b64data = cached.split(",", 1)[1]
+                        image = QImage.fromData(base64.b64decode(b64data))
+                        if not image.isNull():
+                            return image
+                    except Exception:
+                        pass
+                return None
         except Exception:
             return None
         return None
@@ -586,7 +636,7 @@ class AutoWrapTextBrowser(QTextBrowser):
             "border: 1px solid rgba(255, 255, 255, 80); "
             "border-radius: 6px; "
             "padding: 2px 6px; "
-            "font-size: 10px; "
+            "font-size: 8pt; "
             "}"
             "QToolButton:hover { background-color: rgba(0, 0, 0, 180); }"
         )
@@ -764,7 +814,7 @@ class CodeBlockWidget(QWidget):
         header_layout.setSpacing(8)
         
         lang_label = QLabel(language if language else "code")
-        lang_label.setStyleSheet("color: rgba(255, 255, 255, 160); font-size: 11px; background: transparent;")
+        lang_label.setStyleSheet("color: rgba(255, 255, 255, 160); font-size: 8pt; background: transparent;")
         
         copy_btn = QPushButton("📋 Copy")
         copy_btn.setFixedHeight(20)
@@ -775,7 +825,7 @@ class CodeBlockWidget(QWidget):
             "  border: none; "
             "  border-radius: 4px; "
             "  padding: 2px 8px; "
-            "  font-size: 11px; "
+            "  font-size: 8pt; "
             "} "
             "QPushButton:hover { background-color: rgba(0, 122, 255, 200); } "
             "QPushButton:pressed { background-color: rgba(0, 100, 200, 220); }"
@@ -794,7 +844,7 @@ class CodeBlockWidget(QWidget):
             "  background-color: rgba(30, 30, 30, 240); "
             "  color: #D4D4D4; "
             "  font-family: 'Consolas', 'Courier New', monospace; "
-            "  font-size: 13px; "
+            "  font-size: 10pt; "
             "  border: none; "
             "  border-bottom-left-radius: 8px; "
             "  border-bottom-right-radius: 8px; "
@@ -1221,7 +1271,7 @@ class CollapsibleSection(QWidget):
         self.content.setOpenExternalLinks(True)
         self.content.update_wrap_width()
         self.content.setStyleSheet(
-    "background: transparent; color: #F0F0F0; font-size: 13px; border-radius: 10px; border: none; margin: 0; padding: 0;"
+    "background: transparent; color: #F0F0F0; font-size: 10pt; border-radius: 10px; border: none; margin: 0; padding: 0;"
 )
         self.content.setLineWrapMode(QTextEdit.WidgetWidth)
         # 設定圖片樣式以防止橫向捲動
@@ -1584,7 +1634,7 @@ class OutputBubble(QWidget):
                 browser.setMarkdown(_prepare_markdown(content))
                 browser.setOpenExternalLinks(True)
                 browser.setStyleSheet(
-                    "background: transparent; color: white; font-size: 14px;"
+                    "background: transparent; color: white; font-size: 11pt;"
                 )
                 # 設定圖片樣式以防止橫向捲動
                 browser.document().setDefaultStyleSheet("img { max-width: 251px; width: 100%; height: auto; display: block; }")
@@ -1689,6 +1739,11 @@ class SiriResponseBubble(QWidget):
         re.IGNORECASE,
     )
 
+    # Fires when an inner child's height grew (e.g. async image download finished and
+    # markdown was re-rendered with the actual image). Listeners should re-measure
+    # content_height() and resize the outer bubble to fit.
+    contentSizeChanged = Signal()
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setAttribute(Qt.WA_StyledBackground, True)
@@ -1698,6 +1753,7 @@ class SiriResponseBubble(QWidget):
         self._animation_angle = 0
         self._animation_timer = QTimer(self)
         self._animation_timer.timeout.connect(self._update_animation)
+        self._content_size_emit_pending = False
 
         self.setStyleSheet(
             "SiriResponseBubble { "
@@ -1752,6 +1808,21 @@ class SiriResponseBubble(QWidget):
             self.container.adjustSize()
             if process_events:
                 QApplication.processEvents()
+        except Exception:
+            pass
+
+    def _emit_content_size_changed(self) -> None:
+        # Coalesce bursts of inner-height changes (image loads can arrive back-to-back)
+        # into a single outer-bubble resize on the next event-loop tick.
+        if self._content_size_emit_pending:
+            return
+        self._content_size_emit_pending = True
+        QTimer.singleShot(0, self._do_emit_content_size_changed)
+
+    def _do_emit_content_size_changed(self) -> None:
+        self._content_size_emit_pending = False
+        try:
+            self.contentSizeChanged.emit()
         except Exception:
             pass
 
@@ -1982,7 +2053,7 @@ class SiriResponseBubble(QWidget):
                         label.setStyleSheet(
                             "background: transparent; border: none; color: #FFFFFF; "
                             "font-family: 'Segoe UI', 'Microsoft JhengHei', sans-serif; "
-                            "font-size: 14px; line-height: 1.5;"
+                            "font-size: 11pt; line-height: 1.5;"
                         )
                         label.document().setDefaultStyleSheet(
                             "img { max-width: 100%; height: auto; display: block; }"
@@ -2001,8 +2072,11 @@ class SiriResponseBubble(QWidget):
                                 doc_size = b.document().documentLayout().documentSize()
                                 height = doc_size.height()
                                 min_height = max(int(height) + 16, 32)
+                                prev = b.minimumHeight()
                                 b.setMinimumHeight(min_height)
                                 b.setMaximumHeight(min_height)
+                                if min_height != prev:
+                                    self._emit_content_size_changed()
                             except RuntimeError:
                                 pass
 
@@ -2033,7 +2107,7 @@ class SiriResponseBubble(QWidget):
                                 browser.setLineWrapMode(QTextEdit.WidgetWidth)
                                 browser.setStyleSheet(
                                     "QTextBrowser { color: #FFFFFF; font-family: 'Segoe UI', 'Microsoft JhengHei', sans-serif; "
-                                    "font-size: 14px; line-height: 1.5; }"
+                                    "font-size: 11pt; line-height: 1.5; }"
                                 )
                                 browser.document().setDefaultStyleSheet(
                                     "img { max-width: 100%; height: auto; display: block; }"
@@ -2059,8 +2133,11 @@ class SiriResponseBubble(QWidget):
                                         doc_size = doc.documentLayout().documentSize()
                                         h2 = doc_size.height()
                                         min_height = max(int(h2) + 16, 32)
+                                        prev = b.minimumHeight()
                                         b.setMinimumHeight(min_height)
                                         b.setMaximumHeight(min_height)
+                                        if min_height != prev:
+                                            self._emit_content_size_changed()
                                     except RuntimeError:
                                         pass
 
@@ -2195,37 +2272,43 @@ class SiriResponseBubble(QWidget):
             return
 
         painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing)
+        try:
+            painter.setRenderHint(QPainter.Antialiasing)
 
-        rect = self.rect()
+            rect = self.rect()
 
-        colors = [
-            QColor("#6FD3C5"),
-            QColor("#6B8FE5"),
-            QColor("#9B8FEA"),
-            QColor("#6ED0B2"),
-        ]
+            colors = [
+                QColor("#6FD3C5"),
+                QColor("#6B8FE5"),
+                QColor("#9B8FEA"),
+                QColor("#6ED0B2"),
+            ]
 
-        progress = self._animation_angle / 360.0
-        color_index = int(progress * len(colors))
-        next_color_index = (color_index + 1) % len(colors)
-        t = (progress * len(colors)) - color_index
+            progress = self._animation_angle / 360.0
+            color_index = int(progress * len(colors)) % len(colors)
+            next_color_index = (color_index + 1) % len(colors)
+            t = (progress * len(colors)) - color_index
 
-        current_color = colors[color_index]
-        next_color = colors[next_color_index]
+            current_color = colors[color_index]
+            next_color = colors[next_color_index]
 
-        r = int(current_color.red() + (next_color.red() - current_color.red()) * t)
-        g = int(current_color.green() + (next_color.green() - current_color.green()) * t)
-        b = int(current_color.blue() + (next_color.blue() - current_color.blue()) * t)
+            r = int(current_color.red() + (next_color.red() - current_color.red()) * t)
+            g = int(current_color.green() + (next_color.green() - current_color.green()) * t)
+            b = int(current_color.blue() + (next_color.blue() - current_color.blue()) * t)
 
-        border_color = QColor(r, g, b, 190)
+            border_color = QColor(r, g, b, 190)
 
-        pen = QPen(border_color)
-        pen.setWidthF(1.6)
-        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-        painter.setPen(pen)
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.drawRoundedRect(rect.adjusted(1, 1, -1, -1), 30, 30)
+            pen = QPen(border_color)
+            pen.setWidthF(1.6)
+            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            painter.setPen(pen)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRoundedRect(rect.adjusted(1, 1, -1, -1), 30, 30)
+        finally:
+            # Explicitly end so a stray exception or GC delay can't leave the
+            # widget with an active painter ("a paint device can only be
+            # painted by one painter at a time").
+            painter.end()
 
 
 class ArcWidget(QWidget):
@@ -2574,14 +2657,14 @@ class TodoPanelWindow(QWidget):
         )
         self.setStyleSheet(
             "QWidget { background-color: rgba(18, 22, 32, 238); color: #EAF3FF; }"
-            "QLabel#todoPanelTitle { font-size: 13px; font-weight: bold; color: #F1F7FF; }"
+            "QLabel#todoPanelTitle { font-size: 10pt; font-weight: bold; color: #F1F7FF; }"
             "QTextBrowser {"
             "background-color: rgba(11, 15, 22, 196);"
             "color: #EAF3FF;"
             "border: 1px solid rgba(120, 170, 230, 80);"
             "border-radius: 8px;"
             "padding: 6px;"
-            "font-size: 12px;"
+            "font-size: 9pt;"
             "}"
         )
 
@@ -2625,6 +2708,9 @@ class MainWindow(QMainWindow):
     collapse_state_changed = Signal(bool)
     # 當使用者正在編輯輸入框（鍵入文字）時發出
     typing = Signal()
+    # Cross-thread trigger for opening the config webview. Emitting this signal
+    # from any thread is safe; the connected slot runs on the GUI thread.
+    _open_config_webview_request = Signal()
     
     def __init__(self):
         super().__init__()
@@ -2660,6 +2746,13 @@ class MainWindow(QMainWindow):
         self.speech_bubble.setParent(self)
         self.speech_bubble.setFixedSize(140, 160)
         self.speech_bubble.show()  # 初始顯示
+        # When async image loads grow inner content, re-fit the bubble.
+        try:
+            self.speech_bubble.contentSizeChanged.connect(
+                lambda: QTimer.singleShot(0, self._update_bubble_geometry)
+            )
+        except Exception:
+            pass
 
         # Debounce speech bubble refresh to avoid flicker when streaming many chunks.
         self._pending_bubble_text = ""
@@ -2724,14 +2817,14 @@ class MainWindow(QMainWindow):
         self._voice_btn_idle_style = (
             "QPushButton { "
             "background: transparent; color: rgba(200,200,220,190); "
-            "border: none; font-size: 14px; border-radius: 14px; "
+            "border: none; font-size: 11pt; border-radius: 14px; "
             "}"
             "QPushButton:hover { background: rgba(255,255,255,12); }"
         )
         self._voice_btn_cancel_style = (
             "QPushButton { "
             "background: rgba(180,40,40,200); color: #fff; "
-            "border: none; font-size: 13px; border-radius: 14px; "
+            "border: none; font-size: 10pt; border-radius: 14px; "
             "}"
             "QPushButton:hover { background: rgba(210,55,55,230); }"
         )
@@ -2746,7 +2839,7 @@ class MainWindow(QMainWindow):
             "color: #e8eaf0; "
             "border: none; "
             "padding: 2px 4px; "
-            "font-size: 12px; "
+            "font-size: 9pt; "
             "}"
         )
         self.input_field.returnPressed.connect(self.on_input_submitted)
@@ -2764,14 +2857,14 @@ class MainWindow(QMainWindow):
         self._send_btn_send_style = (
             "QPushButton { "
             "background: #2FBF71; color: #fff; border: none; "
-            "border-radius: 12px; font-weight: bold; font-size: 12px; "
+            "border-radius: 12px; font-weight: bold; font-size: 9pt; "
             "}"
             "QPushButton:hover { background: #28A862; }"
         )
         self._send_btn_stop_style = (
             "QPushButton { "
             "background: rgba(210,55,55,220); color: #fff; border: none; "
-            "border-radius: 12px; font-size: 11px; "
+            "border-radius: 12px; font-size: 8pt; "
             "padding: 0 0 1px 0; "
             "}"
             "QPushButton:hover { background: rgba(230,70,70,240); }"
@@ -2794,10 +2887,10 @@ class MainWindow(QMainWindow):
         # ── Toolbar row (inside card, has the card background) ────────────
         _tbtn = (
             "QPushButton { background: transparent; color: rgba(150,165,185,160); "
-            "border: none; font-size: 12px; padding: 0 4px; border-radius: 4px; } "
+            "border: none; font-size: 9pt; padding: 0 4px; border-radius: 4px; } "
             "QPushButton:hover { color: rgba(210,225,255,220); background: rgba(255,255,255,8); }"
         )
-        _tlbl = "QLabel { color: rgba(140,158,180,150); font-size: 10px; background: transparent; }"
+        _tlbl = "QLabel { color: rgba(140,158,180,150); font-size: 8pt; background: transparent; }"
 
         toolbar_row = QWidget()
         toolbar_row.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
@@ -2861,7 +2954,7 @@ class MainWindow(QMainWindow):
         self._compact_label.setStyleSheet(
             "QLabel { background: rgba(90, 60, 160, 210); color: #ddc8ff; "
             "border: 1px solid rgba(180,140,255,120); border-radius: 11px; "
-            "font-size: 10px; padding: 0 10px; }"
+            "font-size: 8pt; padding: 0 10px; }"
         )
         self._compact_label.hide()
         self._compact_pulse_timer = QTimer(self)
@@ -2878,7 +2971,7 @@ class MainWindow(QMainWindow):
             "color: #FFFFFF; "
             "border: 1px solid rgba(255, 255, 255, 60); "
             "border-radius: 11px; "
-            "font-size: 11px; "
+            "font-size: 8pt; "
             "}"
             "QPushButton:hover { background-color: rgba(70, 70, 70, 220); }"
         )
@@ -2893,7 +2986,7 @@ class MainWindow(QMainWindow):
             "color: #DCEFFF; "
             "border: 1px solid rgba(170, 210, 255, 120); "
             "border-radius: 11px; "
-            "font-size: 11px; "
+            "font-size: 8pt; "
             "font-weight: bold; "
             "}"
             "QPushButton:hover { background-color: rgba(36, 72, 112, 230); }"
@@ -2918,6 +3011,10 @@ class MainWindow(QMainWindow):
         # 连接确认信号到槽
         self.confirm_requested.connect(self._handle_confirm_request)
         self.question_requested.connect(self._handle_question_request)
+        # Cross-thread open-config trigger lands here (queued via default
+        # auto-connection because emitter and receiver may be on different
+        # threads).
+        self._open_config_webview_request.connect(self._open_config_webview_on_gui_thread)
 
         # 初始化窗口遮罩（點擊穿透）- 多次延遲更新確保完全渲染
         QTimer.singleShot(0, self._update_window_mask)
@@ -2933,7 +3030,17 @@ class MainWindow(QMainWindow):
         self._stop_callback = callback
     
     def open_config_webview(self):
-        """打開配置頁面 WebView"""
+        """Open the config webview. Safe to call from any thread — if invoked
+        off the GUI thread it bounces back to the GUI thread via a queued
+        signal before touching any QWidget."""
+        if QThread.currentThread() != self.thread():
+            self._open_config_webview_request.emit()
+            return
+        self._open_config_webview_on_gui_thread()
+
+    @Slot()
+    def _open_config_webview_on_gui_thread(self):
+        """打開配置頁面 WebView（必須在 GUI thread 執行）"""
         try:
             if not HAS_WEBENGINE:
                 error_msg = (
@@ -2946,12 +3053,12 @@ class MainWindow(QMainWindow):
                 self.update_speech_bubble(error_msg)
                 logger.warning("WebEngine not available")
                 return
-            
+
             from internal.services import config_webui
-            
+
             # 確保 Web UI 正在運行
             url = config_webui.ensure_webui_running()
-            
+
             # 如果窗口已存在，顯示並激活
             if self.config_webview_window is not None:
                 try:
@@ -2962,13 +3069,13 @@ class MainWindow(QMainWindow):
                 except RuntimeError:
                     # 窗口已被刪除，重新創建
                     self.config_webview_window = None
-            
+
             if self.config_webview_window is None:
                 # 創建新窗口
                 self.config_webview_window = ConfigWebViewWindow(url, parent=self)
                 self.config_webview_window.show()
                 logger.info(f"Created new config webview: {url}")
-            
+
         except ImportError as e:
             error_msg = f"無法打開配置頁面：\n{str(e)}\n\n請安裝 PySide6-WebEngine"
             self.update_speech_bubble(error_msg)
@@ -3135,18 +3242,24 @@ class MainWindow(QMainWindow):
     def set_running(self, running: bool) -> None:
         """Toggle send/stop button between run mode and stop mode."""
         self._is_running = running
+        # Bare disconnect() raises RuntimeError if no slot is currently
+        # connected (e.g. previous toggle path already disconnected, or the
+        # voice-mode path took over). Wrap defensively so a Run/Voice/Stop
+        # interleaving can't crash the GUI.
+        try:
+            self.send_button.clicked.disconnect()
+        except (RuntimeError, TypeError):
+            pass
         if running:
             self.send_button.setText("")
             self.send_button.setIcon(_make_stop_icon(20))
             self.send_button.setIconSize(QSize(20, 20))
             self.send_button.setStyleSheet(self._send_btn_stop_style)
-            self.send_button.clicked.disconnect()
             self.send_button.clicked.connect(self._on_stop_requested)
         else:
             self.send_button.setIcon(QIcon())  # clear icon
             self.send_button.setText("發送")
             self.send_button.setStyleSheet(self._send_btn_send_style)
-            self.send_button.clicked.disconnect()
             self.send_button.clicked.connect(self.on_input_submitted)
 
     def _on_stop_requested(self) -> None:
@@ -3161,12 +3274,12 @@ class MainWindow(QMainWindow):
         self._bypass_mode = checked
         _bypass_on = (
             "QPushButton { background: rgba(220,120,0,180); color: #ffe0a0; "
-            "border: none; font-size: 12px; padding: 0 4px; border-radius: 4px; } "
+            "border: none; font-size: 9pt; padding: 0 4px; border-radius: 4px; } "
             "QPushButton:hover { background: rgba(240,140,0,210); }"
         )
         _bypass_off = (
             "QPushButton { background: transparent; color: rgba(150,165,185,160); "
-            "border: none; font-size: 12px; padding: 0 4px; border-radius: 4px; } "
+            "border: none; font-size: 9pt; padding: 0 4px; border-radius: 4px; } "
             "QPushButton:hover { color: rgba(210,225,255,220); background: rgba(255,255,255,8); }"
         )
         if checked:
@@ -3178,7 +3291,7 @@ class MainWindow(QMainWindow):
             self._bypass_btn.setToolTip("全開模式：自動允許所有工具執行（再按恢復）")
             self._bypass_btn.setStyleSheet(
                 "QPushButton { background: transparent; color: rgba(150,165,185,160); "
-                "border: none; font-size: 12px; padding: 0 4px; border-radius: 4px; } "
+                "border: none; font-size: 9pt; padding: 0 4px; border-radius: 4px; } "
                 "QPushButton:hover { color: rgba(210,225,255,220); background: rgba(255,255,255,8); }"
             )
         cb = getattr(self, "_bypass_callback", None)
@@ -3207,7 +3320,7 @@ class MainWindow(QMainWindow):
             pct = min(100, round(used_tokens * 100 / max_tokens))
             ctx_color = "#f06b6b" if pct >= 80 else "#f0c060" if pct >= 50 else "rgba(160,180,200,160)"
             self._ctx_label.setText(f"ctx {_fmt(used_tokens)}/{_fmt(max_tokens)} ({pct}%)")
-            self._ctx_label.setStyleSheet(f"QLabel {{ color: {ctx_color}; font-size: 10px; }}")
+            self._ctx_label.setStyleSheet(f"QLabel {{ color: {ctx_color}; font-size: 8pt; }}")
 
         if total_tokens > 0:
             self._total_tok_label.setText(f"Σ {_fmt(total_tokens)}")
@@ -3218,11 +3331,11 @@ class MainWindow(QMainWindow):
     _CHIP_STYLE = (
         "QLabel { background: rgba(45,55,80,200); color: #a8d4ff; "
         "border: 1px solid rgba(90,140,220,100); border-radius: 8px; "
-        "padding: 2px 8px; font-size: 11px; }"
+        "padding: 2px 8px; font-size: 8pt; }"
     )
     _CHIP_CLOSE_STYLE = (
         "QPushButton { background: transparent; color: rgba(160,170,200,160); "
-        "border: none; font-size: 9px; padding: 0; } "
+        "border: none; font-size: 7pt; padding: 0; } "
         "QPushButton:hover { color: #ff6b6b; }"
     )
 
@@ -3510,6 +3623,38 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(100, self._update_window_mask)
 
     def closeEvent(self, event):
+        # Stop every long-lived QTimer / animation that still holds a
+        # reference to this widget so we don't get "wrapped C/C++ object
+        # has been deleted" warnings or crashes from late timer fires.
+        for attr in (
+            "_compact_pulse_timer",
+            "_bubble_update_timer",
+            "_mask_update_timer",
+            "_animation_timer",
+        ):
+            timer = getattr(self, attr, None)
+            if timer is not None:
+                try:
+                    timer.stop()
+                except Exception:
+                    pass
+        # Stop child animations that schedule further updates.
+        arc = getattr(self, "arcWidget", None)
+        if arc is not None:
+            try:
+                anim = getattr(arc, "anim", None)
+                if anim is not None and hasattr(anim, "stop"):
+                    anim.stop()
+            except Exception:
+                pass
+        bubble = getattr(self, "speech_bubble", None)
+        if bubble is not None:
+            try:
+                bubble_timer = getattr(bubble, "_animation_timer", None)
+                if bubble_timer is not None:
+                    bubble_timer.stop()
+            except Exception:
+                pass
         try:
             if self.todo_panel_window is not None:
                 self.todo_panel_window.close()
@@ -3614,22 +3759,24 @@ class MainWindow(QMainWindow):
             self._compact_pulse_timer.stop()
             self._compact_label.hide()
 
+    _COMPACT_PULSE_ON = (
+        "QLabel { background: rgba(110, 75, 190, 230); color: #eedeff; "
+        "border: 1px solid rgba(200,160,255,160); border-radius: 11px; "
+        "font-size: 8pt; padding: 0 10px; }"
+    )
+    _COMPACT_PULSE_OFF = (
+        "QLabel { background: rgba(70, 45, 130, 180); color: #c8aaee; "
+        "border: 1px solid rgba(160,120,220,90); border-radius: 11px; "
+        "font-size: 8pt; padding: 0 10px; }"
+    )
+
     def _pulse_compact_label(self) -> None:
         """Alternate label opacity to create a pulsing effect."""
         self._compact_pulse_phase = 1 - self._compact_pulse_phase
-        if self._compact_pulse_phase:
-            self._compact_label.setStyleSheet(
-                "QLabel { background: rgba(110, 75, 190, 230); color: #eedeff; "
-                "border: 1px solid rgba(200,160,255,160); border-radius: 11px; "
-                "font-size: 10px; padding: 0 10px; }"
-            )
-        else:
-            self._compact_label.setStyleSheet(
-                "QLabel { background: rgba(70, 45, 130, 180); color: #c8aaee; "
-                "border: 1px solid rgba(160,120,220,90); border-radius: 11px; "
-                "font-size: 10px; padding: 0 10px; }"
-            )
-    
+        new_style = self._COMPACT_PULSE_ON if self._compact_pulse_phase else self._COMPACT_PULSE_OFF
+        if self._compact_label.styleSheet() != new_style:
+            self._compact_label.setStyleSheet(new_style)
+
     def _update_bubble_geometry(self):
         """更新氣泡幾何形狀（延遲調用以避免阻塞）"""
         try:
@@ -3703,7 +3850,7 @@ class _InlineQuestionBubble(QFrame):
         "QPushButton {"
         "background: rgba(50,80,160,180); color: #c0d8ff;"
         "border: 1px solid rgba(100,150,255,100); border-radius: 8px;"
-        "padding: 6px 14px; font-size: 12px; text-align: left;"
+        "padding: 6px 14px; font-size: 9pt; text-align: left;"
         "}"
         "QPushButton:hover { background: rgba(70,110,200,210); color: #d8eaff; }"
         "QPushButton:disabled {"
@@ -3715,13 +3862,13 @@ class _InlineQuestionBubble(QFrame):
         "QPushButton {"
         "background: rgba(0,100,200,200); color: #fff;"
         "border: none; border-radius: 8px;"
-        "padding: 6px 18px; font-size: 12px;"
+        "padding: 6px 18px; font-size: 9pt;"
         "}"
         "QPushButton:hover { background: rgba(0,120,240,220); }"
         "QPushButton:disabled { background: rgba(30,40,60,100); color: rgba(120,140,180,100); }"
     )
     _CB_STYLE = (
-        "QCheckBox { color: #c0d8ff; font-size: 12px; background: transparent; spacing: 6px; }"
+        "QCheckBox { color: #c0d8ff; font-size: 9pt; background: transparent; spacing: 6px; }"
         "QCheckBox::indicator { width: 16px; height: 16px; border-radius: 4px;"
         "border: 1px solid rgba(100,150,255,100); background: rgba(30,50,100,180); }"
         "QCheckBox::indicator:checked { background: rgba(0,120,220,200);"
@@ -3763,11 +3910,11 @@ class _InlineQuestionBubble(QFrame):
         q_lbl.setTextFormat(Qt.TextFormat.RichText)
         q_lbl.setWordWrap(True)
         q_lbl.setText(
-            f'<span style="color:#38c8d8;font-size:11px;">{header_text}</span><br>'
+            f'<span style="color:#38c8d8;font-size:8pt;">{header_text}</span><br>'
             + html.escape(question).replace("\n", "<br>")
         )
         q_lbl.setStyleSheet(
-            "QLabel { color: #d8e8ff; font-size: 13px; background: transparent; }"
+            "QLabel { color: #d8e8ff; font-size: 10pt; background: transparent; }"
         )
         card_vbox.addWidget(q_lbl)
 
@@ -3789,7 +3936,7 @@ class _InlineQuestionBubble(QFrame):
             self._custom_input.setStyleSheet(
                 "QLineEdit { background: rgba(30,45,90,200); color: #d8e8ff;"
                 "border: 1px solid rgba(100,150,255,80); border-radius: 6px;"
-                "padding: 4px 8px; font-size: 12px; }"
+                "padding: 4px 8px; font-size: 9pt; }"
                 "QLineEdit:focus { border-color: rgba(80,160,255,180); }"
                 "QLineEdit:disabled { background: rgba(20,28,55,100); color: rgba(120,140,180,100); }"
             )
@@ -3826,7 +3973,7 @@ class _InlineQuestionBubble(QFrame):
             self._custom_input.setStyleSheet(
                 "QLineEdit { background: rgba(30,45,90,200); color: #d8e8ff;"
                 "border: 1px solid rgba(100,150,255,80); border-radius: 6px;"
-                "padding: 4px 8px; font-size: 12px; }"
+                "padding: 4px 8px; font-size: 9pt; }"
                 "QLineEdit:focus { border-color: rgba(80,160,255,180); }"
             )
             self._custom_input.returnPressed.connect(self._submit_custom)
@@ -3843,7 +3990,7 @@ class _InlineQuestionBubble(QFrame):
         # Answer label (hidden until answered)
         self._answer_lbl = QLabel()
         self._answer_lbl.setStyleSheet(
-            "QLabel { color: #7ddfb0; font-size: 12px; background: transparent; }"
+            "QLabel { color: #7ddfb0; font-size: 9pt; background: transparent; }"
         )
         self._answer_lbl.hide()
         card_vbox.addWidget(self._answer_lbl)
@@ -3972,11 +4119,11 @@ class _InlineConfirmBubble(QFrame):
         hdr = QHBoxLayout()
         hdr.setSpacing(8)
         icon_lbl = QLabel(icon_char)
-        icon_lbl.setStyleSheet("font-size: 18px; background: transparent;")
+        icon_lbl.setStyleSheet("font-size: 14pt; background: transparent;")
         icon_lbl.setFixedWidth(28)
         title_lbl = QLabel("工具執行請求")
         title_lbl.setStyleSheet(
-            "QLabel { color: #d0b0ff; font-size: 13px; font-weight: bold; background: transparent; }"
+            "QLabel { color: #d0b0ff; font-size: 10pt; font-weight: bold; background: transparent; }"
         )
         hdr.addWidget(icon_lbl)
         hdr.addWidget(title_lbl, 1)
@@ -3988,7 +4135,7 @@ class _InlineConfirmBubble(QFrame):
         body_lbl.setWordWrap(True)
         body_lbl.setText(message)
         body_lbl.setStyleSheet(
-            "QLabel { color: #b0b8d8; font-size: 12px; background: transparent; }"
+            "QLabel { color: #b0b8d8; font-size: 9pt; background: transparent; }"
         )
         vbox.addWidget(body_lbl)
 
@@ -3997,7 +4144,7 @@ class _InlineConfirmBubble(QFrame):
             "QPushButton {"
             "background: rgba(0,100,200,180); color: #c8dfff;"
             "border: 1px solid rgba(80,160,255,120); border-radius: 8px;"
-            "padding: 7px 14px; font-size: 12px; text-align: left;"
+            "padding: 7px 14px; font-size: 9pt; text-align: left;"
             "}"
             "QPushButton:hover { background: rgba(0,120,240,210); }"
             "QPushButton:disabled {"
@@ -4009,7 +4156,7 @@ class _InlineConfirmBubble(QFrame):
             "QPushButton {"
             "background: rgba(60,60,80,180); color: #c0c0cc;"
             "border: 1px solid rgba(255,255,255,40); border-radius: 8px;"
-            "padding: 7px 14px; font-size: 12px; text-align: left;"
+            "padding: 7px 14px; font-size: 9pt; text-align: left;"
             "}"
             "QPushButton:hover { background: rgba(80,80,100,210); }"
             "QPushButton:disabled {"
@@ -4031,7 +4178,7 @@ class _InlineConfirmBubble(QFrame):
         # Result label (hidden until answered)
         self._result_lbl = QLabel()
         self._result_lbl.setStyleSheet(
-            "QLabel { font-size: 12px; background: transparent; }"
+            "QLabel { font-size: 9pt; background: transparent; }"
         )
         self._result_lbl.hide()
         vbox.addWidget(self._result_lbl)
@@ -4051,12 +4198,12 @@ class _InlineConfirmBubble(QFrame):
         self._deny_btn.setEnabled(False)
         if allow:
             self._result_lbl.setStyleSheet(
-                "QLabel { color: #7ddfb0; font-size: 12px; background: transparent; }"
+                "QLabel { color: #7ddfb0; font-size: 9pt; background: transparent; }"
             )
             self._result_lbl.setText("✓ 已允許")
         else:
             self._result_lbl.setStyleSheet(
-                "QLabel { color: #df7d7d; font-size: 12px; background: transparent; }"
+                "QLabel { color: #df7d7d; font-size: 9pt; background: transparent; }"
             )
             self._result_lbl.setText("✗ 已拒絕")
         self._result_lbl.show()
@@ -4085,7 +4232,7 @@ class _UserBubble(QFrame):
             img_chip.setStyleSheet(
                 "QLabel { background: rgba(30,60,120,180); color: #a0c8ff; "
                 "border: 1px solid rgba(80,130,220,100); border-radius: 8px; "
-                "padding: 2px 8px; font-size: 11px; }"
+                "padding: 2px 8px; font-size: 8pt; }"
             )
             img_chip.setAlignment(Qt.AlignmentFlag.AlignRight)
             col.addWidget(img_chip, 0, Qt.AlignmentFlag.AlignRight)
@@ -4101,7 +4248,7 @@ class _UserBubble(QFrame):
             "color: #e8f4ff;"
             "border-radius: 14px;"
             "padding: 8px 12px;"
-            "font-size: 13px;"
+            "font-size: 10pt;"
             "}"
         )
         self._text_label.setMaximumWidth(460)
@@ -4132,7 +4279,7 @@ class _AgentBubble(QFrame):
     _STREAM_BROWSER_STYLE = (
         "QTextBrowser {"
         "background: transparent; border: none;"
-        "color: #dde8f8; font-size: 13px; font-family: 'Segoe UI', 'Microsoft JhengHei', sans-serif;"
+        "color: #dde8f8; font-size: 10pt; font-family: 'Segoe UI', 'Microsoft JhengHei', sans-serif;"
         "}"
         "QTextBrowser::viewport { background: transparent; }"
     )
@@ -4234,6 +4381,19 @@ class _AgentBubble(QFrame):
         except Exception:
             pass
 
+        # When async image downloads complete after finalization, the inner browsers
+        # grow but _full_bubble's min/max height is already locked by _resize_full —
+        # listen for the bubble's contentSizeChanged and re-fit.
+        try:
+            self._full_bubble.contentSizeChanged.connect(self._on_full_bubble_grew)
+        except Exception:
+            pass
+
+    def _on_full_bubble_grew(self) -> None:
+        if not self._finalized:
+            return
+        QTimer.singleShot(0, self._resize_full)
+
     # ── Tool events ────────────────────────────────────────────────────
 
     def _tool_icon(self, label: str) -> str:
@@ -4266,7 +4426,7 @@ class _AgentBubble(QFrame):
                 in_flight.append(label)
                 icon = self._tool_icon(label)
                 rows.append(
-                    f'<div style="color:#6eaee8;font-size:10px;font-family:monospace;'
+                    f'<div style="color:#6eaee8;font-size:8pt;font-family:monospace;'
                     f'white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">'
                     f'▶ {icon} {esc(label)}</div>'
                 )
@@ -4276,7 +4436,7 @@ class _AgentBubble(QFrame):
                     icon = self._tool_icon(label)
                     # Replace the last ▶ with ✓ — just append a completion row
                     rows.append(
-                        f'<div style="color:#4db87a;font-size:10px;font-family:monospace;">'
+                        f'<div style="color:#4db87a;font-size:8pt;font-family:monospace;">'
                         f'✓ {icon} {esc(label)}</div>'
                     )
                     # Remove the matching ▶ row (last added for this label)
@@ -4288,13 +4448,13 @@ class _AgentBubble(QFrame):
                 err = line[6:]
                 label = in_flight.pop(0) if in_flight else err
                 rows.append(
-                    f'<div style="color:#f06b6b;font-size:10px;font-family:monospace;">'
+                    f'<div style="color:#f06b6b;font-size:8pt;font-family:monospace;">'
                     f'✗ {esc(label)}</div>'
                 )
             elif line.startswith("[SKILL] "):
                 label = line[8:]
                 rows.append(
-                    f'<div style="color:#c792ea;font-size:10px;">'
+                    f'<div style="color:#c792ea;font-size:8pt;">'
                     f'⚡ {esc(label)}</div>'
                 )
         if not rows:
@@ -4422,7 +4582,7 @@ class _RichBubble(QFrame):
             from PySide6.QtWidgets import QLabel
             lbl = QLabel(content)
             lbl.setWordWrap(True)
-            lbl.setStyleSheet("QLabel { color: #dde8f8; font-size: 13px; }")
+            lbl.setStyleSheet("QLabel { color: #dde8f8; font-size: 10pt; }")
             self._stack.addWidget(lbl)
 
     def _setup_webview(self, content: str) -> None:
@@ -4491,7 +4651,7 @@ class _MemoryViewerDialog(QDialog):
         self.setStyleSheet(
             "QDialog { background: rgb(18,20,30); }"
             "QTextBrowser { background: rgb(22,24,36); border: 1px solid rgba(255,255,255,18); "
-            "border-radius: 8px; color: #d0dff0; font-size: 12px; padding: 6px; }"
+            "border-radius: 8px; color: #d0dff0; font-size: 9pt; padding: 6px; }"
             "QTextBrowser::viewport { background: transparent; }"
         )
         v = QVBoxLayout(self)
@@ -4499,7 +4659,7 @@ class _MemoryViewerDialog(QDialog):
         v.setSpacing(8)
 
         hdr = QLabel(f"<b style='color:#90b0e0'>{html.escape(label)}</b>"
-                     f"<span style='color:#506070;font-size:10px;'> ({html.escape(fname)})</span>")
+                     f"<span style='color:#506070;font-size:8pt;'> ({html.escape(fname)})</span>")
         hdr.setTextFormat(Qt.TextFormat.RichText)
         v.addWidget(hdr)
 
@@ -4518,7 +4678,7 @@ class _MemoryViewerDialog(QDialog):
         close_btn.setFixedHeight(28)
         close_btn.setStyleSheet(
             "QPushButton { background: rgba(50,65,100,200); color: #90b0e0; "
-            "border: 1px solid rgba(90,130,200,60); border-radius: 8px; font-size: 11px; padding: 0 16px; }"
+            "border: 1px solid rgba(90,130,200,60); border-radius: 8px; font-size: 8pt; padding: 0 16px; }"
             "QPushButton:hover { background: rgba(65,85,130,230); }"
         )
         close_btn.clicked.connect(self.accept)
@@ -4540,15 +4700,17 @@ class ChatWindow(QMainWindow):
     new_conversation_requested = Signal()
     history_resume_requested = Signal(str)
     history_delete_requested = Signal(str)
+    # Cross-thread trigger for opening the config webview (queued connection).
+    _open_config_webview_request = Signal()
 
     _CHIP_STYLE = (
         "QLabel { background: rgba(45,55,80,200); color: #a8d4ff; "
         "border: 1px solid rgba(90,140,220,100); border-radius: 8px; "
-        "padding: 2px 8px; font-size: 11px; }"
+        "padding: 2px 8px; font-size: 8pt; }"
     )
     _CHIP_CLOSE_STYLE = (
         "QPushButton { background: transparent; color: rgba(160,170,200,160); "
-        "border: none; font-size: 9px; padding: 0; } "
+        "border: none; font-size: 7pt; padding: 0; } "
         "QPushButton:hover { color: #ff6b6b; }"
     )
 
@@ -4595,6 +4757,8 @@ class ChatWindow(QMainWindow):
         self.confirm_requested.connect(self._handle_confirm_request)
         self.question_requested.connect(self._handle_question_request)
         self.render_rich_requested.connect(self.insert_rich_content)
+        # Cross-thread open-config trigger.
+        self._open_config_webview_request.connect(self._open_config_webview_on_gui_thread)
 
     def set_history_sessions(self, sessions: list[dict[str, object]]) -> None:
         self._history_sessions = list(sessions or [])
@@ -4679,7 +4843,7 @@ class ChatWindow(QMainWindow):
 
         hdr = QLabel("History")
         hdr.setStyleSheet(
-            "QLabel { color: #88c0f0; font-size: 12px; font-weight: bold; "
+            "QLabel { color: #88c0f0; font-size: 9pt; font-weight: bold; "
             "background: transparent; border: none; }"
         )
         hdr_layout.addWidget(hdr, 1)
@@ -4691,7 +4855,7 @@ class ChatWindow(QMainWindow):
         self._new_chat_btn.setStyleSheet(
             "QPushButton { background: rgba(46,72,132,180); color: #e6f0ff; "
             "border: 1px solid rgba(98,140,220,110); border-radius: 6px; "
-            "padding: 0 10px; font-size: 11px; }"
+            "padding: 0 10px; font-size: 8pt; }"
             "QPushButton:hover { background: rgba(58,86,150,210); }"
             "QPushButton:disabled { background: rgba(40,48,72,120); color: rgba(190,205,225,110); "
             "border: 1px solid rgba(80,100,140,60); }"
@@ -4704,7 +4868,7 @@ class ChatWindow(QMainWindow):
         self._history_list.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
         self._history_list.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._history_list.setStyleSheet(
-            "QListWidget { background: transparent; border: none; color: #b8cce4; font-size: 11px; }"
+            "QListWidget { background: transparent; border: none; color: #b8cce4; font-size: 8pt; }"
             "QListWidget::item { border-radius: 5px; outline: none; }"
             "QListWidget::item:hover { background: rgba(80,110,180,55); }"
             "QScrollBar:vertical { width: 4px; background: transparent; }"
@@ -4746,13 +4910,13 @@ class ChatWindow(QMainWindow):
         text_layout.setSpacing(2)
 
         title = QLabel(self._history_title_text(preview))
-        title.setStyleSheet("QLabel { color: #d8e6ff; font-size: 11px; background: transparent; }")
+        title.setStyleSheet("QLabel { color: #d8e6ff; font-size: 8pt; background: transparent; }")
         title.setTextInteractionFlags(Qt.TextInteractionFlag.NoTextInteraction)
         title.setWordWrap(True)
         text_layout.addWidget(title)
 
         subtitle = QLabel(self._history_subtitle_text(turns, updated))
-        subtitle.setStyleSheet("QLabel { color: rgba(184,204,228,160); font-size: 10px; background: transparent; }")
+        subtitle.setStyleSheet("QLabel { color: rgba(184,204,228,160); font-size: 8pt; background: transparent; }")
         subtitle.setWordWrap(True)
         subtitle.setTextInteractionFlags(Qt.TextInteractionFlag.NoTextInteraction)
         text_layout.addWidget(subtitle)
@@ -4774,7 +4938,7 @@ class ChatWindow(QMainWindow):
         menu_btn.setToolTip("Conversation actions")
         menu_btn.setStyleSheet(
             "QToolButton { background: transparent; color: rgba(185,205,235,170); "
-            "border: none; border-radius: 4px; font-size: 12px; }"
+            "border: none; border-radius: 4px; font-size: 9pt; }"
             "QToolButton:hover { background: rgba(255,255,255,12); color: #e8f0ff; }"
             "QToolButton::menu-indicator { image: none; width: 0px; }"
         )
@@ -4858,14 +5022,14 @@ class ChatWindow(QMainWindow):
         )
         _BROWSER_STYLE = (
             "QTextBrowser { background: transparent; border: none; "
-            "color: #b8cce4; font-size: 11px; }"
+            "color: #b8cce4; font-size: 8pt; }"
             "QTextBrowser::viewport { background: transparent; padding: 0; }"
             "QScrollBar:vertical { width: 4px; background: transparent; }"
             "QScrollBar::handle:vertical { background: rgba(80,110,200,80); border-radius: 2px; }"
             "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; }"
         )
         _HDR_STYLE = (
-            "QLabel { font-size: 11px; font-weight: bold; "
+            "QLabel { font-size: 8pt; font-weight: bold; "
             "border: none; background: transparent; padding: 2px 0; }"
         )
         _SEP_STYLE = "background: rgba(80,100,200,25);"
@@ -4924,7 +5088,7 @@ class ChatWindow(QMainWindow):
 
         self._mem_list = QListWidget()
         self._mem_list.setStyleSheet(
-            "QListWidget { background: transparent; border: none; color: #b0c8e8; font-size: 11px; }"
+            "QListWidget { background: transparent; border: none; color: #b0c8e8; font-size: 8pt; }"
             "QListWidget::item { padding: 4px 2px; border-radius: 4px; }"
             "QListWidget::item:hover { background: rgba(80,110,180,60); }"
             "QListWidget::item:selected { background: rgba(60,90,160,100); }"
@@ -4984,12 +5148,12 @@ class ChatWindow(QMainWindow):
 
         # Glowing dot indicator
         dot = QLabel("●")
-        dot.setStyleSheet("color: #38c8e0; font-size: 10px;")
+        dot.setStyleSheet("color: #38c8e0; font-size: 8pt;")
         h.addWidget(dot)
 
         title = QLabel("AI Assistant")
         title.setStyleSheet(
-            "color: #c8deff; font-size: 14px; font-weight: bold; letter-spacing: 0.5px;"
+            "color: #c8deff; font-size: 11pt; font-weight: bold; letter-spacing: 0.5px;"
         )
         h.addWidget(title)
         h.addStretch(1)
@@ -5000,7 +5164,7 @@ class ChatWindow(QMainWindow):
         self._compact_label.setStyleSheet(
             "QLabel { background: rgba(90,60,160,210); color: #ddc8ff; "
             "border: 1px solid rgba(180,140,255,120); border-radius: 11px; "
-            "font-size: 10px; padding: 0 10px; }"
+            "font-size: 8pt; padding: 0 10px; }"
         )
         self._compact_label.hide()
         self._compact_pulse_timer = QTimer(self)
@@ -5014,7 +5178,7 @@ class ChatWindow(QMainWindow):
         switch_btn.setStyleSheet(
             "QPushButton { background: rgba(36,48,90,210); color: #88c0f0; "
             "border: 1px solid rgba(70,110,220,80); border-radius: 8px; "
-            "font-size: 11px; padding: 0 12px; }"
+            "font-size: 8pt; padding: 0 12px; }"
             "QPushButton:hover { background: rgba(50,68,120,235); color: #b8d8ff; "
             "border: 1px solid rgba(90,140,255,120); }"
         )
@@ -5130,12 +5294,12 @@ class ChatWindow(QMainWindow):
 
         self._voice_btn_idle_style = (
             "QPushButton { background: transparent; color: rgba(200,200,220,190); "
-            "border: none; font-size: 14px; border-radius: 14px; }"
+            "border: none; font-size: 11pt; border-radius: 14px; }"
             "QPushButton:hover { background: rgba(255,255,255,12); }"
         )
         self._voice_btn_cancel_style = (
             "QPushButton { background: rgba(180,40,40,200); color: #fff; "
-            "border: none; font-size: 13px; border-radius: 14px; }"
+            "border: none; font-size: 10pt; border-radius: 14px; }"
             "QPushButton:hover { background: rgba(210,55,55,230); }"
         )
 
@@ -5148,7 +5312,7 @@ class ChatWindow(QMainWindow):
         self.input_field.setPlaceholderText("輸入文字、指令或按🎤啟動語音...")
         self.input_field.setStyleSheet(
             "QLineEdit { background: transparent; color: #e8eaf0; "
-            "border: none; padding: 2px 4px; font-size: 12px; }"
+            "border: none; padding: 2px 4px; font-size: 9pt; }"
         )
         self.input_field.returnPressed.connect(self.on_input_submitted)
         try:
@@ -5161,12 +5325,12 @@ class ChatWindow(QMainWindow):
 
         self._send_btn_send_style = (
             "QPushButton { background: #2FBF71; color: #fff; border: none; "
-            "border-radius: 12px; font-weight: bold; font-size: 12px; }"
+            "border-radius: 12px; font-weight: bold; font-size: 9pt; }"
             "QPushButton:hover { background: #28A862; }"
         )
         self._send_btn_stop_style = (
             "QPushButton { background: rgba(210,55,55,220); color: #fff; border: none; "
-            "border-radius: 12px; font-size: 11px; padding: 0 0 1px 0; }"
+            "border-radius: 12px; font-size: 8pt; padding: 0 0 1px 0; }"
             "QPushButton:hover { background: rgba(230,70,70,240); }"
         )
 
@@ -5190,10 +5354,10 @@ class ChatWindow(QMainWindow):
         # Toolbar row
         _tbtn = (
             "QPushButton { background: transparent; color: rgba(150,165,185,160); "
-            "border: none; font-size: 12px; padding: 0 4px; border-radius: 4px; } "
+            "border: none; font-size: 9pt; padding: 0 4px; border-radius: 4px; } "
             "QPushButton:hover { color: rgba(210,225,255,220); background: rgba(255,255,255,8); }"
         )
-        _tlbl = "QLabel { color: rgba(140,158,180,150); font-size: 10px; background: transparent; }"
+        _tlbl = "QLabel { color: rgba(140,158,180,150); font-size: 8pt; background: transparent; }"
 
         toolbar_row = QWidget()
         toolbar_row.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
@@ -5383,20 +5547,22 @@ class ChatWindow(QMainWindow):
             self._compact_pulse_timer.stop()
             self._compact_label.hide()
 
+    _COMPACT_PULSE_ON = (
+        "QLabel { background: rgba(110,75,190,230); color: #eedeff; "
+        "border: 1px solid rgba(200,160,255,160); border-radius: 11px; "
+        "font-size: 8pt; padding: 0 10px; }"
+    )
+    _COMPACT_PULSE_OFF = (
+        "QLabel { background: rgba(70,45,130,180); color: #c8aaee; "
+        "border: 1px solid rgba(160,120,220,90); border-radius: 11px; "
+        "font-size: 8pt; padding: 0 10px; }"
+    )
+
     def _pulse_compact_label(self) -> None:
         self._compact_pulse_phase = 1 - self._compact_pulse_phase
-        if self._compact_pulse_phase:
-            self._compact_label.setStyleSheet(
-                "QLabel { background: rgba(110,75,190,230); color: #eedeff; "
-                "border: 1px solid rgba(200,160,255,160); border-radius: 11px; "
-                "font-size: 10px; padding: 0 10px; }"
-            )
-        else:
-            self._compact_label.setStyleSheet(
-                "QLabel { background: rgba(70,45,130,180); color: #c8aaee; "
-                "border: 1px solid rgba(160,120,220,90); border-radius: 11px; "
-                "font-size: 10px; padding: 0 10px; }"
-            )
+        new_style = self._COMPACT_PULSE_ON if self._compact_pulse_phase else self._COMPACT_PULSE_OFF
+        if self._compact_label.styleSheet() != new_style:
+            self._compact_label.setStyleSheet(new_style)
 
     def update_context_meter(self, used_tokens: int, max_tokens: int, total_tokens: int = 0) -> None:
         def _fmt(n: int) -> str:
@@ -5410,7 +5576,7 @@ class ChatWindow(QMainWindow):
             pct = min(100, round(used_tokens * 100 / max_tokens))
             ctx_color = "#f06b6b" if pct >= 80 else "#f0c060" if pct >= 50 else "rgba(160,180,200,160)"
             self._ctx_label.setText(f"ctx {_fmt(used_tokens)}/{_fmt(max_tokens)} ({pct}%)")
-            self._ctx_label.setStyleSheet(f"QLabel {{ color: {ctx_color}; font-size: 10px; }}")
+            self._ctx_label.setStyleSheet(f"QLabel {{ color: {ctx_color}; font-size: 8pt; }}")
         if total_tokens > 0:
             self._total_tok_label.setText(f"Σ {_fmt(total_tokens)}")
         else:
@@ -5465,6 +5631,15 @@ class ChatWindow(QMainWindow):
         return paths
 
     def open_config_webview(self) -> None:
+        """Open the config webview. Thread-safe: bounces to GUI thread via a
+        queued signal when called from a worker thread."""
+        if QThread.currentThread() != self.thread():
+            self._open_config_webview_request.emit()
+            return
+        self._open_config_webview_on_gui_thread()
+
+    @Slot()
+    def _open_config_webview_on_gui_thread(self) -> None:
         try:
             if not HAS_WEBENGINE:
                 return
@@ -5562,12 +5737,12 @@ class ChatWindow(QMainWindow):
         self._bypass_mode = checked
         _on = (
             "QPushButton { background: rgba(220,120,0,180); color: #ffe0a0; "
-            "border: none; font-size: 12px; padding: 0 4px; border-radius: 4px; } "
+            "border: none; font-size: 9pt; padding: 0 4px; border-radius: 4px; } "
             "QPushButton:hover { background: rgba(240,140,0,210); }"
         )
         _off = (
             "QPushButton { background: transparent; color: rgba(150,165,185,160); "
-            "border: none; font-size: 12px; padding: 0 4px; border-radius: 4px; } "
+            "border: none; font-size: 9pt; padding: 0 4px; border-radius: 4px; } "
             "QPushButton:hover { color: rgba(210,225,255,220); background: rgba(255,255,255,8); }"
         )
         if checked:
@@ -5876,11 +6051,11 @@ class ChoiceDialog(QDialog):
             border-radius: 14px;
         }
         QLabel#icon {
-            font-size: 22px;
+            font-size: 17pt;
         }
         QLabel#question {
             color: #f0f0f0;
-            font-size: 14px;
+            font-size: 11pt;
             line-height: 1.5;
         }
         QFrame#sep {
@@ -5892,7 +6067,7 @@ class ChoiceDialog(QDialog):
             border: 1px solid rgba(255, 255, 255, 40);
             border-radius: 9px;
             padding: 10px 16px;
-            font-size: 13px;
+            font-size: 10pt;
             text-align: left;
         }
         QPushButton#option:hover {
@@ -5908,13 +6083,13 @@ class ChoiceDialog(QDialog):
         "QLineEdit { "
         "background: rgba(50,52,65,220); color: #e8eaf0; "
         "border: 1px solid rgba(255,255,255,50); border-radius: 8px; "
-        "padding: 8px 12px; font-size: 13px; "
+        "padding: 8px 12px; font-size: 10pt; "
         "}"
         "QLineEdit:focus { border-color: rgba(80,150,255,180); }"
         "QLineEdit:disabled { background: rgba(30,35,48,180); color: rgba(140,150,170,120); }"
     )
     _CB_STYLE = (
-        "QCheckBox { color: #dde8f8; font-size: 13px; spacing: 8px; }"
+        "QCheckBox { color: #dde8f8; font-size: 10pt; spacing: 8px; }"
         "QCheckBox::indicator { width: 18px; height: 18px; border-radius: 5px;"
         "border: 1px solid rgba(255,255,255,40); background: rgba(58,58,68,220); }"
         "QCheckBox::indicator:checked { background: rgba(0,112,240,200);"
@@ -5976,7 +6151,7 @@ class ChoiceDialog(QDialog):
             confirm_btn.setCursor(Qt.CursorShape.PointingHandCursor)
             confirm_btn.setStyleSheet(
                 "QPushButton { background: rgba(0,100,220,200); color: #fff; "
-                "border: none; border-radius: 9px; padding: 10px 16px; font-size: 13px; }"
+                "border: none; border-radius: 9px; padding: 10px 16px; font-size: 10pt; }"
                 "QPushButton:hover { background: rgba(0,120,255,220); }"
             )
             confirm_btn.clicked.connect(self._submit_text)
@@ -6016,7 +6191,7 @@ class ChoiceDialog(QDialog):
             confirm_btn.setCursor(Qt.CursorShape.PointingHandCursor)
             confirm_btn.setStyleSheet(
                 "QPushButton { background: rgba(0,100,220,200); color: #fff; "
-                "border: none; border-radius: 9px; padding: 10px 16px; font-size: 13px; }"
+                "border: none; border-radius: 9px; padding: 10px 16px; font-size: 10pt; }"
                 "QPushButton:hover { background: rgba(0,120,255,220); }"
             )
             confirm_btn.clicked.connect(self._submit_multi)
@@ -6052,7 +6227,7 @@ class ChoiceDialog(QDialog):
             confirm_custom_btn.setCursor(Qt.CursorShape.PointingHandCursor)
             confirm_custom_btn.setStyleSheet(
                 "QPushButton { background: rgba(0,100,220,200); color: #fff; "
-                "border: none; border-radius: 9px; padding: 10px 16px; font-size: 13px; }"
+                "border: none; border-radius: 9px; padding: 10px 16px; font-size: 10pt; }"
                 "QPushButton:hover { background: rgba(0,120,255,220); }"
             )
             confirm_custom_btn.clicked.connect(self._submit_custom)
@@ -6116,17 +6291,17 @@ class ConfirmDialog(QDialog):
             background-color: #1c1c1e;
             border-radius: 14px;
         }
-        QLabel#icon { font-size: 22px; }
+        QLabel#icon { font-size: 17pt; }
         QLabel#title {
             color: #f0f0f0;
-            font-size: 15px;
+            font-size: 11pt;
             font-weight: bold;
         }
         QFrame#sep { color: rgba(255,255,255,25); }
         QTextBrowser#body {
             background-color: rgba(30,30,38,180);
             color: #b8b8bc;
-            font-size: 12px;
+            font-size: 9pt;
             border: 1px solid rgba(255,255,255,18);
             border-radius: 6px;
             padding: 6px;
@@ -6145,7 +6320,7 @@ class ConfirmDialog(QDialog):
             border: 1px solid rgba(80, 160, 255, 180);
             border-radius: 9px;
             padding: 10px 16px;
-            font-size: 13px;
+            font-size: 10pt;
             text-align: left;
         }
         QPushButton#allow:hover  { background-color: rgba(0, 130, 255, 220); }
@@ -6156,7 +6331,7 @@ class ConfirmDialog(QDialog):
             border: 1px solid rgba(255,255,255,35);
             border-radius: 9px;
             padding: 10px 16px;
-            font-size: 13px;
+            font-size: 10pt;
             text-align: left;
         }
         QPushButton#deny:hover  { background-color: rgba(80, 80, 92, 220); }
